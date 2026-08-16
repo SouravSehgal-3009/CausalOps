@@ -1,0 +1,21 @@
+.env
+.venv/
+
+__pycache__/
+*.py[cod]
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+build/
+dist/
+*.egg-info/
+
+runs/
+results/
+
+# Local-only project documents
+AGENTS.md
+CLAUDE.md
+TECHNICAL_OVERVIEW.md

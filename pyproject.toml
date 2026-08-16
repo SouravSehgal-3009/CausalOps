@@ -1,0 +1,42 @@
+[project]
+name = "causalops"
+version = "0.1.0"
+description = "Evidence-grounded incident investigator for a local synthetic lab"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "psutil>=6",
+    "pydantic>=2",
+]
+
+[project.scripts]
+causalops = "causalops.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/causalops"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8",
+    "ruff>=0.6",
+    "types-psutil>=6",
+]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
