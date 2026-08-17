@@ -40,7 +40,12 @@ def finished_run() -> tuple[InvestigationResult, RunRecorder]:
 def finalize(results_root: Path) -> tuple[Path, InvestigationResult]:
     result, recorder = finished_run()
     written = finalize_investigation(
-        results_root, result.report, recorder.events, result.evidence, result.receipts
+        results_root,
+        result.report,
+        recorder.events,
+        result.evidence,
+        result.receipts,
+        "# Investigation\n",
     )
     return written, result
 
@@ -70,6 +75,7 @@ def test_finalizing_writes_the_report_and_its_artifacts(tmp_path: Path) -> None:
         len((written / "receipts.jsonl").read_text(encoding="utf-8").splitlines()) == 2
     )
     assert (written / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert (written / "report.md").read_text(encoding="utf-8") == "# Investigation\n"
 
 
 def test_finalizing_leaves_no_staging_directory_behind(tmp_path: Path) -> None:
@@ -84,7 +90,7 @@ def test_a_finalized_investigation_is_never_overwritten(tmp_path: Path) -> None:
     original = (written / "report.json").read_text(encoding="utf-8")
 
     with pytest.raises(RunRecordError) as refused:
-        finalize_investigation(tmp_path, result.report, (), (), ())
+        finalize_investigation(tmp_path, result.report, (), (), (), "# Investigation\n")
 
     assert refused.value.reason_code is ReasonCode.RESULT_ALREADY_FINALIZED
     assert (written / "report.json").read_text(encoding="utf-8") == original

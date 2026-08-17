@@ -1,0 +1,84 @@
+{
+  "responses": {
+    "initial_plan": [
+      {
+        "schema_version": "1",
+        "hypotheses": [
+          {
+            "root_cause": "CONFIG_CHANGE",
+            "rank": 1,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "orders error rows naming a setting"
+          },
+          {
+            "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+            "rank": 2,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "inventory timeout rate in the window"
+          }
+        ],
+        "proposal": {
+          "arguments": {
+            "tool": "query_logs",
+            "log_filter": "errors_only",
+            "service": "orders",
+            "window_start": "{{window_start}}",
+            "window_end": "{{window_end}}",
+            "row_limit": 20
+          },
+          "evidence_gap": "what orders says when it rejects a request",
+          "expected_observation": "error rows from orders during the window"
+        },
+        "stop_reason": null
+      }
+    ],
+    "hypothesis_update": [
+      {
+        "schema_version": "1",
+        "hypotheses": [
+          {
+            "root_cause": "CONFIG_CHANGE",
+            "rank": 1,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "a change on orders that matches the rejections"
+          },
+          {
+            "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+            "rank": 2,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "inventory timeout rate in the window"
+          }
+        ],
+        "proposal": {
+          "arguments": {
+            "tool": "list_recent_changes",
+            "service": "orders",
+            "window_start": "{{window_start}}",
+            "window_end": "{{window_end}}"
+          },
+          "evidence_gap": "whether anything changed on orders before the errors",
+          "expected_observation": "recent changes recorded for orders"
+        },
+        "stop_reason": null
+      }
+    ],
+    "final_assessment": [
+      {
+        "schema_version": "1",
+        "disposition": "DIAGNOSED",
+        "root_cause": "CONFIG_CHANGE",
+        "supporting_evidence_ids": [
+          "{{symptom_evidence_id}}",
+          "{{evidence_from_last_check}}"
+        ],
+        "contrary_evidence_ids": [],
+        "uncertainty": "the change list is short, so an unrecorded change is possible",
+        "next_step": "ask the owner to confirm the orders setting that changed"
+      }
+    ]
+  }
+}

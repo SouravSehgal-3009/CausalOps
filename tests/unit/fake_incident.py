@@ -37,7 +37,9 @@ from causalops.tools import (
     QueryMetricArguments,
 )
 
-FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "replay"
+FIXTURE_DIR = (
+    Path(__file__).resolve().parents[2] / "src" / "causalops" / "replay_fixtures"
+)
 
 INCIDENT_ID = "0f9c2b7e4a1d4f0b8c6e5d3a2b1c0d9e"
 SYMPTOM_EVIDENCE_ID = "5c1d0a9b8e7f6a5b4c3d2e1f0a9b8c7d"

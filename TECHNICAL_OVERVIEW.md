@@ -213,7 +213,11 @@ src/causalops/
   tools.py
   policy.py
   evidence.py
+  prometheus.py
+  telemetry.py
   run_records.py
+  scenario_control.py
+  report.py
   evaluation.py
 lab/
   services/

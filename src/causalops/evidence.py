@@ -1,6 +1,11 @@
-"""Incident-scoped evidence: opaque IDs, content hashes, ordering, quotas, digests."""
+"""Incident-scoped evidence: opaque IDs, content hashes, ordering, quotas, digests.
+
+The bounds a tool result must respect live here too, beside the context quotas, so
+that every backend shapes its result the same way.
+"""
 
 import json
+import time
 from collections.abc import Iterable
 from datetime import datetime
 from hashlib import sha256
@@ -8,7 +13,15 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
-from causalops.domain import Evidence, EvidenceKind
+from causalops.domain import (
+    CheckOutcome,
+    Evidence,
+    EvidenceKind,
+    ReasonCode,
+    ToolOutcome,
+)
+
+MAX_RESULT_BYTES = 12 * 1024
 
 # Fixed per-kind quotas keep the model context bounded and the same size for the
 # same evidence, whatever order it arrived in.
@@ -53,6 +66,48 @@ def build_evidence(
         receipt_id=receipt_id,
         content_hash=content_hash(payload),
     )
+
+
+def failed_check(
+    kind: EvidenceKind, source: str, outcome: ToolOutcome, reason: ReasonCode, note: str
+) -> CheckOutcome:
+    return CheckOutcome(
+        outcome=outcome, kind=kind, source=source, summary=note, reason_code=reason
+    )
+
+
+def executed_check(
+    kind: EvidenceKind,
+    source: str,
+    summary: str,
+    payload: dict[str, JsonValue],
+    started: float,
+) -> CheckOutcome:
+    return CheckOutcome(
+        outcome=ToolOutcome.EXECUTED,
+        kind=kind,
+        source=source,
+        summary=summary,
+        payload=payload,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+def fits(payload: dict[str, JsonValue]) -> bool:
+    return len(json.dumps(payload).encode("utf-8")) <= MAX_RESULT_BYTES
+
+
+def trim_to_bytes(
+    payload: dict[str, JsonValue], rows_key: str, rows: list[JsonValue]
+) -> dict[str, JsonValue]:
+    """Drop rows from the end until the whole result fits the byte bound."""
+    kept = list(rows)
+    payload[rows_key] = kept
+    while kept and not fits(payload):
+        kept.pop()
+        payload[rows_key] = kept
+        payload["truncated"] = True
+    return payload
 
 
 class EvidenceStore:

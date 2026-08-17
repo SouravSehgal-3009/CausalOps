@@ -22,14 +22,19 @@ packages = ["src/causalops"]
 [dependency-groups]
 dev = [
     "mypy>=1.11",
+    # The lab services need this inside their image; it is here so their unit tests
+    # can import them on the host. lab/services/Dockerfile pins the same version.
+    "prometheus-client>=0.21",
     "pytest>=8",
+    "pyyaml>=6",
     "ruff>=0.6",
     "types-psutil>=6",
+    "types-pyyaml>=6",
 ]
 
 [tool.ruff]
 line-length = 88
-src = ["src", "tests"]
+src = ["src", "lab", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -40,3 +45,5 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["lab/services"]
+markers = ["docker: needs the local lab containers"]

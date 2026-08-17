@@ -102,6 +102,7 @@ class Budgets(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     wall_clock_seconds: int = 360
+    tool_timeout_seconds: int = 10
     model_calls: int = 4
     executed_tools: int = 2
     repairs: int = 1
@@ -176,6 +177,21 @@ class InitialAlertPacket(BaseModel):
     alert_source_version: str
     symptom_evidence_id: str
     topology_evidence_id: str
+
+
+class StoredIncident(BaseModel):
+    """What the scenario controller leaves behind for `investigate` to pick up.
+
+    Investigator-visible only: an opaque scope, the answer-neutral packet, and the
+    packet's own evidence. Expected outcomes live elsewhere.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: str = SCHEMA_VERSION
+    scope: IncidentScope
+    packet: InitialAlertPacket
+    evidence: tuple[Evidence, ...]
 
 
 class Hypothesis(BaseModel):

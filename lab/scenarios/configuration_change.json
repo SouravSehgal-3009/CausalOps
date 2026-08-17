@@ -1,0 +1,39 @@
+{
+  "family": "configuration_change",
+  "endpoint": "/api/orders",
+  "services": ["gateway", "orders", "inventory"],
+  "symptom": "ELEVATED_ERRORS",
+  "healthy_config": {"require_order_token": false},
+  "faulted_config": {"require_order_token": true},
+  "baseline_requests": 6,
+  "fault_requests": 10,
+  "changes": [
+    {
+      "service": "orders",
+      "summary": "configuration update: require_order_token enabled",
+      "offset_seconds": -60
+    },
+    {
+      "service": "inventory",
+      "summary": "image rebuild: dependency bump to 2.4.1",
+      "offset_seconds": -240
+    }
+  ],
+  "topology": {
+    "services": ["gateway", "orders", "inventory"],
+    "edges": ["gateway>orders", "orders>inventory"]
+  },
+  "expected": {
+    "root_cause": "CONFIG_CHANGE",
+    "disposition": "DIAGNOSED",
+    "predicates": [
+      {
+        "source": "list_recent_changes",
+        "kind": "CHANGE",
+        "field": "summaries",
+        "operator": "CONTAINS",
+        "value": "require_order_token"
+      }
+    ]
+  }
+}
