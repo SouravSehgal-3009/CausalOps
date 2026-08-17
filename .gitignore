@@ -15,7 +15,6 @@ dist/
 runs/
 results/
 
-# Local-only project documents
+# Contributor instructions stay local; the product specification is not ignored.
 AGENTS.md
 CLAUDE.md
-TECHNICAL_OVERVIEW.md

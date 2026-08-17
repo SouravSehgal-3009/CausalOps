@@ -1,0 +1,73 @@
+{
+  "responses": {
+    "initial_plan": [
+      {
+        "schema_version": "1",
+        "hypotheses": [
+          {
+            "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+            "rank": 1,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "inventory timeout rate in the window"
+          },
+          {
+            "root_cause": "RESOURCE_POOL_SATURATION",
+            "rank": 2,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "orders pool usage in the window"
+          }
+        ],
+        "proposal": {
+          "arguments": {
+            "tool": "query_metric",
+            "template": "gateway_latency_p95",
+            "service": "gateway",
+            "window_start": "2026-08-16T10:00:00Z",
+            "window_end": "2026-08-16T10:30:00Z"
+          },
+          "evidence_gap": "how latency moved during the window",
+          "expected_observation": "a latency rise at the gateway"
+        },
+        "stop_reason": null
+      }
+    ],
+    "hypothesis_update": [
+      {
+        "schema_version": "1",
+        "hypotheses": [
+          {
+            "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+            "rank": 1,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "inventory timeout rate in the window"
+          },
+          {
+            "root_cause": "RESOURCE_POOL_SATURATION",
+            "rank": 2,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "orders pool usage in the window"
+          }
+        ],
+        "proposal": null,
+        "stop_reason": "no remaining safe check separates the causes"
+      }
+    ],
+    "final_assessment": [
+      {
+        "schema_version": "1",
+        "disposition": "INSUFFICIENT_EVIDENCE",
+        "root_cause": "UNDETERMINED",
+        "supporting_evidence_ids": [
+          "5c1d0a9b8e7f6a5b4c3d2e1f0a9b8c7d"
+        ],
+        "contrary_evidence_ids": [],
+        "uncertainty": "one check could not separate the two remaining causes",
+        "next_step": "ask the owner to confirm the inventory timeout setting"
+      }
+    ]
+  }
+}

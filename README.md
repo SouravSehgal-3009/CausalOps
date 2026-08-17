@@ -7,7 +7,10 @@ points at it; it does not define behavior.
 
 ## Status
 
-Early. Only the environment check below is implemented.
+The environment check below and the investigation core library are implemented:
+domain contracts, the replay reasoning model, the tool registry, policy, budgets,
+the evidence store, the investigation loop, run records, and scoring. There is no
+synthetic lab and no `investigate` command yet.
 
 ## Check this machine
 
