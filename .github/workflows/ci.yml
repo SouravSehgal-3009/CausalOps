@@ -5,8 +5,14 @@ on:
   pull_request:
 
 jobs:
-  windows-checks:
-    runs-on: windows-latest
+  checks:
+    # Both supported platforms run the same five commands. Windows support is
+    # proven here rather than by a manual run, since work happens on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -17,6 +23,6 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy src lab
-      # The lab containers are not started in CI, so their integration tests are
-      # deselected here and run by the owner on the reference machine.
+      # The lab containers are not started in CI on either platform, so their
+      # integration tests are deselected and the owner runs them by hand.
       - run: uv run pytest -m "not docker"

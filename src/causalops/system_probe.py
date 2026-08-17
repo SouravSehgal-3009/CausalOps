@@ -7,18 +7,41 @@ import sys
 from pathlib import Path
 
 import psutil
+from pydantic import BaseModel, ConfigDict
 
 DOCKER_TIMEOUT_SECONDS = 10
+
+
+class OperatingSystem(BaseModel):
+    """What the machine says it is."""
+
+    model_config = ConfigDict(frozen=True)
+
+    system: str
+    release: str
+    machine: str
+    windows_build: int | None = None
 
 
 class SystemProbe:
     """The only code that touches the real machine, so tests inject a fake instead."""
 
-    def windows_build(self) -> int | None:
-        """Windows build number, or None when this is not Windows at all."""
-        if platform.system() != "Windows":
-            return None
-        return sys.getwindowsversion().build
+    def operating_system(self) -> OperatingSystem:
+        """The readings the OS check judges, on whichever platform this is.
+
+        The build number is read behind `sys.platform`, which is the comparison
+        mypy narrows on. `platform.system()` looks equivalent but narrows nothing,
+        so type checking off Windows would fail on a call that cannot exist there.
+        """
+        build: int | None = None
+        if sys.platform == "win32":
+            build = sys.getwindowsversion().build
+        return OperatingSystem(
+            system=platform.system(),
+            release=platform.release(),
+            machine=platform.machine(),
+            windows_build=build,
+        )
 
     def total_memory_bytes(self) -> int:
         return int(psutil.virtual_memory().total)

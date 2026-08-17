@@ -123,14 +123,19 @@ historical metric queries. Claude is accessed through Anthropic's hosted API.
 evaluation code are Python; Docker and Prometheus are local infrastructure
 dependencies.
 
-### Reference development platform
+### Supported development platforms
 
-The supported owner environment is Windows 11 with at least 7.5 GiB detected
-total RAM and 12 GB free disk. Python, `uv`, Git, and Claude Code run natively
-from PowerShell. Docker Desktop uses its WSL2 backend only for the
-gateway, orders, inventory, and Prometheus containers; WSL is not the project
-shell. Docker Desktop is an owner-installed prerequisite; project automation
-does not install or upgrade it.
+CausalOps supports two owner environments, each with at least 7.5 GiB detected
+total RAM and 12 GB free disk:
+
+- **Windows 11.** Python, `uv`, Git, and Claude Code run natively from
+  PowerShell. Docker Desktop uses its WSL2 backend only for the gateway,
+  orders, inventory, and Prometheus containers; WSL is not the project shell.
+- **Linux x86-64.** The same tools run from the system shell, and Docker
+  Engine runs the same four containers directly.
+
+Docker is an owner-installed prerequisite on both; project automation does not
+install or upgrade it.
 
 Project-authored code uses `pathlib.Path`, UTF-8, injected UTC timestamps, and
 cross-platform Python APIs. Project commands and documentation must not depend
@@ -484,7 +489,7 @@ causalops benchmark --model claude --variant evaluation --repetitions 3 --max-co
 causalops benchmark --model claude --variant evaluation --repetitions 3 --max-cost-usd 1.75 --resume <evaluation-id>
 ```
 
-- `doctor` checks the Windows version, at least 7.5 GiB detected total RAM,
+- `doctor` checks the operating system, at least 7.5 GiB detected total RAM,
   current available RAM, at least 12 GB free disk, required writable
   directories, Docker, and the presence of `ANTHROPIC_API_KEY`. It warns but
   does not fail when available RAM is below 2.5 GiB.
@@ -784,9 +789,11 @@ Additional required tests cover:
 - Finalized result immutability and proof that scenario reset cannot delete
   records, reports, receipts, or cited evidence from standalone paths under
   `results/investigations/` or benchmark paths under `results/<evaluation-id>`.
-- A manual reference-Windows smoke test with all required containers and one
-  explicitly authorized, USD 0.15-capped Claude investigation. Record the
-  advisory warning if available RAM is below 2.5 GiB.
+- A manual smoke test on the working platform, Linux x86-64, with all required
+  containers and one explicitly authorized, USD 0.15-capped Claude
+  investigation. Record the advisory warning if available RAM is below 2.5 GiB.
+  Windows support is proven by continuous integration on `windows-latest`, not
+  by a second manual run.
 - A manual readability review covering concrete names, limited nesting, useful
   comments and docstrings, plain documentation, and no decorative abstractions.
 
@@ -805,11 +812,11 @@ requests to Anthropic, subject to its cost gate.
 The MVP is complete only when:
 
 - A clean clone installs and passes formatting, linting, strict typing, and
-  tests on `windows-latest`.
-- `causalops doctor` verifies the reference Windows environment, hard memory
-  and disk thresholds, required API key, and exact required model metadata
-  before a scored run. It warns below 2.5 GiB available RAM and cannot check
-  Console credit balance.
+  tests on both `windows-latest` and `ubuntu-latest`.
+- `causalops doctor` verifies a supported environment, hard memory and disk
+  thresholds, required API key, and exact required model metadata before a
+  scored run. It warns below 2.5 GiB available RAM and cannot check Console
+  credit balance.
 - All four development and evaluation variants activate, assert, and reset
   reproducibly without cross-run leakage.
 - One real scenario works end to end through opaque incident ID, Prometheus,

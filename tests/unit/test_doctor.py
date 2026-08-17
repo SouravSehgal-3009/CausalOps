@@ -25,7 +25,7 @@ def test_healthy_machine_passes_every_check(tmp_path: Path) -> None:
     report = run_doctor(ProjectPaths(root=tmp_path), FakeProbe(), HEALTHY_ENVIRONMENT)
 
     assert [check.name for check in report.checks] == [
-        "windows_version",
+        "operating_system",
         "total_memory",
         "available_memory",
         "free_disk",
@@ -46,14 +46,15 @@ def test_healthy_defaults_sit_above_every_threshold() -> None:
     assert probe.free_disk > MINIMUM_FREE_DISK_BYTES
 
 
-def test_non_windows_machine_fails(tmp_path: Path) -> None:
-    report = run_doctor(
-        ProjectPaths(root=tmp_path), FakeProbe(build=None), HEALTHY_ENVIRONMENT
-    )
+def test_a_system_that_is_neither_windows_nor_linux_fails(tmp_path: Path) -> None:
+    probe = FakeProbe(system="Darwin", release="23.6.0", machine="arm64", build=None)
 
-    check = check_named(report, "windows_version")
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "operating_system")
     assert check.status is CheckStatus.FAIL
     assert check.reason_code is DoctorReasonCode.UNSUPPORTED_OS
+    assert "Darwin" in check.message
 
 
 def test_windows_10_build_fails(tmp_path: Path) -> None:
@@ -61,9 +62,56 @@ def test_windows_10_build_fails(tmp_path: Path) -> None:
         ProjectPaths(root=tmp_path), FakeProbe(build=19045), HEALTHY_ENVIRONMENT
     )
 
-    assert check_named(report, "windows_version").reason_code is (
+    assert check_named(report, "operating_system").reason_code is (
         DoctorReasonCode.UNSUPPORTED_OS
     )
+
+
+def test_windows_without_a_build_number_fails(tmp_path: Path) -> None:
+    report = run_doctor(
+        ProjectPaths(root=tmp_path), FakeProbe(build=None), HEALTHY_ENVIRONMENT
+    )
+
+    assert check_named(report, "operating_system").reason_code is (
+        DoctorReasonCode.UNSUPPORTED_OS
+    )
+
+
+def test_linux_on_x86_64_passes_and_says_which_platform_it_judged(
+    tmp_path: Path,
+) -> None:
+    probe = FakeProbe(
+        system="Linux", release="6.8.0-45-generic", machine="x86_64", build=None
+    )
+
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "operating_system")
+    assert check.status is CheckStatus.PASS
+    assert check.message == "Linux 6.8.0-45-generic (x86_64)."
+    assert report.failures == ()
+
+
+def test_linux_on_another_architecture_fails(tmp_path: Path) -> None:
+    probe = FakeProbe(
+        system="Linux", release="6.8.0-45-generic", machine="aarch64", build=None
+    )
+
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "operating_system")
+    assert check.reason_code is DoctorReasonCode.UNSUPPORTED_OS
+    assert "aarch64" in check.message
+
+
+def test_the_same_seven_checks_run_on_linux(tmp_path: Path) -> None:
+    """Nothing is skipped for want of a platform equivalent."""
+    probe = FakeProbe(system="Linux", release="6.8.0", machine="x86_64", build=None)
+
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    assert len(report.checks) == 7
+    assert all(check.status is CheckStatus.PASS for check in report.checks)
 
 
 def test_total_memory_below_threshold_fails(tmp_path: Path) -> None:
