@@ -19,7 +19,9 @@ uv sync --locked
 uv run causalops doctor
 ```
 
-`doctor` checks the Windows version, total and available RAM, free disk on the
+The same commands run from a POSIX shell on Linux x86-64.
+
+`doctor` checks the operating system, total and available RAM, free disk on the
 project drive, that `runs/` and `results/` are writable, that Docker answers,
 and that `ANTHROPIC_API_KEY` is set. It exits 0 when every hard check passes and
 1 otherwise, printing a stable reason code for each problem.

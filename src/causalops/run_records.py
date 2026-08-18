@@ -74,6 +74,7 @@ def finalize_investigation(
     events: Sequence[RunEvent],
     evidence: Sequence[Evidence],
     receipts: Sequence[ToolReceipt],
+    report_markdown: str,
 ) -> Path:
     """Write the artifacts beside each other, then move them into place in one step."""
     target = results_root / "investigations" / report.investigation_id
@@ -87,6 +88,7 @@ def finalize_investigation(
     (staging / "report.json").write_text(
         json.dumps(report.model_dump(mode="json"), indent=2), encoding="utf-8"
     )
+    (staging / "report.md").write_text(report_markdown, encoding="utf-8")
     write_jsonl(staging / "events.jsonl", events)
     write_jsonl(staging / "evidence.jsonl", evidence)
     write_jsonl(staging / "receipts.jsonl", receipts)

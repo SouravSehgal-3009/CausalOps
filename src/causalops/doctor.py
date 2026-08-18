@@ -18,6 +18,11 @@ MINIMUM_FREE_DISK_BYTES = 12 * 10**9
 # Windows 11 reports major version 10, so the build number is what separates it.
 FIRST_WINDOWS_11_BUILD = 22000
 
+# Supported Linux is a kernel and an architecture, not a distribution. Everything a
+# distribution would stand in for -- Python, Docker, the filesystem, memory, disk --
+# already has its own check, and each of those says what is actually wrong.
+SUPPORTED_LINUX_MACHINES = frozenset({"x86_64", "amd64"})
+
 API_KEY_VARIABLE = "ANTHROPIC_API_KEY"
 
 
@@ -113,26 +118,42 @@ def failed_reading(
     )
 
 
-def check_windows_version(probe: SystemProbe) -> CheckResult:
-    build = probe.windows_build()
-    if build is None:
-        return CheckResult(
-            name="windows_version",
-            status=CheckStatus.FAIL,
-            reason_code=DoctorReasonCode.UNSUPPORTED_OS,
-            message="This is not Windows. CausalOps supports Windows 11.",
-        )
-    if build < FIRST_WINDOWS_11_BUILD:
-        return CheckResult(
-            name="windows_version",
-            status=CheckStatus.FAIL,
-            reason_code=DoctorReasonCode.UNSUPPORTED_OS,
-            message=f"Windows build {build} is older than Windows 11.",
-        )
+def unsupported_os(message: str) -> CheckResult:
     return CheckResult(
-        name="windows_version",
-        status=CheckStatus.PASS,
-        message=f"Windows 11 (build {build}).",
+        name="operating_system",
+        status=CheckStatus.FAIL,
+        reason_code=DoctorReasonCode.UNSUPPORTED_OS,
+        message=message,
+    )
+
+
+def check_operating_system(probe: SystemProbe) -> CheckResult:
+    """Pass on Windows 11 or Linux x86-64, and say which one this machine is."""
+    found = probe.operating_system()
+    if found.system == "Windows":
+        if found.windows_build is None:
+            return unsupported_os("This machine reports Windows with no build number.")
+        if found.windows_build < FIRST_WINDOWS_11_BUILD:
+            return unsupported_os(
+                f"Windows build {found.windows_build} is older than Windows 11."
+            )
+        return CheckResult(
+            name="operating_system",
+            status=CheckStatus.PASS,
+            message=f"Windows 11 (build {found.windows_build}).",
+        )
+    if found.system == "Linux":
+        if found.machine.lower() not in SUPPORTED_LINUX_MACHINES:
+            return unsupported_os(
+                f"Linux on {found.machine} is not supported; CausalOps needs x86-64."
+            )
+        return CheckResult(
+            name="operating_system",
+            status=CheckStatus.PASS,
+            message=f"Linux {found.release} ({found.machine}).",
+        )
+    return unsupported_os(
+        f"{found.system or 'This machine'} is neither Windows 11 nor Linux x86-64."
     )
 
 
@@ -295,7 +316,7 @@ def run_doctor(
     """Run every local check and report all of them, not just the first failure."""
     return DoctorReport(
         checks=(
-            check_windows_version(probe),
+            check_operating_system(probe),
             check_total_memory(probe),
             check_available_memory(probe),
             check_free_disk(probe, paths.root),

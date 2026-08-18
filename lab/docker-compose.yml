@@ -1,0 +1,60 @@
+name: causalops-lab
+
+services:
+  gateway:
+    build: ./services
+    command: ["python", "gateway.py"]
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../runs:/runs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      - orders
+
+  orders:
+    build: ./services
+    command: ["python", "orders.py"]
+    mem_limit: 192m
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ../runs:/runs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      - inventory
+
+  inventory:
+    build: ./services
+    command: ["python", "inventory.py"]
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:8082:8082"
+    volumes:
+      - ../runs:/runs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8082/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    mem_limit: 256m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro

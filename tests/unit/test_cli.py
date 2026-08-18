@@ -6,6 +6,7 @@ from fake_machine import FAKE_API_KEY, FakeProbe
 from causalops import cli
 from causalops.cli import MODEL_CHECK_NOTE, build_parser, exit_code, render_report
 from causalops.doctor import CheckResult, CheckStatus, DoctorReasonCode, DoctorReport
+from causalops.scenario_control import LabError, LabReasonCode
 
 PASSING_CHECK = CheckResult(
     name="docker",
@@ -84,6 +85,66 @@ def test_rendered_columns_fit_the_longest_name_and_code() -> None:
     first, second = render_report(report).splitlines()[:2]
 
     assert first.index(PASSING_CHECK.message) == second.index(FAILING_CHECK.message)
+
+
+def test_the_lab_and_scenario_subcommands_parse() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["lab", "up"]).action == "up"
+    assert parser.parse_args(["lab", "down"]).action == "down"
+    started = parser.parse_args(
+        ["scenario", "start", "a_family", "--seed", "development"]
+    )
+    assert (started.family, started.seed) == ("a_family", "development")
+    assert parser.parse_args(["scenario", "reset", "abc"]).incident_id == "abc"
+
+
+def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
+    parser = build_parser()
+
+    parsed = parser.parse_args(["investigate", "abc", "--model", "replay"])
+    assert (parsed.incident_id, parsed.model) == ("abc", "replay")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["investigate", "abc", "--model", "claude"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["scenario", "start", "a_family"])
+
+
+def test_a_lab_command_reports_a_refusal_with_its_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def no_docker(root: Path) -> None:
+        raise LabError(LabReasonCode.DOCKER_UNAVAILABLE, "docker compose did not run")
+
+    monkeypatch.setattr(cli, "lab_up", no_docker)
+
+    assert cli.main(["lab", "up"]) == 1
+    assert "FAIL DOCKER_UNAVAILABLE" in capsys.readouterr().out
+
+
+def test_a_lab_command_that_works_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "lab_down", lambda root: None)
+
+    assert cli.main(["lab", "down"]) == 0
+    assert "lab: down" in capsys.readouterr().out
+
+
+def test_investigating_an_unknown_incident_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["investigate", "deadbeef", "--model", "replay"]) == 1
+    assert "FAIL INCIDENT_NOT_FOUND" in capsys.readouterr().out
 
 
 def test_main_returns_zero_for_a_healthy_machine(

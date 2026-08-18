@@ -17,10 +17,17 @@ from causalops.domain import (
 )
 from causalops.evidence import content_hash
 from causalops.prompts import render_context
+from causalops.telemetry import RunPaths
 
 PACKAGE = "causalops"
-SOURCE_DIR = Path(__file__).resolve().parents[2] / "src" / PACKAGE
+REPOSITORY = Path(__file__).resolve().parents[2]
+SOURCE_DIR = REPOSITORY / "src" / PACKAGE
+LAB_SERVICES_DIR = REPOSITORY / "lab" / "services"
 EVALUATOR_MODULE = f"{PACKAGE}.evaluation"
+
+# The controller writes expected outcomes here. Nothing on the investigator side may
+# name this directory, which is why `RunPaths` has no accessor for it.
+EVALUATOR_DIRECTORY = "evaluator"
 
 WINDOW_START = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
 WINDOW_END = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
@@ -126,6 +133,31 @@ def test_importing_the_investigator_never_loads_the_evaluator() -> None:
     )
 
     assert finished.stdout.strip() == "False"
+
+
+def test_no_lab_service_imports_the_investigator() -> None:
+    """The lab is the thing being observed, not part of the observer."""
+    offenders = {
+        source.name
+        for source in sorted(LAB_SERVICES_DIR.glob("*.py"))
+        if any(name.startswith(PACKAGE) for name in imported_modules(source))
+    }
+
+    assert offenders == set()
+
+
+def test_the_investigator_path_object_cannot_reach_the_evaluator_directory() -> None:
+    """Every path the tool backends can build, and not one of them is ground truth."""
+    paths = RunPaths(root=Path("runs") / "incident-1")
+
+    reachable = (
+        paths.logs,
+        paths.changes_file,
+        paths.topology_file,
+        paths.incident_file,
+    )
+    assert all(EVALUATOR_DIRECTORY not in str(path) for path in reachable)
+    assert [name for name in dir(paths) if EVALUATOR_DIRECTORY in name.lower()] == []
 
 
 def test_the_evaluator_depends_on_the_investigator_and_not_the_other_way() -> None:
