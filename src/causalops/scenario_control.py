@@ -176,6 +176,32 @@ def load_definition(root: Path, family: str) -> dict[str, Any]:
     return loaded
 
 
+def apply_seed_variant(definition: dict[str, Any], seed: str) -> dict[str, Any]:
+    """Deterministically vary a definition's timing and fault magnitude by seed.
+
+    A family without a matching `seed_variants` entry is returned unchanged, so
+    this stays backward compatible with a definition that has none at all.
+    """
+    variants = definition.get("seed_variants")
+    if not variants or seed not in variants:
+        return definition
+    variant = variants[seed]
+    varied = dict(definition)
+    if "change_offsets" in variant:
+        varied["changes"] = [
+            {**change, "offset_seconds": offset}
+            for change, offset in zip(
+                definition["changes"], variant["change_offsets"], strict=True
+            )
+        ]
+    if "faulted_config_overrides" in variant:
+        varied["faulted_config"] = {
+            **definition["faulted_config"],
+            **variant["faulted_config_overrides"],
+        }
+    return varied
+
+
 def refuse_second_scenario(root: Path) -> None:
     """Section 12 allows one active scenario at a time."""
     marker = active_incident_file(root)
@@ -280,7 +306,7 @@ def start_scenario(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> str:
     """Create one incident: healthy baseline, then the fault, then the packet."""
-    definition = load_definition(root, family)
+    definition = apply_seed_variant(load_definition(root, family), seed)
     refuse_second_scenario(root)
     incident_id = new_opaque_id()
     paths = run_paths(root, incident_id)

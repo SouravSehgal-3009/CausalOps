@@ -35,5 +35,13 @@
         "value": "require_order_token"
       }
     ]
+  },
+  "seed_variants": {
+    "development": {
+      "change_offsets": [-60, -240]
+    },
+    "evaluation": {
+      "change_offsets": [-90, -300]
+    }
   }
 }

@@ -9,6 +9,9 @@ from prometheus_client import generate_latest
 from service import MAX_FIELD_LENGTH, MAX_LOG_FIELDS, LabService, bounded_fields
 
 INCIDENT = "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c"
+# A distinct incident ID for pool tests, since LeakyPool's counters are keyed by
+# incident ID and never released, so reusing INCIDENT would leak state between tests.
+POOL_INCIDENT = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
 
 
 @pytest.fixture
@@ -24,8 +27,10 @@ def activate(runs: Path, incident: str = INCIDENT) -> None:
     (runs / "active-incident.txt").write_text(incident, encoding="utf-8")
 
 
-def log_lines(runs: Path, name: str) -> list[dict[str, object]]:
-    path = runs / INCIDENT / "logs" / f"{name}.jsonl"
+def log_lines(
+    runs: Path, name: str, incident: str = INCIDENT
+) -> list[dict[str, object]]:
+    path = runs / incident / "logs" / f"{name}.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
@@ -68,7 +73,6 @@ def test_metrics_carry_the_active_incident_label(runs: Path) -> None:
     exposed = generate_latest(inventory.registry).decode("utf-8")
     assert f'incident="{INCIDENT}"' in exposed
     assert 'service="inventory"' in exposed
-    assert "causalops_pool_in_use" in exposed
 
 
 def test_configuration_is_read_from_the_active_run(runs: Path) -> None:
@@ -110,3 +114,87 @@ def test_the_gateway_reports_an_unreachable_upstream(
     assert (status, outcome) == (504, "timeout")
     events = [record["event"] for record in log_lines(runs, "gateway")]
     assert "upstream_timeout" in events
+
+
+def test_orders_exhausts_its_pool_past_capacity(
+    runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orders
+
+    activate(runs, POOL_INCIDENT)
+    config_file = runs / POOL_INCIDENT / "lab" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(json.dumps({"pool_capacity": 2}), encoding="utf-8")
+    monkeypatch.setattr(
+        orders, "call_inventory", lambda: {"sku": "widget-1", "available": 42}
+    )
+
+    orders.handle("req-1")
+    orders.handle("req-2")
+    status, body, outcome = orders.handle("req-3")
+
+    exposed = generate_latest(orders.orders.registry).decode("utf-8")
+    assert "causalops_pool_in_use" in exposed
+    assert (status, outcome) == (500, "error")
+    assert "pool" in str(body)
+    events = [record["event"] for record in log_lines(runs, "orders", POOL_INCIDENT)]
+    assert "pool_exhausted" in events
+
+
+def test_orders_retries_the_upstream_before_giving_up(
+    runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orders
+
+    activate(runs)
+    monkeypatch.setattr(orders, "INVENTORY_URL", "http://127.0.0.1:1/inventory")
+    attempts = {"count": 0}
+    real_call = orders.call_inventory
+
+    def counting_call() -> dict[str, object]:
+        attempts["count"] += 1
+        return real_call()
+
+    monkeypatch.setattr(orders, "call_inventory", counting_call)
+
+    status, _, outcome = orders.handle("req-1")
+
+    assert (status, outcome) == (504, "timeout")
+    assert attempts["count"] == orders.INVENTORY_MAX_ATTEMPTS
+    events = [record["event"] for record in log_lines(runs, "orders")]
+    assert "upstream_timeout" in events
+
+
+def test_inventory_sleeps_for_the_configured_delay(
+    runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inventory
+
+    activate(runs)
+    config_file = runs / INCIDENT / "lab" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        json.dumps({"response_delay_seconds": 1.5}), encoding="utf-8"
+    )
+    slept: list[float] = []
+    monkeypatch.setattr(inventory.time, "sleep", slept.append)
+
+    status, _, outcome = inventory.handle("req-1")
+
+    assert (status, outcome) == (200, "success")
+    assert slept == [1.5]
+
+
+def test_inventory_does_not_sleep_when_no_delay_is_configured(
+    runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inventory
+
+    activate(runs)
+    slept: list[float] = []
+    monkeypatch.setattr(inventory.time, "sleep", slept.append)
+
+    status, _, outcome = inventory.handle("req-1")
+
+    assert (status, outcome) == (200, "success")
+    assert slept == []
