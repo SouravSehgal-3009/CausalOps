@@ -12,7 +12,13 @@ from pydantic import ValidationError
 
 from causalops.domain import Budgets, PolicyResult, ReasonCode, ToolProposal
 from causalops.policy import PolicyDecision, authorize
-from causalops.tools import GetTopologyArguments, QueryMetricArguments
+from causalops.tools import (
+    GetTopologyArguments,
+    ListRecentChangesArguments,
+    LogFilter,
+    QueryLogsArguments,
+    QueryMetricArguments,
+)
 from causalops.tools import fingerprint as tool_fingerprint
 
 BUDGETS = Budgets()
@@ -69,6 +75,24 @@ def test_a_window_outside_the_incident_is_denied() -> None:
     )
 
     assert decide(before) == (
+        PolicyResult.DENIED,
+        ReasonCode.OUTSIDE_INCIDENT_WINDOW,
+    )
+
+
+def test_a_window_that_extends_past_the_incident_is_denied() -> None:
+    past_the_end = ToolProposal(
+        arguments=QueryMetricArguments(
+            template=metric_proposal().arguments.template,  # type: ignore[union-attr]
+            service="gateway",
+            window_start=WINDOW_START,
+            window_end=WINDOW_END + timedelta(minutes=5),
+        ),
+        evidence_gap="latency after the incident window closed",
+        expected_observation="a drop back to baseline",
+    )
+
+    assert decide(past_the_end) == (
         PolicyResult.DENIED,
         ReasonCode.OUTSIDE_INCIDENT_WINDOW,
     )
@@ -139,3 +163,35 @@ def test_an_allowed_decision_with_a_reason_code_is_rejected() -> None:
             fingerprint="f",
             reason_code=ReasonCode.UNKNOWN_SERVICE,
         )
+
+
+@pytest.mark.parametrize("service", ["../../etc/passwd", "orders/../../secret"])
+def test_a_path_traversal_shaped_service_is_denied_before_any_backend_path_join(
+    service: str,
+) -> None:
+    """The allowlist check runs before a service name could reach a file path.
+
+    Proves the block happens in `authorize`, ahead of the tool backends that
+    later join a service name onto a run directory path.
+    """
+    logs = ToolProposal(
+        arguments=QueryLogsArguments(
+            log_filter=LogFilter.ERRORS_ONLY,
+            service=service,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            row_limit=20,
+        ),
+        evidence_gap="whether that path holds relevant logs",
+        expected_observation="nothing, because the service is not registered",
+    )
+    changes = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        evidence_gap="whether that path holds relevant changes",
+        expected_observation="nothing, because the service is not registered",
+    )
+
+    assert decide(logs) == (PolicyResult.DENIED, ReasonCode.UNKNOWN_SERVICE)
+    assert decide(changes) == (PolicyResult.DENIED, ReasonCode.UNKNOWN_SERVICE)
