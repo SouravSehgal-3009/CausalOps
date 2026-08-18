@@ -6,8 +6,9 @@ What remains are the scope, ordering, and budget rules from section 7.
 """
 
 from collections.abc import Container
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from causalops.domain import (
     Budgets,
@@ -28,6 +29,14 @@ class PolicyDecision(BaseModel):
     fingerprint: str
     reason_code: ReasonCode | None = None
     message: str = ""
+
+    @model_validator(mode="after")
+    def check_reason_code(self) -> Self:
+        if self.result is PolicyResult.DENIED and self.reason_code is None:
+            raise ValueError("a denial must carry a reason code")
+        if self.result is PolicyResult.ALLOWED and self.reason_code is not None:
+            raise ValueError("an allowed decision must not carry a reason code")
+        return self
 
 
 def authorize(

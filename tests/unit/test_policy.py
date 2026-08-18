@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+import pytest
 from fake_incident import (
     WINDOW_END,
     WINDOW_START,
@@ -7,9 +8,10 @@ from fake_incident import (
     logs_proposal,
     metric_proposal,
 )
+from pydantic import ValidationError
 
 from causalops.domain import Budgets, PolicyResult, ReasonCode, ToolProposal
-from causalops.policy import authorize
+from causalops.policy import PolicyDecision, authorize
 from causalops.tools import GetTopologyArguments, QueryMetricArguments
 from causalops.tools import fingerprint as tool_fingerprint
 
@@ -123,3 +125,17 @@ def test_a_denial_carries_a_fingerprint_so_the_receipt_can_record_it() -> None:
         metric_proposal(service="billing").arguments
     )
     assert decision.message
+
+
+def test_a_denial_without_a_reason_code_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PolicyDecision(result=PolicyResult.DENIED, fingerprint="f")
+
+
+def test_an_allowed_decision_with_a_reason_code_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PolicyDecision(
+            result=PolicyResult.ALLOWED,
+            fingerprint="f",
+            reason_code=ReasonCode.UNKNOWN_SERVICE,
+        )

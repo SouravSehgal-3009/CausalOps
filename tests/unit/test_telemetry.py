@@ -1,9 +1,11 @@
 import json
 import threading
+import urllib.parse
 from collections.abc import Iterator
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from fake_incident import (
@@ -14,7 +16,13 @@ from fake_incident import (
     incident_scope,
 )
 
-from causalops.domain import EvidenceKind, ReasonCode, ToolOutcome, ToolProposal
+from causalops.domain import (
+    EvidenceKind,
+    IncidentScope,
+    ReasonCode,
+    ToolOutcome,
+    ToolProposal,
+)
 from causalops.evidence import MAX_RESULT_BYTES
 from causalops.prometheus import MAX_METRIC_SAMPLES, parse_samples, run_metric_check
 from causalops.telemetry import (
@@ -37,6 +45,13 @@ from causalops.tools import (
 SAMPLE_COUNT = MAX_METRIC_SAMPLES + 5
 
 
+class RecordingPrometheus(NamedTuple):
+    """The loopback server's address, plus every PromQL string it received."""
+
+    url: str
+    queries: list[str]
+
+
 def prometheus_body() -> bytes:
     values = [[float(index), str(index * 0.5)] for index in range(SAMPLE_COUNT)]
     return json.dumps(
@@ -45,11 +60,14 @@ def prometheus_body() -> bytes:
 
 
 @pytest.fixture
-def fake_prometheus() -> Iterator[str]:
+def fake_prometheus() -> Iterator[RecordingPrometheus]:
     """A loopback stand-in for Prometheus, which section 12 allows in tests."""
+    queries: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            received = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            queries.append(received.get("query", [""])[0])
             payload = prometheus_body()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -63,23 +81,28 @@ def fake_prometheus() -> Iterator[str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_port}"
+    yield RecordingPrometheus(f"http://127.0.0.1:{server.server_port}", queries)
     server.shutdown()
     server.server_close()
 
 
-def metric_arguments(service: str = "gateway") -> QueryMetricArguments:
+def metric_arguments(
+    service: str = "gateway",
+    template: MetricTemplate = MetricTemplate.GATEWAY_ERROR_RATE,
+) -> QueryMetricArguments:
     return QueryMetricArguments(
-        template=MetricTemplate.GATEWAY_ERROR_RATE,
+        template=template,
         service=service,
         window_start=WINDOW_START,
         window_end=WINDOW_END,
     )
 
 
-def logs_arguments(row_limit: int = 20) -> QueryLogsArguments:
+def logs_arguments(
+    row_limit: int = 20, log_filter: LogFilter = LogFilter.ERRORS_ONLY
+) -> QueryLogsArguments:
     return QueryLogsArguments(
-        log_filter=LogFilter.ERRORS_ONLY,
+        log_filter=log_filter,
         service="orders",
         window_start=WINDOW_START,
         window_end=WINDOW_END,
@@ -110,9 +133,11 @@ def log_row(
 
 
 def test_a_metric_query_returns_bounded_samples(
-    tmp_path: Path, fake_prometheus: str
+    tmp_path: Path, fake_prometheus: RecordingPrometheus
 ) -> None:
-    outcome = run_metric_check(metric_arguments(), incident_scope(), fake_prometheus, 5)
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), fake_prometheus.url, 5
+    )
 
     assert outcome.outcome is ToolOutcome.EXECUTED
     assert outcome.kind is EvidenceKind.METRIC
@@ -286,3 +311,188 @@ def test_the_runner_sends_each_tool_to_its_own_backend(tmp_path: Path) -> None:
     assert logs.kind is EvidenceKind.LOG
     assert topology.kind is EvidenceKind.TOPOLOGY
     assert metric.kind is EvidenceKind.METRIC
+
+
+# Cross-incident isolation
+#
+# A run backend never receives an incident_id argument for logs or changes; it
+# only ever sees the RunPaths of the run it was handed. These tests build two
+# separate incident directories with distinguishable content and confirm a
+# check pointed at one run's paths never surfaces the other run's content.
+
+OTHER_INCIDENT_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+
+
+def other_incident_scope() -> IncidentScope:
+    return incident_scope().model_copy(update={"incident_id": OTHER_INCIDENT_ID})
+
+
+def test_a_log_check_never_surfaces_another_incidents_rows(tmp_path: Path) -> None:
+    paths_a = RunPaths(root=tmp_path / "incident-a")
+    paths_b = RunPaths(root=tmp_path / "incident-b")
+    write_log(paths_a, [log_row(1, detail="incident-a-only-marker")])
+    write_log(paths_b, [log_row(1, detail="incident-b-only-marker")])
+
+    outcome = run_logs_check(logs_arguments(), paths_a)
+
+    dumped = json.dumps(outcome.payload)
+    assert "incident-a-only-marker" in dumped
+    assert "incident-b-only-marker" not in dumped
+
+
+def write_changes(paths: RunPaths, summary: str) -> None:
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": summary,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_changes_check_never_surfaces_another_incidents_entries(
+    tmp_path: Path,
+) -> None:
+    paths_a = RunPaths(root=tmp_path / "incident-a")
+    paths_b = RunPaths(root=tmp_path / "incident-b")
+    write_changes(paths_a, "incident-a-only-change")
+    write_changes(paths_b, "incident-b-only-change")
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths_a,
+    )
+
+    dumped = json.dumps(outcome.payload)
+    assert "incident-a-only-change" in dumped
+    assert "incident-b-only-change" not in dumped
+
+
+def test_the_metric_query_label_is_derived_from_the_scope_not_an_argument(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    run_metric_check(metric_arguments(), incident_scope(), fake_prometheus.url, 5)
+    run_metric_check(metric_arguments(), other_incident_scope(), fake_prometheus.url, 5)
+
+    query_a, query_b = fake_prometheus.queries[-2], fake_prometheus.queries[-1]
+    assert f'incident="{incident_scope().incident_id}"' in query_a
+    assert f'incident="{other_incident_scope().incident_id}"' in query_b
+
+
+def test_topology_decides_from_paths_not_the_argument_incident_id(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.topology_file.write_text(
+        json.dumps({"services": list(SERVICES), "edges": ["gateway>orders"]}),
+        encoding="utf-8",
+    )
+
+    outcome = run_topology_check(
+        GetTopologyArguments(incident_id="not-the-real-one"), paths
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["edge_count"] == 1
+
+
+# Template and filter coverage
+#
+# The tests above only exercise one metric template and one log filter. These
+# confirm the remaining registered templates and filters run end to end.
+
+
+def test_the_downstream_timeout_rate_template_executes(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    arguments = metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_RATE)
+
+    outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["template"] == MetricTemplate.DOWNSTREAM_TIMEOUT_RATE.value
+
+
+def test_the_resource_pool_in_use_template_executes(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    arguments = metric_arguments(template=MetricTemplate.RESOURCE_POOL_IN_USE)
+
+    outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["template"] == MetricTemplate.RESOURCE_POOL_IN_USE.value
+
+
+def test_the_gateway_latency_p95_template_executes(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    arguments = metric_arguments(template=MetricTemplate.GATEWAY_LATENCY_P95)
+
+    outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["template"] == MetricTemplate.GATEWAY_LATENCY_P95.value
+
+
+def test_the_timeouts_only_filter_matches_timeout_events(tmp_path: Path) -> None:
+    paths = RunPaths(root=tmp_path)
+    write_log(
+        paths,
+        [
+            log_row(1, event="upstream_timeout"),
+            log_row(2, event="config_rejected_request"),
+        ],
+    )
+
+    outcome = run_logs_check(logs_arguments(log_filter=LogFilter.TIMEOUTS_ONLY), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+    assert outcome.payload["event_codes"] == "upstream_timeout"
+
+
+def test_the_pool_exhaustion_filter_matches_pool_exhausted_events(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    write_log(
+        paths,
+        [
+            log_row(1, event="pool_exhausted"),
+            log_row(2, event="upstream_timeout"),
+        ],
+    )
+
+    outcome = run_logs_check(
+        logs_arguments(log_filter=LogFilter.POOL_EXHAUSTION), paths
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+    assert outcome.payload["event_codes"] == "pool_exhausted"
+
+
+def test_the_config_reload_filter_matches_config_loaded_events(tmp_path: Path) -> None:
+    paths = RunPaths(root=tmp_path)
+    write_log(
+        paths,
+        [
+            log_row(1, event="config_loaded"),
+            log_row(2, event="upstream_timeout"),
+        ],
+    )
+
+    outcome = run_logs_check(logs_arguments(log_filter=LogFilter.CONFIG_RELOAD), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+    assert outcome.payload["event_codes"] == "config_loaded"
