@@ -99,6 +99,8 @@ def within_window(moment: str, start: datetime, end: datetime) -> bool:
     return start <= observed <= end
 
 
+# Kept together so the read, filter, window, and truncate steps for one log query
+# stay in one readable pass rather than being split into single-use helpers.
 def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutcome:
     source = "query_logs"
     started = time.monotonic()
@@ -150,6 +152,8 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
     )
 
 
+# Kept together so the read, filter, window, and truncate steps for one changes
+# query stay in one readable pass rather than being split into single-use helpers.
 def run_changes_check(
     arguments: ListRecentChangesArguments, paths: RunPaths
 ) -> CheckOutcome:

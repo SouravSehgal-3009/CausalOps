@@ -46,7 +46,7 @@ def test_one_incident_runs_from_scenario_start_to_a_scored_report(
         printed = capsys.readouterr().out
         assert "DIAGNOSED CONFIG_CHANGE" in printed
 
-        investigation_id = printed.strip().splitlines()[-1].rsplit("\\", 1)[-1]
+        investigation_id = printed.strip().splitlines()[-2]
         written = latest_investigation(investigation_id)
         report = InvestigationReport.model_validate_json(
             (written / "report.json").read_text(encoding="utf-8")

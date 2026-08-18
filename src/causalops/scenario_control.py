@@ -206,6 +206,8 @@ def write_manifests(
     write_json(paths.changes_file, changes)
 
 
+# Kept together so the whole incident-packet assembly (scope, evidence, alert) is
+# visible in one place rather than split across several tiny builders.
 def build_incident(
     definition: dict[str, Any],
     incident_id: str,
@@ -259,6 +261,18 @@ def build_incident(
     return StoredIncident(scope=scope, packet=packet, evidence=(symptom, topology))
 
 
+def clear_unstarted_scenario(root: Path, paths: RunPaths) -> None:
+    """Undo the early marker write and half-formed run directory.
+
+    Called when a scenario fails before reaching a real fault, so it does not
+    permanently block the next `scenario start` with SCENARIO_ALREADY_ACTIVE.
+    """
+    active_incident_file(root).unlink(missing_ok=True)
+    shutil.rmtree(paths.root)
+
+
+# Kept together so the healthy-then-faulted sequence and its failure points stay
+# in one readable order rather than being split across helper functions.
 def start_scenario(
     root: Path,
     family: str,
@@ -272,21 +286,29 @@ def start_scenario(
     paths = run_paths(root, incident_id)
     paths.logs.mkdir(parents=True, exist_ok=True)
     write_json(paths.root / "lab" / "config.json", definition["healthy_config"])
+
+    # Written now, and not only once the scenario is confirmed, because `orders`
+    # reads this file live at request time to pick which config to apply to
+    # traffic as it is being driven below.
     active_incident_file(root).write_text(incident_id, encoding="utf-8")
 
     window_start = clock() - WINDOW_LEAD_IN
     extra = 2 if seed == "evaluation" else 0
     healthy, unhealthy = drive_traffic(int(definition["baseline_requests"]) + extra)
     if healthy == 0 or unhealthy > 0:
+        clear_unstarted_scenario(root, paths)
         raise LabError(
             LabReasonCode.BASELINE_NOT_HEALTHY,
-            f"the lab was not healthy before the fault: {unhealthy} failed",
+            f"{incident_id}: the lab was not healthy before the fault: "
+            f"{unhealthy} failed",
         )
     write_json(paths.root / "lab" / "config.json", definition["faulted_config"])
     served, failed = drive_traffic(int(definition["fault_requests"]) + extra)
     if failed == 0:
+        clear_unstarted_scenario(root, paths)
         raise LabError(
-            LabReasonCode.FAULT_NOT_OBSERVED, "the fault produced no failing request"
+            LabReasonCode.FAULT_NOT_OBSERVED,
+            f"{incident_id}: the fault produced no failing request",
         )
     window_end = clock()
 

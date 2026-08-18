@@ -118,22 +118,17 @@ def query_prometheus(
     return parse_samples(answered)
 
 
-def run_metric_check(
-    arguments: QueryMetricArguments, scope: IncidentScope, base_url: str, timeout: int
-) -> CheckOutcome:
-    source = "query_metric"
-    if not SAFE_SERVICE_NAME.match(arguments.service):
-        return failed_check(
-            EvidenceKind.METRIC,
-            source,
-            ToolOutcome.ERROR,
-            ReasonCode.TOOL_ERROR,
-            "that service name cannot be used in a query",
-        )
-    promql = METRIC_QUERIES[arguments.template].format(
-        service=arguments.service, incident=scope.incident_id
-    )
-    started = time.monotonic()
+def fetch_metric_samples(
+    base_url: str,
+    promql: str,
+    arguments: QueryMetricArguments,
+    timeout: int,
+    source: str,
+) -> list[MetricSample] | CheckOutcome:
+    """Run the range query, mapping each failure mode to its own reason code.
+
+    Returns the samples on success, or the failed check outcome to return as-is.
+    """
     try:
         samples = query_prometheus(
             base_url, promql, arguments.window_start, arguments.window_end, timeout
@@ -164,14 +159,36 @@ def run_metric_check(
             ReasonCode.TOOL_ERROR,
             "Prometheus returned something this tool cannot read",
         )
-    kept = samples[:MAX_METRIC_SAMPLES]
+    return samples
+
+
+def run_metric_check(
+    arguments: QueryMetricArguments, scope: IncidentScope, base_url: str, timeout: int
+) -> CheckOutcome:
+    source = "query_metric"
+    if not SAFE_SERVICE_NAME.match(arguments.service):
+        return failed_check(
+            EvidenceKind.METRIC,
+            source,
+            ToolOutcome.ERROR,
+            ReasonCode.TOOL_ERROR,
+            "that service name cannot be used in a query",
+        )
+    promql = METRIC_QUERIES[arguments.template].format(
+        service=arguments.service, incident=scope.incident_id
+    )
+    started = time.monotonic()
+    fetched = fetch_metric_samples(base_url, promql, arguments, timeout, source)
+    if isinstance(fetched, CheckOutcome):
+        return fetched
+    kept = fetched[:MAX_METRIC_SAMPLES]
     rows: list[JsonValue] = [[sample.at, sample.value] for sample in kept]
     payload: dict[str, JsonValue] = {
         "template": arguments.template.value,
         "service": arguments.service,
         "sample_count": len(kept),
         "max_value": max((sample.value for sample in kept), default=0.0),
-        "truncated": len(samples) > len(kept),
+        "truncated": len(fetched) > len(kept),
     }
     payload = trim_to_bytes(payload, "samples", rows)
     return executed_check(

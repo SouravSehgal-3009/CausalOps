@@ -124,6 +124,8 @@ def run_scenario_command(root: Path, arguments: argparse.Namespace) -> int:
     return 0
 
 
+# Kept together so the run's full path (load, investigate, record, print) reads
+# as one sequence rather than being split across single-use helpers.
 def run_investigate_command(root: Path, incident_id: str, model_name: str) -> int:
     paths = RunPaths(root=root / "runs" / incident_id)
     if not paths.incident_file.is_file():
@@ -167,6 +169,7 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
         ),
     )
     print(f"{result.report.disposition.value} {result.report.root_cause.value}")
+    print(result.report.investigation_id)
     print(f"artifacts: {written}")
     return 1 if result.report.disposition is Disposition.FAILED_SAFE else 0
 
