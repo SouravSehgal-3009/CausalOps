@@ -1,0 +1,40 @@
+{
+  "responses": {
+    "initial_plan": [
+      {
+        "schema_version": "1",
+        "hypotheses": [
+          {
+            "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+            "rank": 1,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "inventory timeout rate in the window"
+          },
+          {
+            "root_cause": "RESOURCE_POOL_SATURATION",
+            "rank": 2,
+            "supporting_evidence_ids": [],
+            "contrary_evidence_ids": [],
+            "missing_evidence": "orders pool usage in the window"
+          }
+        ],
+        "proposal": null,
+        "stop_reason": "the alert is enough"
+      }
+    ],
+    "final_assessment": [
+      {
+        "schema_version": "1",
+        "disposition": "DIAGNOSED",
+        "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+        "supporting_evidence_ids": [
+          "made-up-evidence"
+        ],
+        "contrary_evidence_ids": [],
+        "uncertainty": "one check could not separate the two remaining causes",
+        "next_step": "ask the owner to confirm the inventory timeout setting"
+      }
+    ]
+  }
+}

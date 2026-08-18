@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import urllib.parse
 from collections.abc import Iterator
 from datetime import timedelta
@@ -86,6 +87,31 @@ def fake_prometheus() -> Iterator[RecordingPrometheus]:
     server.server_close()
 
 
+@pytest.fixture
+def stalled_prometheus() -> Iterator[str]:
+    """A loopback server whose answer never arrives inside a short client timeout."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            time.sleep(2)
+            payload = prometheus_body()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+
+
 def metric_arguments(
     service: str = "gateway",
     template: MetricTemplate = MetricTemplate.GATEWAY_ERROR_RATE,
@@ -153,6 +179,18 @@ def test_a_metric_query_against_nothing_is_unavailable() -> None:
 
     assert outcome.outcome is ToolOutcome.UNAVAILABLE
     assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_a_metric_query_that_outlasts_its_timeout_times_out(
+    stalled_prometheus: str,
+) -> None:
+    """A genuine `urllib.request.urlopen` timeout, not a stand-in for one."""
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), stalled_prometheus, 1
+    )
+
+    assert outcome.outcome is ToolOutcome.TIMEOUT
+    assert outcome.reason_code is ReasonCode.TOOL_TIMEOUT
 
 
 def test_a_service_name_that_could_reach_promql_is_refused() -> None:

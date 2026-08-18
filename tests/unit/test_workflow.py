@@ -3,6 +3,7 @@ from pathlib import Path
 from fake_incident import (
     FIXTURE_DIR,
     SYMPTOM_EVIDENCE_ID,
+    WINDOW_START,
     StepClock,
     UsageReportingModel,
     alert_packet,
@@ -21,7 +22,11 @@ from causalops.domain import (
     Budgets,
     CheckOutcome,
     Disposition,
+    EvidenceKind,
+    FinalAssessment,
+    Hypothesis,
     IncidentScope,
+    InitialPlan,
     ModelDisposition,
     ModelUsage,
     PolicyResult,
@@ -31,9 +36,13 @@ from causalops.domain import (
     ToolOutcome,
     ToolProposal,
 )
+from causalops.evidence import build_evidence
 from causalops.models import ReasoningModel, ReplayReasoningModel
 from causalops.run_records import RunRecorder
 from causalops.workflow import InvestigationResult, run_investigation
+
+OTHER_INCIDENT_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+FORGED_HYPOTHESIS_EVIDENCE_ID = "forged-hypothesis-evidence-id"
 
 
 def investigate(
@@ -143,20 +152,8 @@ def test_a_response_that_stays_invalid_fails_safe() -> None:
     assert report.tools_executed == 0
 
 
-def test_a_denied_proposal_costs_a_model_call_but_no_check_slot(tmp_path: Path) -> None:
-    model = replay_model(
-        tmp_path,
-        {
-            "initial_plan": [plan_json(metric_proposal(service="billing"))],
-            "hypothesis_update": [update_json(stop_reason="no safe check remains")],
-            "final_assessment": [
-                assessment_json(
-                    disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
-                    root_cause=RootCauseCode.UNDETERMINED,
-                )
-            ],
-        },
-    )
+def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
+    model = fixture_model("service_out_of_scope.json")
 
     result, _ = investigate(model)
 
@@ -171,15 +168,8 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot(tmp_path: Path) 
     assert len(result.evidence) == 2
 
 
-def test_the_same_proposal_twice_is_denied_as_a_duplicate(tmp_path: Path) -> None:
-    model = replay_model(
-        tmp_path,
-        {
-            "initial_plan": [plan_json(metric_proposal())],
-            "hypothesis_update": [update_json(metric_proposal())],
-            "final_assessment": [assessment_json()],
-        },
-    )
+def test_the_same_proposal_twice_is_denied_as_a_duplicate() -> None:
+    model = fixture_model("duplicate_proposal.json")
 
     result, _ = investigate(model)
 
@@ -205,12 +195,37 @@ def test_a_check_that_times_out_still_spends_its_slot() -> None:
     assert len(result.evidence) == 2
 
 
-def test_a_cited_evidence_id_that_does_not_exist_fails_safe(tmp_path: Path) -> None:
+def test_a_cited_evidence_id_that_does_not_exist_fails_safe() -> None:
+    model = fixture_model("forged_citation.json")
+
+    result, _ = investigate(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.FORGED_EVIDENCE_REFERENCE
+
+
+def test_citing_another_incidents_real_evidence_id_fails_safe(tmp_path: Path) -> None:
+    other_evidence = build_evidence(
+        incident_id=OTHER_INCIDENT_ID,
+        kind=EvidenceKind.METRIC,
+        source="query_metric",
+        observed_at=WINDOW_START,
+        summary="a real observation, but recorded against a different incident",
+        payload={"p95_ms": 500},
+    )
     model = replay_model(
         tmp_path,
         {
             "initial_plan": [plan_json(stop_reason="the alert is enough")],
-            "final_assessment": [assessment_json(supporting=("made-up-evidence",))],
+            "final_assessment": [
+                FinalAssessment(
+                    disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                    root_cause=RootCauseCode.UNDETERMINED,
+                    contrary_evidence_ids=(other_evidence.evidence_id,),
+                    uncertainty="a contrary reading needs to be checked",
+                    next_step="verify against the other incident's record",
+                ).model_dump(mode="json")
+            ],
         },
     )
 
@@ -218,6 +233,77 @@ def test_a_cited_evidence_id_that_does_not_exist_fails_safe(tmp_path: Path) -> N
 
     assert result.report.disposition is Disposition.FAILED_SAFE
     assert result.report.reason_code is ReasonCode.FORGED_EVIDENCE_REFERENCE
+
+
+def test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposition(
+    tmp_path: Path,
+) -> None:
+    model = replay_model(
+        tmp_path,
+        {
+            "initial_plan": [plan_json(stop_reason="the alert is enough")],
+            "final_assessment": [
+                FinalAssessment(
+                    disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                    root_cause=RootCauseCode.UNDETERMINED,
+                    contrary_evidence_ids=(SYMPTOM_EVIDENCE_ID,),
+                    uncertainty="a contrary reading needs to be checked",
+                    next_step="verify the symptom evidence again",
+                ).model_dump(mode="json")
+            ],
+        },
+    )
+
+    result, _ = investigate(model)
+
+    assert result.report.disposition is not Disposition.FAILED_SAFE
+    assert result.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
+
+
+def test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output(
+    tmp_path: Path,
+) -> None:
+    """A hypothesis citation is never validated against the evidence store.
+
+    This pins today's actual behavior rather than adding validation: the forged
+    ID lives only inside the model's own plan response and is never copied into
+    later context, the report, or a recorded event.
+    """
+    plan_hypotheses = (
+        Hypothesis(
+            root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
+            rank=1,
+            supporting_evidence_ids=(FORGED_HYPOTHESIS_EVIDENCE_ID,),
+            missing_evidence="inventory timeout rate in the window",
+        ),
+        Hypothesis(
+            root_cause=RootCauseCode.RESOURCE_POOL_SATURATION,
+            rank=2,
+            contrary_evidence_ids=(FORGED_HYPOTHESIS_EVIDENCE_ID,),
+            missing_evidence="orders pool usage in the window",
+        ),
+    )
+    model = replay_model(
+        tmp_path,
+        {
+            "initial_plan": [
+                InitialPlan(
+                    hypotheses=plan_hypotheses, stop_reason="the alert is enough"
+                ).model_dump(mode="json")
+            ],
+            "final_assessment": [assessment_json()],
+        },
+    )
+
+    result, recorder = investigate(model)
+
+    assert result.report.disposition is not Disposition.FAILED_SAFE
+
+    for request in model.requests[1:]:
+        assert FORGED_HYPOTHESIS_EVIDENCE_ID not in request.context_text
+    assert FORGED_HYPOTHESIS_EVIDENCE_ID not in result.report.model_dump_json()
+    recorded = "".join(event.model_dump_json() for event in recorder.events)
+    assert FORGED_HYPOTHESIS_EVIDENCE_ID not in recorded
 
 
 def test_running_out_of_model_calls_fails_safe() -> None:

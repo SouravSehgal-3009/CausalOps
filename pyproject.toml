@@ -45,5 +45,5 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["lab/services"]
+pythonpath = ["lab/services", "tests/unit"]
 markers = ["docker: needs the local lab containers"]
