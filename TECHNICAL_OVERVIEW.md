@@ -797,15 +797,15 @@ Additional required tests cover:
 - A manual readability review covering concrete names, limited nesting, useful
   comments and docstrings, plain documentation, and no decorative abstractions.
 
-Normal CI runs on `windows-latest` and uses replay fixtures, fake Anthropic SDK
-clients, and disposable local test data. Network access is allowed only while
-installing the locked dependencies. After installation, formatting, linting,
-strict typing, unit tests, security tests, and replay conformance make no
-external calls and require no credentials or paid usage. Doctor's model lookup,
-token counting, generation, refusal, and provider failures are tested through
-fakes or mocks. Local in-process and loopback test traffic is allowed. Outside
-CI, only an explicitly invoked live command may send authenticated HTTPS
-requests to Anthropic, subject to its cost gate.
+Normal CI runs on `windows-latest` and `ubuntu-latest` and uses replay fixtures,
+fake Anthropic SDK clients, and disposable local test data. Network access is
+allowed only while installing the locked dependencies. After installation,
+formatting, linting, strict typing, unit tests, security tests, and replay
+conformance make no external calls and require no credentials or paid usage.
+Doctor's model lookup, token counting, generation, refusal, and provider
+failures are tested through fakes or mocks. Local in-process and loopback test
+traffic is allowed. Outside CI, only an explicitly invoked live command may send
+authenticated HTTPS requests to Anthropic, subject to its cost gate.
 
 ## 13. Definition of done
 
