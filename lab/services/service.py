@@ -103,7 +103,9 @@ class LabService:
         incident = self.incident_id()
         self.requests.labels(self.name, incident, outcome).inc()
         self.latency.labels(self.name, incident).observe(seconds)
-        self.pool_in_use.labels(self.name, incident).set(0)
+
+    def set_pool_in_use(self, count: int) -> None:
+        self.pool_in_use.labels(self.name, self.incident_id()).set(count)
 
     def serve(self, route: Route) -> None:
         server = ThreadingHTTPServer(("", self.port), self.handler_class(route))

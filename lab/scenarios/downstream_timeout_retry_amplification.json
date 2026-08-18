@@ -1,0 +1,48 @@
+{
+  "family": "downstream_timeout_retry_amplification",
+  "endpoint": "/api/orders",
+  "services": ["gateway", "orders", "inventory"],
+  "symptom": "ELEVATED_ERRORS_AND_LATENCY",
+  "healthy_config": {},
+  "faulted_config": {"response_delay_seconds": 1.5},
+  "baseline_requests": 6,
+  "fault_requests": 8,
+  "changes": [
+    {
+      "service": "inventory",
+      "summary": "configuration update: response_delay_seconds set to 1.5",
+      "offset_seconds": -30
+    },
+    {
+      "service": "gateway",
+      "summary": "dependency bump: TLS library patched",
+      "offset_seconds": -180
+    }
+  ],
+  "topology": {
+    "services": ["gateway", "orders", "inventory"],
+    "edges": ["gateway>orders", "orders>inventory"]
+  },
+  "expected": {
+    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+    "disposition": "DIAGNOSED",
+    "predicates": [
+      {
+        "source": "query_logs",
+        "kind": "LOG",
+        "field": "event_codes",
+        "operator": "CONTAINS",
+        "value": "upstream_timeout"
+      }
+    ]
+  },
+  "seed_variants": {
+    "development": {
+      "change_offsets": [-30, -180]
+    },
+    "evaluation": {
+      "change_offsets": [-50, -220],
+      "faulted_config_overrides": {"response_delay_seconds": 2.0}
+    }
+  }
+}

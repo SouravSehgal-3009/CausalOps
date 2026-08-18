@@ -1,0 +1,48 @@
+{
+  "family": "resource_pool_saturation",
+  "endpoint": "/api/orders",
+  "services": ["gateway", "orders", "inventory"],
+  "symptom": "ELEVATED_ERRORS_AND_LATENCY",
+  "healthy_config": {},
+  "faulted_config": {"pool_capacity": 9},
+  "baseline_requests": 6,
+  "fault_requests": 8,
+  "changes": [
+    {
+      "service": "orders",
+      "summary": "configuration update: pool_capacity set to 9",
+      "offset_seconds": -45
+    },
+    {
+      "service": "gateway",
+      "summary": "image rebuild: base image patched",
+      "offset_seconds": -200
+    }
+  ],
+  "topology": {
+    "services": ["gateway", "orders", "inventory"],
+    "edges": ["gateway>orders", "orders>inventory"]
+  },
+  "expected": {
+    "root_cause": "RESOURCE_POOL_SATURATION",
+    "disposition": "DIAGNOSED",
+    "predicates": [
+      {
+        "source": "query_logs",
+        "kind": "LOG",
+        "field": "event_codes",
+        "operator": "CONTAINS",
+        "value": "pool_exhausted"
+      }
+    ]
+  },
+  "seed_variants": {
+    "development": {
+      "change_offsets": [-45, -200]
+    },
+    "evaluation": {
+      "change_offsets": [-70, -260],
+      "faulted_config_overrides": {"pool_capacity": 7}
+    }
+  }
+}

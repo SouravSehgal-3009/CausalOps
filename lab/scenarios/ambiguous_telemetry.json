@@ -1,0 +1,45 @@
+{
+  "family": "ambiguous_telemetry",
+  "endpoint": "/api/orders",
+  "services": ["gateway", "orders", "inventory"],
+  "symptom": "ELEVATED_ERRORS_AND_LATENCY",
+  "healthy_config": {},
+  "faulted_config": {"pool_capacity": 9, "response_delay_seconds": 1.5},
+  "baseline_requests": 6,
+  "fault_requests": 8,
+  "changes": [
+    {
+      "service": "orders",
+      "summary": "configuration update: pool_capacity set to 9",
+      "offset_seconds": -40
+    },
+    {
+      "service": "inventory",
+      "summary": "configuration update: response_delay_seconds set to 1.5",
+      "offset_seconds": -35
+    },
+    {
+      "service": "gateway",
+      "summary": "image rebuild: base image patched",
+      "offset_seconds": -190
+    }
+  ],
+  "topology": {
+    "services": ["gateway", "orders", "inventory"],
+    "edges": ["gateway>orders", "orders>inventory"]
+  },
+  "expected": {
+    "root_cause": "UNDETERMINED",
+    "disposition": "INSUFFICIENT_EVIDENCE",
+    "predicates": []
+  },
+  "seed_variants": {
+    "development": {
+      "change_offsets": [-40, -35, -190]
+    },
+    "evaluation": {
+      "change_offsets": [-65, -55, -230],
+      "faulted_config_overrides": {"pool_capacity": 7, "response_delay_seconds": 2.0}
+    }
+  }
+}
