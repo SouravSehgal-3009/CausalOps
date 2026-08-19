@@ -2,15 +2,18 @@
 
 An incident investigation assistant for a local synthetic microservice lab.
 
-`TECHNICAL_OVERVIEW.md` is the specification for this project. This README only
-points at it; it does not define behavior.
+`TECHNICAL_SPEC.md` is the product specification for CausalOps v2;
+`TECHNICAL_OVERVIEW.md` records what has actually been built. This README
+only points at them; it does not define behavior.
 
 ## Status
 
-The environment check below and the investigation core library are implemented:
-domain contracts, the replay reasoning model, the tool registry, policy, budgets,
-the evidence store, the investigation loop, run records, and scoring. There is no
-synthetic lab and no `investigate` command yet.
+Phases 1 and 2 are complete: the synthetic lab, Prometheus and JSONL
+telemetry, all four incident families, the four read-only tool backends,
+the replay-driven investigation loop, policy, budgets, run records, and
+scoring. `causalops investigate <incident-id> --model replay` runs an
+incident end to end. There is no live Claude adapter yet — see
+`TECHNICAL_OVERVIEW.md` Part I, "Phase 3 — never started."
 
 ## Check this machine
 
@@ -27,7 +30,7 @@ and that `ANTHROPIC_API_KEY` is set. It exits 0 when every hard check passes and
 1 otherwise, printing a stable reason code for each problem.
 
 The authenticated `claude-sonnet-5` metadata request described in
-`TECHNICAL_OVERVIEW.md` section 9 is not implemented yet.
+`TECHNICAL_OVERVIEW.md`'s CLI contract section is not implemented yet.
 
 `doctor` reads `ANTHROPIC_API_KEY` from the process environment only. Set it in
 PowerShell before a live command:
