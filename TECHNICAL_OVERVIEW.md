@@ -1,21 +1,47 @@
 # CausalOps: Technical Overview
 
-> **Subtitle:** Evidence-Grounded Incident Investigator  
-> **Status:** balanced three-week MVP; planned work, not implementation claims  
-> **Effort:** 35–45 focused hours  
-> **Audience:** project owner, contributors, reviewers, and coding assistants
+> **Subtitle:** Evidence-Grounded Incident Investigator
+> **Status:** as-built record, written continuously — one section per unit,
+> landing in the same commit as the code it describes
+> **Audience:** project owner, contributors, reviewers, and coding agents
+
+## Vocabulary: phase, milestone, unit
+
+This project uses four different grouping words across its documents. They
+mean different things and must not be swapped:
+
+- **Phase / step** — the v1 delivery history recorded in Part I below. Three
+  phases, each of three steps, each step landing as one commit or a short
+  branch merged as one. This vocabulary describes the past; no new phase is
+  planned.
+- **Milestone** — one of the three v2 releases defined in `TECHNICAL_SPEC.md`
+  §12. A milestone is large: it closes only after a full owner and
+  dual-reviewer trust-boundary review. Part III tracks milestone progress.
+- **Unit** — one bounded, independently reviewable chunk of work inside a
+  milestone, following the owner-controlled review protocol in `CLAUDE.md`.
+  This document itself landed as Unit 0.
+
+Three of these four things happen to come in groups of three — three phases,
+three milestones, three units already named inside Milestone 1 (0, 1a, 1b).
+That overlap is coincidental, not structural. Use "phase" only for v1
+history and "milestone" only for a v2 release; never call a unit a step, or
+a milestone a phase.
 
 ## Document authority
 
-This file is the sole source of truth for CausalOps product behavior,
-architecture, scope, interfaces, evaluation, milestones, and completion
-criteria. `AGENTS.md` is the sole source of truth for contributor and coding
-agent behavior.
+`TECHNICAL_SPEC.md` governs product decisions for CausalOps v2. This file
+records what is built and how — phase by phase for v1, unit by unit for
+v2 — and must never contradict it. `CLAUDE.md`, not `AGENTS.md` (which no
+longer exists in this repository), is the live source of truth for
+contributor and coding-agent behavior. `CLAUDE.md` is gitignored by project
+design — contributor instructions stay local — so it will not exist in a
+fresh clone; this mirrors how this document previously cited the now-absent
+`AGENTS.md` for the same reason.
 
 README files, ADRs, issues, comments, and generated reports may explain or
-record implementation details but cannot redefine this specification. Any
-approved product or technical decision must update this file in the same
-change. Do not create a parallel project brief or technical specification.
+record implementation detail but cannot redefine either document. An
+approved product decision updates `TECHNICAL_SPEC.md`; an approved delivery
+updates this file, in the same commit as the code it describes.
 
 ## Plain glossary
 
@@ -43,50 +69,227 @@ Use ordinary words unless one of these contract terms needs its exact meaning:
 - **Scenario family:** an evaluator-visible kind of synthetic incident.
 - **Run key:** the unique family, system, and repetition within an evaluation.
 
-## 1. Product thesis
+# Part I — As built
+
+Every claim below cites a commit SHA, the source file it landed in, and the
+tests that prove it, per `CLAUDE.md`'s evidence rule: do not claim a
+component is implemented until source, tests, and commit SHA demonstrate it.
+
+The original v1 plan was a three-phase, nine-step MVP (see §14 "Three-phase
+delivery sequence" in `git show b6f4d9c:TECHNICAL_OVERVIEW.md`, the tracked
+commit before this rewrite — the local, gitignored `TECHNICAL_OVERVIEW_OLD.md`
+is a convenience copy of that same commit, not itself authoritative). Two
+phases shipped in full; the third — the live Claude adapter and its
+benchmark — was never started. That is not a gap in this document; it is the
+actual state of the repository.
+
+## Phase 1 — foundation and first vertical slice
+
+### Step 1 — package foundation and `doctor`
+
+**Commit:** `8c090dc` — Add package foundation and causalops doctor
+
+What landed: `pyproject.toml`/`uv.lock` packaging with Ruff, strict mypy, and
+pytest configured; `causalops doctor` checking Windows 11 by build number,
+total RAM (fails below 7.5 GiB), available RAM (warns below 2.5 GiB), free
+disk (fails below 12 GB), Docker, and `ANTHROPIC_API_KEY` presence; CI
+running one `windows-latest` job (`mypy src`, not `mypy src lab`, since
+`lab/` did not exist yet). The `ubuntu-latest` matrix and Linux support
+arrive in step 3 (`4112022`).
+
+Source: `src/causalops/doctor.py`, `src/causalops/system_probe.py`,
+`src/causalops/cli.py` (`doctor` subcommand), `.github/workflows/ci.yml`.
+
+Tests: `tests/unit/test_doctor.py`, `tests/unit/fake_machine.py`,
+`tests/unit/test_cli.py`.
+
+Known limitation: `doctor` does not yet make the authenticated
+`claude-sonnet-5` metadata request the original spec called for.
+`src/causalops/cli.py:33-38` carries an explicit `MODEL_CHECK_NOTE` marking
+this unbuilt: *"Not checked yet: the authenticated claude-sonnet-5 metadata
+request arrives in a later step."* It arrives with the live Claude adapter,
+not yet scheduled to a specific v2 unit.
+
+### Step 2 — investigation core
+
+**Commit:** `8a9d4fb` — Add investigation core: replay loop, policy, budgets,
+records, scoring
+
+What landed: the domain types (`IncidentScope`, `Evidence`, `Hypothesis`,
+`ToolProposal`, `ToolReceipt`, `InitialPlan`, `HypothesisUpdate`,
+`FinalAssessment`, `InvestigationReport`), `ReplayReasoningModel`, policy
+authorization, budget enforcement, JSONL run records, the three-call
+investigation loop, and deterministic scoring. This step has no lab
+dependency — it landed and was tested before the synthetic lab existed.
+
+Source: `src/causalops/domain.py`, `models.py`, `policy.py`, `prompts.py`,
+`run_records.py`, `tools.py`, `workflow.py`, `evidence.py`, `evaluation.py`.
+
+Tests: `tests/unit/test_domain.py`, `test_policy.py`, `test_workflow.py`,
+`test_run_records.py`, `test_replay_model.py`, `test_evidence.py`,
+`test_evaluation.py`, `test_tools.py`, `test_prompts.py`. Ground-truth
+isolation tests also landed in this commit:
+`tests/security/test_ground_truth_isolation.py` (7 tests at this commit,
+grown to 9 by the end of Phase 2).
+
+Known limitation: `ReplayReasoningModel` is the only reasoning-model adapter
+in the codebase. There is no live model call anywhere in `src/`.
+
+### Step 3 — synthetic lab, Prometheus, tool backends, CLI wiring
+
+**Commit:** `ae0d226` — Add synthetic lab, Prometheus, tool backends and CLI
+wiring, on a short-lived branch that also contains `4112022` (Windows/Linux
+support in `doctor`), `f800fa8` (a documentation-only correction), and
+`fa79385` (scenario cleanup, Linux test-parsing, and metric-readability
+fixes). The branch merged to `master` as `eab3609` — Merge synthetic lab,
+Prometheus wiring, and platform support.
+
+What landed: the Docker Compose lab (`gateway → orders → inventory`), the
+Prometheus container and adapter, all four read-only tool backends
+(`query_metric`, `query_logs`, `list_recent_changes`, `get_topology`) wired
+end to end for one incident family (`configuration_change`), and the
+`causalops lab up/down`, `scenario start/reset`, and
+`investigate --model replay` CLI commands. The bounded Python resource pool
+in `orders` is not part of this commit — `git log -S POOL_CAPACITY` places
+it in Phase 2 step 2 (`23842ab`), where it's already credited correctly.
+
+Source: `lab/docker-compose.yml`, `lab/prometheus.yml`,
+`lab/services/{gateway,orders,inventory,service}.py`,
+`src/causalops/prometheus.py`, `src/causalops/telemetry.py`,
+`src/causalops/scenario_control.py`, `src/causalops/cli.py`,
+`src/causalops/report.py`.
+
+Tests: `tests/unit/test_compose.py`, `test_lab_services.py`,
+`test_telemetry.py`, `test_scenario_control.py`, `test_report.py`;
+`tests/integration/test_configuration_change.py`.
+
+Known limitation: only `configuration_change` worked end to end at this
+point. The other three families landed in Phase 2 step 2.
+
+## Phase 2 — complete lab and safety
+
+### Step 1 — policy invariants and cross-incident isolation
+
+**Commit:** `c5482b2` — Enforce policy decision invariant and prove
+cross-incident isolation, merged as `e58ef55`.
+
+What landed: an invariant that every `policy.authorize` path returns one
+consistent typed decision (no code path can silently allow without an
+explicit `PolicyDecision`), and cross-incident isolation proof for the
+telemetry backends — a query scoped to incident A cannot return incident B's
+rows, even when both runs exist on disk at once.
+
+Source: `src/causalops/policy.py`.
+
+Tests: `tests/unit/test_policy.py`; `tests/unit/test_telemetry.py` (+219 lines
+in this commit to add the isolation cases).
+
+### Step 2 — remaining incident families
+
+**Commit:** `23842ab` — Add remaining incident families with seed-based fault
+variation, merged as `4e11124`.
+
+What landed: the three remaining incident families —
+`downstream_timeout_retry_amplification`, `resource_pool_saturation`, and
+`ambiguous_telemetry` — each with development and evaluation seeds and
+seed-based deterministic variation in timestamps, request IDs, affected
+endpoint, and noise logs.
+
+Source: `lab/scenarios/{downstream_timeout_retry_amplification,
+resource_pool_saturation,ambiguous_telemetry}.json`,
+`lab/scenarios/configuration_change.json` (extended for parity),
+`lab/services/{inventory,orders,service}.py`,
+`src/causalops/scenario_control.py`.
+
+Tests: `tests/integration/test_incident_families.py`,
+`tests/unit/test_scenario_control.py` (grown to 358 lines total),
+`tests/unit/test_lab_services.py`.
+
+### Step 3 — security and conformance hardening
+
+**Commit:** `d73f67b` — Close security-conformance gaps: injection, forgery,
+timeout, reset, merged as `b6f4d9c` (current `HEAD`).
+
+What landed: prompt-injection resistance tests (untrusted telemetry text
+proven inert, including against a model instructed to obey it), replay
+fixtures exercising forged citations and duplicate proposal fingerprints,
+out-of-scope service denial, and scenario-reset isolation proof (a reset
+cannot delete a finalized result).
+
+Source: `src/causalops/replay_fixtures/{forged_citation,duplicate_proposal,
+service_out_of_scope}.json`.
+
+Tests: `tests/security/test_prompt_injection.py` (2 tests),
+`tests/integration/test_scenario_reset_isolation.py`,
+`tests/unit/test_policy.py`, `tests/unit/test_telemetry.py` (536 lines
+total), `tests/unit/test_workflow.py`.
+
+At `HEAD` (`b6f4d9c`), all four CI gates pass:
+`uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy src lab`,
+and `uv run pytest -m "not docker"` — **237 passed, 5 docker-marked
+deselected** (docker-marked tests require `causalops lab up` and are run by
+hand, not in CI).
+
+## Phase 3 — never started
+
+Nothing under this heading has landed. No commit, source file, or test
+implements any of it. Specifically absent from the repository today:
+
+- A live model adapter (`ClaudeReasoningModel` or equivalent). The only
+  reasoning-model *adapter* class in `models.py` is `ReplayReasoningModel`; a
+  repository-wide search for `tool_use` or `PROVIDER_` finds no live-adapter
+  code. (`stop_reason` also returns no live-adapter hits, but is a poor
+  search term on its own — it is a legitimate existing field on
+  `InitialPlan` and `HypothesisUpdate` (`domain.py:246,262`), appearing in
+  seven of the eight replay fixtures and five files under `tests/` for
+  reasons unrelated to a live provider.)
+- The authenticated `claude-sonnet-5` doctor metadata check (`cli.py:33-38`
+  documents this gap explicitly, see Phase 1 step 1 above).
+- `causalops investigate --model claude` — the CLI's `--model` flag accepts
+  only `replay` (`cli.py:71`, `choices=("replay",)`).
+- `causalops conformance` and `causalops benchmark` — neither subcommand is
+  registered in `cli.py`'s argument parser.
+- Any cost ledger, token-counting call, or live evaluation record.
+  `evaluation.py` contains the deterministic scorer (`score_run`,
+  `MechanicalScores`, `EvaluationRecord`) but no benchmark orchestrator and
+  no baseline-vs-workflow paired runner.
+- Any portfolio artifact tied to a live run — a recorded demo or a
+  threat-model document scoped to Phase 3 — since no live run has ever
+  executed. (README.md was rewritten in this unit for documentation
+  accuracy, not as a live-run portfolio artifact.)
+
+Phase 3 was superseded by `TECHNICAL_SPEC.md` §12's three v2 milestones
+before any of it was built, and it will not be completed in its original
+form. See Part III, "Superseded v1 evaluation design," for exactly what
+changed and why.
+
+# Part II — Architecture and contracts
+
+This part is the evergreen engineering reference: current domain types,
+tools, policy, budgets, and the parts of the threat model already provable by
+a Phase 1/2 test. It changes when the underlying contract changes, not on
+every commit.
+
+## Product thesis
 
 CausalOps is an incident investigation assistant for a synthetic Python
 microservice system that runs locally and uses one hosted reasoning model. It
-keeps several possible causes, gathers a limited
-amount of evidence that can support or rule out each one, and runs safe
-read-only checks. It returns either a diagnosis with evidence the owner can
-check or a clear statement that the evidence is not enough.
+keeps several possible causes, gathers a limited amount of evidence that can
+support or rule out each one, and runs safe read-only checks. It returns
+either a diagnosis with evidence the owner can check or a clear statement
+that the evidence is not enough.
 
-“Causal” means a disciplined loop of **possible cause → diagnostic check →
-evidence update**. CausalOps does not claim formal causal inference, build
-causal graphs, or estimate what would happen under an intervention.
+"Causal" refers to a practical loop—hypothesis, diagnostic check, evidence
+update—not formal causal inference. CausalOps does not build causal graphs
+or estimate what would happen under an intervention.
 
 It is decision support for an on-call engineer. It is not an autonomous
 operator or a production SRE platform. Its central trust boundary is:
 
-> The model may propose and interpret. Deterministic Python validates,
-> authorizes, executes, stops, scores, and records.
+> The model proposes and interprets. Deterministic code validates,
+> authorizes, executes read-only checks, stops, scores, and records.
 
-## 2. MVP and non-goals
-
-The MVP is a complete four-family CLI investigation and evaluation system. Its
-portfolio value comes from trustworthy tool use and honest evaluation, not
-from platform size.
-
-Included:
-
-- Three project-authored Python services running through Docker Compose.
-- A separate Python scenario controller for fault activation and cleanup.
-- Prometheus metric history and scenario-scoped structured JSONL logs.
-- Four typed read-only investigator tools.
-- Several possible causes, evidence for and against each one, up to two checks,
-  and a clear abstention when the evidence is not enough.
-- Replay conformance tests and a pinned Claude API comparison.
-- Append-only run records, deterministic scoring, and Markdown reports.
-
-Deferred:
-
-- Remediation, write-capable tools, multi-agent roles, and agent frameworks.
-- Web UI, public API, background worker, and investigator database.
-- PostgreSQL, Kubernetes, cloud hosting, Terraform, and managed infrastructure.
-- MCP, distributed tracing, durable recovery, and a second live provider.
-
-## 3. Architecture and trust boundaries
+## Architecture and trust boundaries
 
 ```text
 Evaluator-only manifest              Investigator-visible data
@@ -117,11 +320,11 @@ gateway -> orders -> inventory
 ```
 
 The `orders` resource pool is implemented in Python and can be saturated by a
-scenario. PostgreSQL is not part of the MVP. A Prometheus container provides
-historical metric queries. Claude is accessed through Anthropic's hosted API.
-“Python-only” means all authored services, orchestration, tools, policy, and
-evaluation code are Python; Docker and Prometheus are local infrastructure
-dependencies.
+scenario. PostgreSQL is not part of the lab. A Prometheus container provides
+historical metric queries. Claude is accessed through Anthropic's hosted API
+once the live adapter exists (Part I, Phase 3). "Python-only" means all
+authored services, orchestration, tools, policy, and evaluation code are
+Python; Docker and Prometheus are local infrastructure dependencies.
 
 ### Supported development platforms
 
@@ -144,7 +347,8 @@ Run one scenario and one Claude request at a time. Prometheus retains one hour
 of data. Warn when current available RAM is below 2.5 GiB, but keep that check
 advisory because available memory changes while the system runs.
 
-Use these approximate container memory ceilings:
+Use these approximate container memory ceilings, set in
+`lab/docker-compose.yml`:
 
 | Container | Memory ceiling |
 |---|---:|
@@ -169,12 +373,12 @@ Use these approximate container memory ceilings:
 
 The `runs/<incident-id>` tree is transient lab state. Every completed
 standalone investigation gets a separate opaque investigation ID and
-atomically finalizes its cited evidence, tool receipts, run record, and report
-under `results/investigations/<investigation-id>`. During a benchmark, each
-completed run finalizes the same artifact kinds under
-`results/<evaluation-id>`. Finalized result bytes are immutable. A correction
-creates a new investigation or evaluation ID rather than rewriting an existing
-result.
+atomically finalizes its cited evidence, tool receipts, run record, and
+report under `results/investigations/<investigation-id>`. Finalized result
+bytes are immutable. A correction creates a new investigation ID rather than
+rewriting an existing result. (Benchmark-scoped `results/<evaluation-id>`
+artifacts are specified but not yet produced — no benchmark orchestrator
+exists; see Part I, Phase 3.)
 
 ### Scenario controller
 
@@ -196,17 +400,19 @@ Starting a scenario:
 Reset removes only active lab and transient state under the matching
 `runs/<incident-id>` tree, restarts affected services if necessary, and must
 verify healthy behavior before another scenario begins. It cannot delete or
-modify finalized evidence, records, or reports under `results/`.
+modify finalized evidence, records, or reports under `results/` — proven by
+`tests/integration/test_scenario_reset_isolation.py`.
 
 ### Logical ground-truth isolation
 
 Ground truth is open-source test metadata, not a filesystem secret. Isolation
 means the investigator process receives no evaluator manifest, semantic
 scenario key, expected outcome, required-evidence predicate, or answer-bearing
-path. Tests must prove that investigator packages do not import evaluator-only
-modules and that model contexts contain none of those values.
+path. `tests/security/test_ground_truth_isolation.py` proves investigator
+packages do not import evaluator-only modules and that model contexts contain
+none of those values.
 
-### Intended repository shape
+### Repository shape
 
 ```text
 src/causalops/
@@ -224,21 +430,26 @@ src/causalops/
   scenario_control.py
   report.py
   evaluation.py
+  doctor.py
+  system_probe.py
+  replay_fixtures/
 lab/
-  services/
+  docker-compose.yml
+  prometheus.yml
   scenarios/
+  services/
 tests/
   unit/
-  conformance/
   integration/
   security/
 results/
 ```
 
-Create directories only when an implemented vertical slice needs them. Create
-`docs/adr/` only when the owner explicitly approves an ADR decision.
+Milestone 1 adds `graph.py`, `tool_calls.py`, and `tool_wrappers.py` to
+`src/causalops/`; none of the three exists yet. Create new directories only
+when an implemented vertical slice needs them.
 
-## 4. Incident identity and initial evidence
+## Incident identity and initial evidence
 
 `IncidentScope` contains only:
 
@@ -268,7 +479,12 @@ Initial alert construction is deterministic and does not count as an
 investigator tool call. It contains no recent changes, detailed downstream
 metrics, diagnostic logs, or root-cause-specific language.
 
-## 5. Investigation workflow and budgets
+## Investigation workflow and budgets
+
+This is the current, implemented loop in `src/causalops/workflow.py`.
+Milestone 1 adds a parallel LangGraph orchestrator beside it (a new
+`GraphPhase` enum, tracked in Part III), retired only after conformance
+parity is demonstrated — this loop is not replaced yet.
 
 ```text
 CREATED
@@ -310,32 +526,31 @@ remaining call budget permits a safe alternative or assessment.
 
 ### Default limits
 
-| Limit | Default |
-|---|---:|
-| Investigation wall clock | 360 seconds |
-| Model call | 90 seconds |
-| Tool execution | 10 seconds |
-| Model calls, including repair | 4 |
-| Executed diagnostic tools | 2 |
-| Structured-output repairs | 1 |
-| Maximum counted input per model call | 3,200 tokens |
-| Claude `max_tokens` | 1,600 tokens |
-| Claude adaptive-thinking effort | `medium` |
-| Log result | 40 rows and 12 KB |
-| Metric result | 60 samples and 12 KB |
-| Automatic retries | 0 |
-| Claude standalone investigation cost cap | USD 0.15 |
-| Complete 24-run Claude evaluation cost cap | USD 1.75 |
+| Limit | Default | Status |
+|---|---:|---|
+| Investigation wall clock | 360 seconds | built — `Budgets.wall_clock_seconds` |
+| Model call | 90 seconds | specified, not enforced — `Budgets` has no per-call timeout field |
+| Tool execution | 10 seconds | built — `Budgets.tool_timeout_seconds` |
+| Model calls, including repair | 4 | built — `Budgets.model_calls` |
+| Executed diagnostic tools | 2 | built — `Budgets.executed_tools` |
+| Structured-output repairs | 1 | built — `Budgets.repairs` |
+| Maximum counted input per model call | 3,200 tokens | specified, not enforced — no token counting exists in `src/` |
+| Claude `max_tokens` | 1,600 tokens | specified for the live adapter, not yet built |
+| Claude adaptive-thinking effort | `medium` | specified for the live adapter, not yet built |
+| Log result | 40 rows and 12 KB | built — `Budgets.log_rows`, `evidence.MAX_RESULT_BYTES` |
+| Metric result | 60 samples and 12 KB | built — `prometheus.MAX_METRIC_SAMPLES`, `evidence.MAX_RESULT_BYTES` |
+| Automatic retries | 0 | built — no retry logic exists anywhere in `src/` |
+
+Every row marked `built` is enforced today by the cited constant. The two
+rows marked `specified, not enforced` (model-call timeout, input token
+counting) and the two Claude-specific rows are live-adapter design, not yet
+implemented — see Part I, Phase 3, and Part III. Cost caps are recorded in
+`TECHNICAL_SPEC.md` §10 (superseding the v1 figures — see Part III) rather
+than here, since they apply only once a live adapter exists.
 
 All limits are application-owned and visible to the model as immutable status.
 Context construction uses an injected clock, stable evidence ordering, fixed
 per-kind quotas, explicit truncation markers, and a digest of the final input.
-Before every Claude generation, the application asks Anthropic's token-count
-endpoint to count the complete request, including system text, messages, tool
-or output schema, and evidence. If the result exceeds 3,200 input tokens, the
-application applies its deterministic evidence-trimming rules and counts again.
-It does not send the generation request until the recounted input is within the
-limit.
 
 ### Terminal semantics
 
@@ -357,10 +572,16 @@ Normal diagnostic-iteration exhaustion with unresolved hypotheses produces
 `INSUFFICIENT_EVIDENCE`. A hard technical failure before a valid assessment
 produces `FAILED_SAFE`.
 
-## 6. Public contracts
+Replay results are scripted determinism, not agent behavior. They must never
+be reported as diagnostic accuracy, agent competence, or improvement over a
+baseline — no such measurement is possible until Phase 3's live adapter
+exists and a paired evaluation actually runs (Part III, Milestone 3).
 
-All model, tool, artifact, and CLI boundaries use Pydantic v2 models. Models that
-are persisted or exchanged with the reasoning model also carry a schema version.
+## Public contracts
+
+All model, tool, artifact, and CLI boundaries use Pydantic v2 models. Models
+that are persisted or exchanged with the reasoning model also carry a schema
+version.
 
 ### Deterministic enums
 
@@ -393,23 +614,27 @@ Disposition
   bounded result digest, outcome, and stable reason code.
 - `InitialPlan`: hypotheses and first tool proposal or stop.
 - `HypothesisUpdate`: revised hypotheses and second proposal or stop.
-- `FinalAssessment`: a model-selected `DIAGNOSED` or
-  `INSUFFICIENT_EVIDENCE` outcome, matching root-cause code, supporting and
-  contrary evidence IDs, uncertainty, and proposed human next step. Its model
-  schema excludes `FAILED_SAFE`.
+- `FinalAssessment`: a model-selected `DIAGNOSED` or `INSUFFICIENT_EVIDENCE`
+  outcome, matching root-cause code, supporting and contrary evidence IDs,
+  uncertainty, and proposed human next step. Its model schema excludes
+  `FAILED_SAFE`.
 - `InvestigationReport`: opaque investigation ID, validated assessment,
   budgets, latency, usage, versions, limitations, and artifact references.
   Application code may create a `FAILED_SAFE` report without a model
   `FinalAssessment`.
 - `EvaluationRecord`: paired system/run identity, expected outcome, mechanical
-  scores, reproducibility manifest, and raw artifact reference.
+  scores, reproducibility manifest, and raw artifact reference. The type
+  exists in `evaluation.py`; nothing populates it yet, since no live paired
+  run has ever executed.
 
 Do not request or persist private chain-of-thought. Model responses contain
 only structured decisions, short summaries, and evidence references.
 
-## 7. Investigator tools and policy
+## Investigator tools and policy
 
-Implement exactly four read-only tools:
+v1 implements exactly these four read-only tools. `TECHNICAL_SPEC.md` §7
+adds a fifth, optional `search_runbooks` retrieval tool for Milestone 2; it
+is not implemented yet.
 
 | Tool | Typed input and backend |
 |---|---|
@@ -437,7 +662,7 @@ result. Tools do not retry automatically. Untrusted telemetry may influence
 model reasoning, but it cannot register tools, expand scope, alter policy or
 budgets, or cause a disallowed operation.
 
-## 8. Incident families and variants
+## Incident families and variants
 
 Implement exactly four root-cause families:
 
@@ -465,11 +690,13 @@ Each family has:
 
 The evaluator-only expected outcome includes a root-cause code, disposition,
 and required-evidence predicates. A predicate describes observable source,
-kind, registered template/filter, and structured condition. The scorer resolves
-cited evidence IDs and evaluates these predicates; predicate names and expected
-values never enter model context.
+kind, registered template/filter, and structured condition. The scorer
+resolves cited evidence IDs and evaluates these predicates; predicate names
+and expected values never enter model context.
 
-## 9. CLI contract
+## CLI contract
+
+Implemented today:
 
 ```powershell
 causalops doctor
@@ -477,443 +704,222 @@ causalops lab up
 causalops lab down
 causalops scenario start <family> --seed <development|evaluation>
 causalops scenario reset <incident-id>
-causalops conformance
-```
-
-Use exactly these model-execution commands:
-
-```powershell
 causalops investigate <incident-id> --model replay
-causalops investigate <incident-id> --model claude --max-cost-usd 0.15
-causalops benchmark --model claude --variant evaluation --repetitions 3 --max-cost-usd 1.75
-causalops benchmark --model claude --variant evaluation --repetitions 3 --max-cost-usd 1.75 --resume <evaluation-id>
 ```
 
 - `doctor` checks the operating system, at least 7.5 GiB detected total RAM,
   current available RAM, at least 12 GB free disk, required writable
   directories, Docker, and the presence of `ANTHROPIC_API_KEY`. It warns but
-  does not fail when available RAM is below 2.5 GiB.
-- When local checks and the key-presence check pass, `doctor` uses the official
-  Anthropic Python SDK to make an authenticated HTTPS model-metadata request
-  equivalent to `GET /v1/models/claude-sonnet-5`. It verifies the exact required
-  model is available, does not request generated output, and has no intended
-  model-token charge. It does not count toward investigation model calls or
-  cost caps. It cannot inspect or guarantee the owner's Console credit balance.
+  does not fail when available RAM is below 2.5 GiB. It does not yet make an
+  authenticated model-metadata request (Part I, Phase 1 step 1).
 - `lab up` verifies Docker, Prometheus, service health, and required writable
   run directories.
-- `scenario start` is owner-facing and may use a semantic family name. It prints
-  an opaque incident ID; semantic identity is not passed to `investigate`.
+- `scenario start` is owner-facing and may use a semantic family name. It
+  prints an opaque incident ID; semantic identity is not passed to
+  `investigate`.
 - `investigate` accepts only an opaque incident ID, creates an opaque
   investigation ID, and finalizes JSONL evidence, receipts, a run record, and
   a Markdown report under `results/investigations/<investigation-id>`.
-- `conformance` runs replay-backed workflow, policy, safety, and artifact tests.
-- `benchmark` manages held-out scenario lifecycle and produces paired baseline
-  and workflow records. `--resume` accepts an existing evaluation ID, skips
-  completed run keys, and appends only missing records. Resume fails when its
-  stored model, thinking effort, token limits, pricing values/source date, or
-  cost cap differs from the requested run. An outstanding logical request is
-  never repeated; resume marks its run `FAILED_SAFE` and continues only when
-  the evaluation contract and remaining cost cap permit the next distinct run
-  key.
 - `scenario reset` verifies healthy state and cross-run isolation. It deletes
   only active lab/transient state for that incident and never finalized
   records, reports, receipts, or cited evidence under `results/`.
+
+Specified, not yet built:
+
+```powershell
+causalops investigate <incident-id> --model claude --max-cost-usd 0.15
+causalops benchmark --model claude --variant evaluation --repetitions 3 --max-cost-usd 1.75
+causalops conformance
+```
+
+None of these three commands is registered in `cli.py`'s parser. The
+`benchmark` signature above is the original v1 design; it is superseded by
+`TECHNICAL_SPEC.md` §10's paired evaluation (at most six held-out incidents,
+USD 2.00 cap) — see Part III, "Superseded v1 evaluation design," for what
+changed and why the numbers differ.
 
 Business outcomes `DIAGNOSED` and `INSUFFICIENT_EVIDENCE` are successful CLI
 executions. `FAILED_SAFE`, invalid configuration, and unavailable dependencies
 return nonzero with stable machine-readable reason codes.
 
-## 10. Model strategy
-
-### ReplayReasoningModel
-
-Checked-in opaque fixtures provide deterministic valid and invalid stage
-responses. Replay is used for ordinary development, CI, conformance, policy,
-state, and report tests. Replay results are scripted and must never be reported
-as agent accuracy or diagnostic improvement.
-
-### ClaudeReasoningModel
-
-The only live reasoning provider uses the official synchronous Anthropic
-Python SDK behind the same small reasoning-model protocol as replay. Its
-contract is:
-
-- Construct the synchronous SDK client with `max_retries=0`.
-- Exact required model `claude-sonnet-5`; aliases and silent model substitution
-  are not allowed.
-- Adaptive thinking with effort `medium` and `max_tokens=1600`; the output
-  limit covers thinking plus the returned structured content.
-- Do not send `temperature`, `top_p`, or `top_k`.
-- Use Anthropic token counting before every generation. Count system text,
-  messages, the structured-output schema, and evidence. Deterministically trim
-  and recount until counted input is at most 3,200 tokens.
-- Supply the Pydantic JSON Schema through Claude's structured-output support
-  and validate the returned structured result locally.
-- Run at most one Claude request and one active scenario at a time.
-
-Each logical token-count, model-metadata, or generation operation makes exactly
-one HTTP attempt. A generation timeout is the smaller of 90 seconds and the
-remaining investigation time. Token-count and model-metadata timeouts are the
-smaller of 10 seconds and the remaining command time. Token-count and metadata
-operations do not consume the four-call model counter, but all HTTP operations
-consume the active command's wall-clock budget.
-
-Read `ANTHROPIC_API_KEY` only from the process environment. Never accept it as
-a CLI argument or config value, and never write it to artifacts, logs, reports,
-receipts, exception text, or validation errors.
-
-Thinking blocks are untrusted temporary response data. Discard them after
-extracting the response fields needed for accounting and validation. Persist
-only the validated structured result, stop reason, usage, and non-secret
-request metadata. Never retain provider reasoning or thinking text.
-
-### Cost and provider failures
-
-Use USD 2 per million input tokens and USD 10 per million output tokens. Record
-the pricing values, source identifier, and source date in every standalone run
-and evaluation manifest.
-
-Before every generation:
-
-1. Create a unique logical request ID.
-2. Calculate a write-ahead reservation using 110% of the counted input at the
-   input price plus the full 1,600-token output allowance at the output price.
-3. Add settled cost and every outstanding reservation. Do not continue when
-   adding the new reservation would exceed USD 0.15 for a standalone
-   investigation or USD 1.75 for the complete evaluation.
-4. Append the logical request ID, counted input, prices, calculation, and
-   reservation amount to the run's cost ledger and durably flush it. Only then
-   may the SDK send the generation request.
-
-`--max-cost-usd` is mandatory for every Claude generation command and may not
-exceed the matching hard cap. The application uses the lower of the supplied
-value and the hard cap. Settled cost plus all outstanding reservations count
-against that effective cap.
-
-Immediately after every response, append and durably flush the provider-
-reported usage and actual cost with the logical request ID. Only after that
-usage record is durable may a separate settlement event replace the outstanding
-reservation with actual cost. Process neither content nor stop reason before
-both writes finish.
-
-After a timeout, process crash, missing usage, or any ambiguous result, retain
-the full reservation as outstanding. Resume never repeats an outstanding
-logical request; it marks that run application-generated `FAILED_SAFE`. If
-usage or settlement persistence fails, stop the run and send no further
-provider request.
-
-Missing credentials, model unavailability, authentication failure, rate
-limiting, network failure, timeout, token-count failure, and cost-cap denial
-produce `FAILED_SAFE` with stable non-secret reason codes. Do not retry
-automatically, fall back to another model or provider, enable automatic
-recharge, or make a request after a cost gate fails.
-
-### Stop-reason handling
-
-Inspect response content only after usage and cost settlement is durable. Only
-`end_turn` permits local schema and domain validation. If `end_turn` content
-fails that validation, it may consume the one structured-output repair. No
-other stop reason can trigger schema repair.
-
-These stop reasons produce distinct stable application-generated failures:
-
-| Stop reason | Disposition and reason code |
-|---|---|
-| `refusal` | `FAILED_SAFE`, `PROVIDER_REFUSAL` |
-| `max_tokens` | `FAILED_SAFE`, `PROVIDER_MAX_TOKENS` |
-| `model_context_window_exceeded` | `FAILED_SAFE`, `PROVIDER_CONTEXT_WINDOW_EXCEEDED` |
-| `tool_use` | `FAILED_SAFE`, `PROVIDER_TOOL_USE` |
-| `pause_turn` | `FAILED_SAFE`, `PROVIDER_PAUSE_TURN` |
-| unexpected `stop_sequence` | `FAILED_SAFE`, `PROVIDER_STOP_SEQUENCE` |
-| any other stop reason | `FAILED_SAFE`, `PROVIDER_UNEXPECTED_STOP_REASON` |
-
-CausalOps configures no stop sequence, so every `stop_sequence` result is
-unexpected. A refusal is billed provider behavior, not malformed structured
-content. It is settled using reported usage and does not consume the repair.
-
-Claude Pro may assist development through Claude Code but does not include the
-application's Anthropic API usage. API credit and billing remain separate. An
-explicit live CLI command authorizes only the requests needed for that command
-and only within its required cost cap.
-
-## 11. Evaluation and scoring
-
-Compare:
-
-1. **Single-pass baseline:** the pinned model receives the immutable initial
-   alert packet and must emit a `FinalAssessment` without diagnostic tools.
-2. **CausalOps:** the same model and packet may execute at most two validated
-   evidence checks before emitting `FinalAssessment`.
-
-Both systems use the same exact required model, adaptive-thinking effort,
-`max_tokens`, input cap, pricing, prompt-level safety policy, taxonomy, and
-initial packet. Neither system sends temperature or sampling controls. Their
-task instructions differ only where tool-enabled workflow behavior requires
-it.
-
-Run the held-out evaluation variant three times for each of four families and
-both systems: **24 scored runs**. Repetitions measure run-to-run behavior; they
-are not additional incident classes. Run them sequentially and append each
-completed record immediately. A run key combines evaluation ID, family,
-system, and repetition so an interrupted benchmark can resume without
-duplicating work.
-
-### Mechanical scores
-
-- **Diagnosis correctness:** selected `RootCauseCode` equals evaluator-only
-  expected code.
-- **Disposition correctness:** selected `Disposition` equals expected result.
-- **Citation validity:** every cited evidence ID exists and belongs to the
-  active incident.
-- **Citation sufficiency:** cited evidence satisfies the evaluator-only required
-  evidence predicates.
-- **Control behavior:** invalid, denied, duplicate, and out-of-scope proposals.
-- **Efficiency:** median and range of latency, tokens, executed tools, and model
-  calls, plus complete per-run values.
-
-Do not use an LLM judge. Do not report p95 from twelve runs per system. Publish
-a paired baseline/workflow row for every run, the complete raw JSONL records,
-aggregate counts, and at least one owner-written failure narrative. Any result
-must state that it covers four synthetic incident families and 24 scored runs.
-
-### Reproducibility manifest
-
-Every `EvaluationRecord` includes:
-
-- Git `HEAD` SHA and clean/dirty working-tree status.
-- A source-patch SHA-256 covering the exact tracked diff from `HEAD` plus the
-  bytes and repository-relative paths of untracked source files. A clean tree
-  records the SHA-256 of the empty patch.
-- Provider name, requested and response-reported exact required model name,
-  Anthropic API version, and synchronous Anthropic Python SDK version.
-- Adaptive-thinking type, effort, `max_tokens`, counted-input limit, and proof
-  that `temperature`, `top_p`, and `top_k` were absent. Record
-  `max_retries=0`, applied operation timeouts, and HTTP attempt counts.
-- Prompt, schema, policy, tool-registry, scorer, and scenario versions.
-- Development/evaluation variant and repetition number.
-- Structured-output enforcement mode.
-- Input/output prices, pricing source identifier/date, command cost cap,
-  accumulated provider-reported token usage, and calculated cost.
-- Logical request IDs, 110%-input reservation calculations, reservation and
-  settlement event references, and settled/outstanding totals.
-- Non-secret request IDs, stop reasons, provider latency, token-count results,
-  deterministic-trimming count, and stable failure reason when present.
-- Non-sensitive hardware summary.
-- Initial-alert digest, final-context digest, timestamps, tokens, and latency.
-
-Dirty-tree runs are useful for development but their scores are marked
-non-publishable. A publishable diagnostic score requires an owner-approved
-clean commit, matching `HEAD` SHA, clean status, and empty source-patch digest.
-
-## 12. Threat model and tests
+## Threat model and tests
 
 Protected assets are incident scope, tool registry, policy, budgets, evidence
-integrity, evaluator ground truth, secrets, and the host environment. Attacker-
-controlled inputs include model output, logs, metric labels, alert text, and
-change descriptions.
+integrity, evaluator ground truth, secrets, and the host environment.
+Attacker-controlled inputs include model output, logs, metric labels, alert
+text, and change descriptions.
 
-Required threats, controls, and acceptance tests:
+Rows below marked **built** are proven today by a cited Phase 1/2 test. Rows
+marked **Phase 3** describe a control that only applies once the live Claude
+adapter exists and cannot be tested until it does.
 
-| Threat | Required control and test |
-|---|---|
-| Ground-truth leakage | Opaque model inputs; assert prompt/context lacks semantic scenario keys and expected values |
-| Prompt injection in telemetry | Untrusted delimiters plus deterministic policy; verify no scope, tool, policy, or budget expansion |
-| Arbitrary query execution | Template enums only; reject raw PromQL, shell, SQL, URL, and path input |
-| Scope escape | Incident-labelled backends and allowlists; deny cross-run service, time, file, and evidence access |
-| Forged citations | Resolve opaque evidence IDs from active store; reject missing and cross-incident IDs |
-| Resource exhaustion | Enforce call, time, context, row, sample, and byte limits |
-| Credential leakage | Environment-only API key plus redaction; verify it never reaches CLI text, config, artifacts, logs, reports, receipts, or errors |
-| Provider data leakage | Send only bounded synthetic incident context; verify requests exclude secrets, evaluator ground truth, and host paths |
-| Unbounded provider spend | Durably flushed write-ahead reservations plus settled/outstanding accounting; verify both caps, crash behavior, and no request after denial |
-| Scenario contamination | Reset volumes/state and assert health and empty run scope before the next scenario |
-| Model/tool failure | Timeout and malformed-output fixtures produce deterministic terminal states |
+| Threat | Required control | Status |
+|---|---|---|
+| Ground-truth leakage | Opaque model inputs; assert prompt/context lacks semantic scenario keys and expected values | built — `tests/security/test_ground_truth_isolation.py` |
+| Prompt injection in telemetry | Untrusted delimiters plus deterministic policy; verify no scope, tool, policy, or budget expansion | built — `tests/security/test_prompt_injection.py` |
+| Arbitrary query execution | Template enums only; reject raw PromQL, shell, SQL, URL, and path input | built — `tests/unit/test_policy.py`, `test_tools.py` |
+| Scope escape | Incident-labelled backends and allowlists; deny cross-run service, time, file, and evidence access | built — `tests/unit/test_telemetry.py`, `test_policy.py` |
+| Forged citations | Resolve opaque evidence IDs from active store; reject missing and cross-incident IDs | built — `tests/unit/test_policy.py`, `src/causalops/replay_fixtures/forged_citation.json` |
+| Resource exhaustion | Enforce call, time, row, sample, and byte limits, and per-kind context quotas (`evidence.CONTEXT_QUOTAS`) — distinct from the unbuilt token-counted input cap, see "Default limits" above | built — `tests/unit/test_workflow.py`, `test_telemetry.py` |
+| Scenario contamination | Reset volumes/state and assert health and empty run scope before the next scenario | built — `tests/integration/test_scenario_reset_isolation.py` |
+| Model/tool failure | Timeout and malformed-output fixtures produce deterministic terminal states | built — `tests/unit/test_workflow.py` |
+| Credential leakage | Environment-only API key plus redaction; verify it never reaches CLI text, config, artifacts, logs, reports, receipts, or errors | Phase 3 — no code path reads or handles an API key yet |
+| Provider data leakage | Send only bounded synthetic incident context; verify requests exclude secrets, evaluator ground truth, and host paths | Phase 3 — no provider request exists yet |
+| Unbounded provider spend | Durably flushed write-ahead reservations plus settled/outstanding accounting; verify both caps, crash behavior, and no request after denial | Phase 3 — no cost ledger exists yet; caps superseded, see Part III |
 
-Additional required tests cover:
+### Tests already proving Phase 1/2 behavior
 
-- Domain invariants and valid/invalid transitions.
+- Domain invariants and valid/invalid transitions (`test_domain.py`).
 - Every valid and invalid disposition/root-cause pairing, including proof that
-  only application code can create `FAILED_SAFE`.
-- One structured-output repair and repair exhaustion.
-- Denied-proposal accounting and duplicate fingerprints.
-- Deterministic clock, evidence ordering, quotas, and truncation markers.
-- Identical serialized initial packets for baseline and workflow.
-- Development/evaluation seed separation.
+  only application code can create `FAILED_SAFE` (`test_domain.py`,
+  `test_workflow.py`).
+- One structured-output repair and repair exhaustion (`test_workflow.py`,
+  `test_replay_model.py`).
+- Denied-proposal accounting and duplicate fingerprints (`test_policy.py`,
+  `replay_fixtures/duplicate_proposal.json`).
+- Deterministic clock, evidence ordering, quotas, and truncation markers
+  (`test_evidence.py`, `test_workflow.py`).
+- Development/evaluation seed separation (`test_scenario_control.py`).
 - Healthy start, bounded fault activation, repeatable signals, and cleanup for
-  every incident family.
-- Citation validity and required-evidence sufficiency scoring.
-- Budget, model timeout, tool timeout, and dependency-unavailable behavior.
+  every incident family (`test_incident_families.py`,
+  `test_scenario_control.py`).
+- Citation validity and required-evidence sufficiency scoring
+  (`test_evaluation.py`).
 - Windows drive letters, path separators, UTF-8 files, writable-directory
-  checks, and commands that are safe to copy into PowerShell.
+  checks (`test_doctor.py`, `fake_machine.py`), proven on both CI platforms.
 - `causalops doctor` outcomes for missing Docker, missing API key, less than
   7.5 GiB detected total RAM, less than 12 GB free disk, the advisory warning
-  below 2.5 GiB available RAM, authenticated model-metadata failure, exact
-  required model mismatch, and success. Tests fake the SDK and assert an
-  authenticated `GET /v1/models/claude-sonnet-5` call. They prove no generation
-  is requested and make no external call.
-- Exact Claude requests: required `claude-sonnet-5`, adaptive thinking,
-  `medium` effort, `max_tokens=1600`, no `temperature`, `top_p`, or `top_k`, and
-  one concurrent request.
-- Synchronous SDK construction with `max_retries=0`; generation timeout equal
-  to the smaller of 90 seconds and remaining investigation time; token-count
-  and metadata timeout equal to the smaller of 10 seconds and remaining time;
-  and exactly one inspected HTTP attempt per logical operation.
-- Token-count and metadata calls do not change the model-call counter but do
-  reduce the active wall-clock budget.
-- Token counting over system text, messages, schema, and evidence; deterministic
-  trimming, recounting, and blocking above 3,200 counted input tokens.
-- USD 0.15 standalone and USD 1.75 evaluation gates; the 110%-input plus full-
-  output reservation formula; unique logical request IDs; durable reservation,
-  usage, and settlement ordering; and settled-plus-outstanding accounting.
-- Crash, timeout, missing-usage, and ambiguous-response fixtures retain the
-  full reservation. Resume never repeats the outstanding logical request and
-  marks its run `FAILED_SAFE`.
-- Resume rejection for changed model, effort, limits, pricing, or cap.
-- `end_turn` content validation and repair, plus distinct no-repair
-  `FAILED_SAFE` results for `refusal`, `max_tokens`,
-  `model_context_window_exceeded`, `tool_use`, `pause_turn`, unexpected
-  `stop_sequence`, and any unknown stop reason.
-- A billed-refusal fixture proves usage and settlement become durable before
-  failure handling and that the schema-repair budget is unchanged.
-- Missing credentials, authentication, rate limit, network failure, timeout,
-  count failure, and cost denial produce stable `FAILED_SAFE` records without
-  retry or fallback.
-- API-key redaction and proof that thinking blocks are never retained.
-- Captured fake requests proving only bounded synthetic incident context is
-  sent and no secret, evaluator ground truth, or host path leaves the process.
-- Container memory ceilings, one-hour Prometheus retention, and one active
-  scenario at a time.
-- Sequential and resumed benchmarks, including proof that a completed run key
-  is not executed or recorded twice.
-- Clean and dirty provenance records, source-patch digest changes, and blocking
-  publication for any run that is not tied to an owner-approved clean commit.
-- Finalized result immutability and proof that scenario reset cannot delete
-  records, reports, receipts, or cited evidence from standalone paths under
-  `results/investigations/` or benchmark paths under `results/<evaluation-id>`.
-- A manual smoke test on the working platform, Linux x86-64, with all required
-  containers and one explicitly authorized, USD 0.15-capped Claude
-  investigation. Record the advisory warning if available RAM is below 2.5 GiB.
-  Windows support is proven by continuous integration on `windows-latest`, not
-  by a second manual run.
-- A manual readability review covering concrete names, limited nesting, useful
-  comments and docstrings, plain documentation, and no decorative abstractions.
+  below 2.5 GiB available RAM, and success (`test_doctor.py`).
 
-Normal CI runs on `windows-latest` and `ubuntu-latest` and uses replay fixtures,
-fake Anthropic SDK clients, and disposable local test data. Network access is
-allowed only while installing the locked dependencies. After installation,
-formatting, linting, strict typing, unit tests, security tests, and replay
-conformance make no external calls and require no credentials or paid usage.
-Doctor's model lookup, token counting, generation, refusal, and provider
-failures are tested through fakes or mocks. Local in-process and loopback test
-traffic is allowed. Outside CI, only an explicitly invoked live command may send
-authenticated HTTPS requests to Anthropic, subject to its cost gate.
+The tool-timeout and dependency-unavailable behavior above are covered by
+the threat table's *Model/tool failure* row (`test_workflow.py`) and
+*Resource exhaustion* row (`test_workflow.py`, `test_telemetry.py`); the
+finalized-result immutability proof is covered by the *Scenario
+contamination* row (`test_scenario_reset_isolation.py`) — same tests, same
+citations, listed once.
 
-## 13. Definition of done
+Windows support above is proven by continuous integration on
+`windows-latest`. A manual smoke test on the working platform, Linux x86-64,
+with all required containers, is run by hand and produces no committed
+artifact — it is a process step, not a test this repository can cite.
 
-The MVP is complete only when:
+### Tests specified for the live Claude adapter — not yet built
 
-- A clean clone installs and passes formatting, linting, strict typing, and
-  tests on both `windows-latest` and `ubuntu-latest`.
-- `causalops doctor` verifies a supported environment, hard memory and disk
-  thresholds, required API key, and exact required model metadata before a
-  scored run. It warns below 2.5 GiB available RAM and cannot check Console
-  credit balance.
-- All four development and evaluation variants activate, assert, and reset
-  reproducibly without cross-run leakage.
-- One real scenario works end to end through opaque incident ID, Prometheus,
-  JSONL logs, policy, tools, report, and scorer.
-- Every executed investigator tool is typed, scoped, read-only, bounded, and
-  recorded.
-- Replay conformance covers valid diagnosis, correct abstention, repair,
-  malformed output, denial, timeout, and budget exhaustion.
-- The synchronous Claude adapter enforces the exact required model, adaptive
-  thinking at medium effort, exact token limits, environment-only credential,
-  deterministic count/trim/recount flow, `max_retries=0`, deadline-derived
-  timeouts, one HTTP attempt per operation, and no fallback.
-- Every generation has a durably flushed write-ahead reservation with a unique
-  logical request ID. Settlement follows durable provider usage; uncertain
-  requests retain their full reservation, are never repeated on resume, and
-  cause their run to be marked `FAILED_SAFE`.
-- Only a durably accounted `end_turn` response can reach content validation.
-  Every other documented stop reason produces its distinct no-repair
-  `FAILED_SAFE` result, while invalid `end_turn` content alone may use schema
-  repair.
-- The ambiguous replay and Claude cases can be scored as abstention rather
-  than operational failure.
-- The pinned Claude benchmark produces all 24 traceable paired records within
-  the USD 1.75 evaluation cap.
-- An interrupted benchmark resumes without repeating completed run keys.
-- Finalized standalone and benchmark artifacts remain immutable under their
-  investigation or evaluation ID and survive scenario reset.
-- Reports contain mechanical scores, complete failures, limitations, and no
-  replay-derived accuracy claims.
-- Published diagnostic scores come only from an owner-approved clean commit
-  whose recorded provenance matches the evaluated source.
-- A concise threat model is documented. Any ADR records an owner-approved
-  decision and rationale; no ADR is required when no such decision exists.
-- A five-minute recording shows one diagnosis, one abstention, and the paired
-  evaluation report.
+These describe required behavior once Phase 3 (or a later v2 milestone) adds
+a live model adapter. None of them exist today because none of the code they
+would test exists today:
 
-If implementation stops before the Claude benchmark, it may be published as an
-evaluation harness with replay conformance, but it is not complete and cannot
-claim demonstrated diagnostic improvement.
+- Authenticated `GET /v1/models/claude-sonnet-5` metadata check and exact
+  required-model mismatch handling.
+- Exact Claude request shape: required `claude-sonnet-5`, adaptive thinking,
+  `medium` effort, `max_tokens=1600`, no `temperature`/`top_p`/`top_k`, and one
+  concurrent request.
+- Synchronous SDK construction with `max_retries=0`; per-operation timeout
+  behavior; exactly one inspected HTTP attempt per logical operation.
+- Token counting over system text, messages, schema, and evidence;
+  deterministic trimming and recounting above the input cap.
+- Cost-cap gates, the reservation formula, unique logical request IDs, and
+  durable reservation/usage/settlement ordering. (The v1 figures — USD 0.15
+  standalone, USD 1.75 for 24 runs — are superseded; see Part III.)
+- Crash, timeout, missing-usage, and ambiguous-response fixtures retaining
+  the full reservation, and resume never repeating an outstanding request.
+- `end_turn` content validation and repair, and the distinct no-repair
+  `FAILED_SAFE` result for every other documented provider stop reason.
+- A billed-refusal fixture proving usage settles before failure handling.
+- Missing-credential, authentication, rate-limit, network, timeout, and
+  cost-denial failures producing stable `FAILED_SAFE` records.
+- API-key redaction and proof that provider thinking blocks are never
+  retained.
+- Sequential and resumed benchmark runs, including proof a completed run key
+  is never executed or recorded twice.
+- Clean/dirty commit provenance blocking publication of a non-reproducible
+  score.
 
-## 14. Three-phase delivery sequence
+Normal CI runs on `windows-latest` and `ubuntu-latest` using replay fixtures
+and disposable local test data. Network access is allowed only while
+installing locked dependencies; after that, formatting, linting, strict
+typing, unit tests, security tests, and replay conformance make no external
+calls and require no credentials. Outside CI, no command in this repository
+today sends an authenticated request to Anthropic — that capability does not
+exist yet.
 
-Every step is one bounded vertical slice and must pass the coder, two-reviewer,
-owner-approval, correction, re-review, and final-explanation gate defined in
-`AGENTS.md`. Do not begin the next step while the current gate is open. A phase
-starts only after all three steps in the preceding phase close.
+# Part III — v2 in progress
 
-### Phase 1: foundation and first vertical slice
+The old v1 delivery process (§14 "Three-phase delivery sequence" in
+`git show b6f4d9c:TECHNICAL_OVERVIEW.md`) is superseded by `CLAUDE.md`'s
+owner-controlled review protocol and by the milestone/unit vocabulary
+defined at the top of this document.
 
-1. **Windows preflight and package foundation:** add packaging, quality tools,
-   local `causalops doctor` checks, configuration, and Windows-safe paths. The
-   provider metadata check belongs to Phase 3 step 1.
-2. **Investigation core:** add domain types, replay model, policy, budgets,
-   JSONL run records, the investigation loop, unit scoring, and focused tests.
-   Do not add the synthetic lab, tool backends, scenario wiring, or benchmark
-   orchestration in this step.
-3. **First real vertical slice:** add the synthetic lab, three services,
-   Prometheus, scenario controller, all four working tool backends for one
-   opaque-ID incident, end-to-end wiring, report, and scorer integration. Reuse
-   the core and scoring rules from step 2 rather than redefining them.
+## Milestone 1 — Bounded tool-graph parity
 
-### Phase 2: complete lab and safety
+**Status:** in progress. Unit 0 (this document and the matching
+`TECHNICAL_SPEC.md` amendments) has landed. Units 1a (the trust boundary:
+`GraphPhase`, `tool_calls.py`, `tool_wrappers.py`, and the three-part
+tool-policy-bypass proof required by `TECHNICAL_SPEC.md` §9 — an AST import
+test showing the dispatch node imports no backend module, a wrapper-identity
+test showing every registered dispatch callable is wrapper-produced rather
+than merely un-imported, and a spy-backend test showing a denied proposal
+never invokes it) and 1b (the orchestration: `graph.py`, the CLI
+`--orchestrator` flag, parity tests) have not started.
 
-1. **Harden telemetry tools:** generalize the four working backends and their
-   registered templates for every family; add deterministic context,
-   cross-incident isolation, and result bounds. Do not add benchmark
-   orchestration or aggregation.
-2. **Incident families:** add the remaining families, development and
-   evaluation seeds, misleading evidence, repeatable activation, and cleanup.
-3. **Security and conformance:** add ground-truth isolation, injection, scope
-   escape, forged citations, malformed output, timeout, budget, and replay
-   conformance cases.
+Per `TECHNICAL_SPEC.md` §12: run one replay incident through a LangGraph
+`StateGraph` with native tool-call parsing, one policy wrapper, atomic budget
+reservation, and the existing report and scorer — then wrap the remaining
+three tools and retire the duplicate orchestration only after conformance
+parity is demonstrated.
 
-### Phase 3: Claude API and portfolio evidence
+## Milestone 2 — Durable escalation and local retrieval
 
-1. **Claude API integration:** add the official synchronous Anthropic SDK,
-   authenticated doctor metadata lookup, pinned model and request settings,
-   token counting, credential protection, cost gates, provider failure
-   behavior, and single-pass baseline.
-2. **Benchmark delivery:** add only sequential 24-run orchestration, aggregate
-   calculations over the existing scorer, resume behavior, finalized raw
-   records, and paired reports. Do not redefine tools or scoring rules.
-3. **Portfolio handoff:** add the plain-language README and threat model,
-   limitations, failure analysis, reports, and a five-minute demo. Create an
-   ADR only for an explicit owner-approved decision; zero ADRs is valid.
+**Status:** not started. Adds checkpoint/operation IDs, CLI interrupt resume,
+approval routing, and crash/idempotency tests; curated FTS5 runbooks,
+retrieval provenance, and injection/no-ground-truth-leakage tests. Pinecone
+remains a post-milestone optional experiment.
 
-Do not replace missing evaluation with a UI, cloud deployment, or additional
-architecture.
+## Milestone 3 — Evidence-backed portfolio release
 
-## 15. Deferred extensions
+**Status:** not started. Runs the fixed paired evaluation under the USD 2 cap,
+saves raw records and limitations, produces architecture and threat-model
+documents, verifies the clean source commit, and records a short diagnosis
+plus abstention/escalation demo.
 
-Consider these only after the definition of done and an explicit update to this
-specification:
+## Superseded v1 evaluation design
+
+The original v1 plan (formerly this document's §11 "Evaluation and scoring"
+and §13 "Definition of done") specified a Claude benchmark that was never
+built: three repetitions of four families against two systems — 24 scored
+runs — under a USD 1.75 evaluation cost cap, plus a USD 0.15 standalone
+investigation cap.
+
+That design is superseded by `TECHNICAL_SPEC.md` §10: **at most six held-out
+paired incidents** (one no-tool baseline and one tool-enabled run each) under
+a single **USD 2.00 application-wide ceiling**, covering both standalone and
+paired runs together rather than separate caps. The escalation path is
+explicitly excluded from scored runs; HITL is demonstrated and tested
+separately.
+
+Kept here rather than deleted because the scope change — 24 runs to 6, two
+caps to one — is something a reader who remembers the original number will
+reasonably ask about. `TECHNICAL_SPEC.md` §10 is authoritative; this section
+is history.
+
+The rest of the original evaluation design — mechanical scores (diagnosis
+correctness, disposition correctness, citation validity, citation
+sufficiency, control behavior, efficiency), the reproducibility manifest
+fields, and the "do not use an LLM judge, do not report p95 from a small
+sample" publication rules — remains accurate design intent for whichever
+milestone eventually builds the live adapter. It is not implemented; see
+Part I, Phase 3.
+
+## Remaining deferred extensions
+
+Two items in the original v1 deferred list are no longer deferred:
+**agent frameworks** and **SQLite-backed investigation restart** are now
+adopted v2 requirements (LangGraph orchestration, SQLite-backed checkpoints)
+per `CLAUDE.md`. What remains genuinely deferred, considered only after v2's
+completion criteria and an explicit specification update:
 
 - MCP adapter around the typed tool registry.
 - OpenTelemetry traces as another evidence source.
-- SQLite-backed investigation restart.
 - Additional incident families and a larger benchmark.
 - Optional second-provider comparison for a specific measured question.
 - Static hosted report or recorded-results viewer.

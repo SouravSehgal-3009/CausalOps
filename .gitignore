@@ -18,3 +18,6 @@ results/
 # Contributor instructions stay local; the product specification is not ignored.
 AGENTS.md
 CLAUDE.md
+AGENTS_OLD.md
+CLAUDE_OLD.md
+TECHNICAL_OVERVIEW_OLD.md
