@@ -7,13 +7,15 @@ behind the same protocol.
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from causalops.domain import ModelUsage
+from causalops.domain import ModelUsage, ToolProposal
+from causalops.tool_calls import NativeToolCall, to_tool_call
 
 
 class Stage(StrEnum):
@@ -141,4 +143,87 @@ class ReplayReasoningModel:
                 return evidence_id
         raise ReplayFixtureError(
             "the fixture cites a check result, but no check evidence is in the context"
+        )
+
+
+@dataclass(frozen=True)
+class ProposedTurn[StageModel: BaseModel]:
+    """One INVESTIGATE-stage model turn.
+
+    `tool_call` is the encoded form of `parsed.proposal`, present only when
+    the model proposed a check. Decoding it back into a `ToolProposal` is the
+    graph's job, not this adapter's -- `select_single_tool_call` and
+    `parse_tool_call` are the same functions a live provider's tool-call
+    message would have to pass through, and the graph's INVESTIGATE node
+    calling them itself (rather than this adapter pre-decoding) is what
+    proves replay exercises that boundary rather than shortcutting around it.
+    """
+
+    parsed: StageModel | None
+    errors: str
+    tool_call: NativeToolCall | None
+    usage: ModelUsage | None
+
+
+class ReplayToolCallingModel:
+    """Wraps `ReplayReasoningModel` so the graph orchestrator sees the same
+    native-tool-call protocol a live Claude adapter would produce, instead of
+    reading `InitialPlan.proposal`/`HypothesisUpdate.proposal` off a
+    structured response directly.
+
+    `TECHNICAL_SPEC.md` §5 requires the replay adapter to emit an
+    `AIMessage.tool_calls`-equivalent message, not merely a structured field
+    a live provider happens not to use. `propose()` is that requirement: it
+    turns a parsed proposal into a `NativeToolCall` with `to_tool_call`, the
+    same encoder a live adapter's decoder (`parse_tool_call`) has to accept.
+    `respond()` is a plain pass-through for `FINAL_ASSESSMENT`, which has no
+    proposal to encode, so callers use one model object for the whole run.
+    """
+
+    def __init__(self, inner: ReplayReasoningModel) -> None:
+        self.inner = inner
+        self._next_call_id = 0
+
+    @property
+    def requests(self) -> list[ModelRequest]:
+        """Delegates to the wrapped model so a parity test can compare the
+        stage sequence the graph asked for against the loop's, the same way
+        it reads `ReplayReasoningModel.requests` directly for the loop."""
+        return self.inner.requests
+
+    def respond(self, request: ModelRequest) -> ModelResponse:
+        return self.inner.respond(request)
+
+    def propose[StageModel: BaseModel](
+        self, request: ModelRequest, schema: type[StageModel]
+    ) -> ProposedTurn[StageModel]:
+        """`schema` must be `InitialPlan` or `HypothesisUpdate` -- the two
+        stages that carry a `proposal: ToolProposal | None` field and
+        enforce exactly one of `proposal`/`stop_reason` (`domain.py`).
+        `FinalAssessment` has no proposal to offer, so it is asked through
+        `respond()` above instead.
+
+        `schema`'s bound is plain `BaseModel`, not a narrower protocol,
+        because a `Protocol` naming a pydantic field cannot also share
+        `parse_response`'s `BaseModel` bound -- pydantic's model metaclass
+        and `Protocol`'s cannot combine on one class. The `.proposal` access
+        below is a runtime `isinstance` check instead of a static one; both
+        call sites in `graph.py` are internal and pass only the two schemas
+        this docstring names.
+        """
+        response = self.inner.respond(request)
+        parsed, errors = parse_response(schema, response.content)
+        if parsed is None:
+            return ProposedTurn(
+                parsed=None, errors=errors, tool_call=None, usage=response.usage
+            )
+        proposal = getattr(parsed, "proposal", None)
+        if not isinstance(proposal, ToolProposal):
+            return ProposedTurn(
+                parsed=parsed, errors="", tool_call=None, usage=response.usage
+            )
+        self._next_call_id += 1
+        encoded = to_tool_call(proposal, f"call-{self._next_call_id}")
+        return ProposedTurn(
+            parsed=parsed, errors="", tool_call=encoded, usage=response.usage
         )

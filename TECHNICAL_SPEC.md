@@ -135,8 +135,14 @@ CREATED
 - Every transition has a timeout/error route to a deterministic safe report.
 - Graph state is JSON-serializable and is a projection of existing domain
   records, not a second domain model. Persist `thread_id`, incident ID, tool
-  receipts, evidence IDs, budget state, phase, interrupt state, and immutable
-  `run_id`.
+  receipts, evidence records, budget state, phase, interrupt state, and
+  immutable `run_id`.
+
+  *Amendment, Unit 1b:* the original wording said "evidence IDs." A node
+  communicates with the rest of the graph only through state, and rendering
+  the next model turn's context needs each record's summary, payload, kind,
+  source, and timestamp, not just its ID. State therefore carries the full
+  evidence record, from which the ID is a trivial projection.
 - SQLite stores graph checkpoints and approval/audit records only. Existing
   JSONL evidence and results remain the canonical investigation artifacts.
 

@@ -13,8 +13,9 @@ from causalops.doctor import (
     project_root_not_found,
     run_doctor,
 )
-from causalops.domain import Budgets, Disposition, StoredIncident
-from causalops.models import ReplayReasoningModel
+from causalops.domain import Budgets, Disposition, GraphPhase, StoredIncident
+from causalops.graph import run_graph_investigation
+from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
@@ -27,8 +28,9 @@ from causalops.scenario_control import (
     start_scenario,
 )
 from causalops.system_probe import SystemProbe
-from causalops.telemetry import RunPaths, registered_check_runner
-from causalops.workflow import run_investigation, utc_now
+from causalops.telemetry import RunPaths, registered_check_runner, run_logs_check
+from causalops.tool_wrappers import dispatch_registry
+from causalops.workflow import InvestigationResult, run_investigation, utc_now
 
 # Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md's
 # Tests specified for the live Claude adapter section describes the
@@ -39,7 +41,14 @@ MODEL_CHECK_NOTE = (
     "arrives in a later step."
 )
 
-REPLAY_FIXTURE = Path(__file__).parent / "replay_fixtures" / "lab_diagnosis.json"
+REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
+# The loop orchestrator can call all four tools through `registered_check_runner`,
+# so its fixture scripts a second check on a tool the graph orchestrator does not
+# wrap yet (Unit 1c). `graph_single_check.json` proposes only `query_logs`, the
+# one tool `dispatch_registry` wraps this unit -- see `graph.py`'s module
+# docstring and `TECHNICAL_SPEC.md` §12.
+LOOP_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
+GRAPH_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "graph_single_check.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,6 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     investigation.add_argument("incident_id")
     investigation.add_argument("--model", choices=("replay",), required=True)
+    investigation.add_argument(
+        "--orchestrator",
+        choices=("loop", "graph"),
+        default="loop",
+        help="loop is the existing Investigation class; graph is the LangGraph "
+        "StateGraph orchestrator (query_logs only until Unit 1c).",
+    )
     return parser
 
 
@@ -126,20 +142,11 @@ def run_scenario_command(root: Path, arguments: argparse.Namespace) -> int:
     return 0
 
 
-# Kept together so the run's full path (load, investigate, record, print) reads
-# as one sequence rather than being split across single-use helpers.
-def run_investigate_command(root: Path, incident_id: str, model_name: str) -> int:
-    paths = RunPaths(root=root / "runs" / incident_id)
-    if not paths.incident_file.is_file():
-        raise LabError(
-            LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
-        )
-    incident = StoredIncident.model_validate_json(
-        paths.incident_file.read_text(encoding="utf-8")
-    )
-    budgets = Budgets()
+def run_loop_investigation(
+    incident: StoredIncident, paths: RunPaths, budgets: Budgets, recorder: RunRecorder
+) -> InvestigationResult:
     model = ReplayReasoningModel(
-        REPLAY_FIXTURE,
+        LOOP_REPLAY_FIXTURE,
         substitutions={
             "incident_id": incident.scope.incident_id,
             "window_start": incident.scope.started_at.isoformat(),
@@ -147,8 +154,7 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
             "symptom_evidence_id": incident.packet.symptom_evidence_id,
         },
     )
-    recorder = RunRecorder(utc_now)
-    result = run_investigation(
+    return run_investigation(
         incident.scope,
         incident.packet,
         incident.evidence,
@@ -160,6 +166,64 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
         budgets,
         utc_now,
     )
+
+
+def run_graph_orchestrated_investigation(
+    incident: StoredIncident, paths: RunPaths, budgets: Budgets, recorder: RunRecorder
+) -> InvestigationResult:
+    model = ReplayToolCallingModel(
+        ReplayReasoningModel(
+            GRAPH_REPLAY_FIXTURE,
+            substitutions={
+                "incident_id": incident.scope.incident_id,
+                "window_start": incident.scope.started_at.isoformat(),
+                "window_end": incident.scope.ended_at.isoformat(),
+                "symptom_evidence_id": incident.packet.symptom_evidence_id,
+            },
+        )
+    )
+    registry = dispatch_registry(lambda arguments: run_logs_check(arguments, paths))
+    return run_graph_investigation(
+        incident.scope,
+        incident.packet,
+        incident.evidence,
+        model,
+        registry,
+        recorder,
+        budgets,
+        utc_now,
+    )
+
+
+# Loads the incident, picks an orchestrator, and writes the result -- the
+# CLI's one job for `investigate`, kept in one function even though each
+# orchestrator's own setup is factored out above.
+def run_investigate_command(
+    root: Path, incident_id: str, model_name: str, orchestrator: str
+) -> int:
+    paths = RunPaths(root=root / "runs" / incident_id)
+    if not paths.incident_file.is_file():
+        raise LabError(
+            LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
+        )
+    incident = StoredIncident.model_validate_json(
+        paths.incident_file.read_text(encoding="utf-8")
+    )
+    budgets = Budgets()
+    recorder = RunRecorder(utc_now)
+    # `run_investigation`/`run_graph_investigation` each record their own
+    # `investigation_started` event; this one records which orchestrator the
+    # owner chose, so the JSONL event log names it even though the loop and
+    # the graph never import CLI-level concerns like this flag.
+    recorder.event(
+        GraphPhase.CREATED.value, "orchestrator_selected", orchestrator=orchestrator
+    )
+    if orchestrator == "graph":
+        result = run_graph_orchestrated_investigation(
+            incident, paths, budgets, recorder
+        )
+    else:
+        result = run_loop_investigation(incident, paths, budgets, recorder)
     written = finalize_investigation(
         root / "results",
         result.report,
@@ -190,7 +254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_lab_command(root, arguments.action)
         if arguments.command == "scenario":
             return run_scenario_command(root, arguments)
-        return run_investigate_command(root, arguments.incident_id, arguments.model)
+        return run_investigate_command(
+            root, arguments.incident_id, arguments.model, arguments.orchestrator
+        )
     except (LabError, RunRecordError) as refusal:
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         return 1

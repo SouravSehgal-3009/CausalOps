@@ -882,32 +882,104 @@ denied proposal never invokes one. `langgraph` and `langchain-core` landed in
 this unit deliberately ahead of any code importing them, to isolate the
 dependency's lock/CI risk from Unit 1b's orchestration code.
 
-Unit 1b (the orchestration: `graph.py`, the CLI `--orchestrator` flag, parity
-tests, and wiring `tool_wrappers.py` into an actual dispatch node) has not
-started.
+Unit 1b (the orchestration: `graph.py`, the composing replay tool-calling
+adapter in `models.py`, the CLI `--orchestrator` flag, and the parity test)
+has been implemented and frozen for review on branch `graph-orchestrator`.
 
-Per `TECHNICAL_SPEC.md` §12: run one replay incident through a LangGraph
-`StateGraph` with native tool-call parsing, one policy wrapper, atomic budget
-reservation, and the existing report and scorer — then wrap the remaining
-three tools and retire the duplicate orchestration only after conformance
-parity is demonstrated.
+Per `TECHNICAL_SPEC.md` §12: `graph.py` runs one replay incident through a
+five-node LangGraph `StateGraph` (`investigate`, `dispatch_tool`,
+`normalize_evidence`, `final_assessment`, `final_report`, wired with two
+conditional edges) with native tool-call parsing, `query_logs`'s policy
+wrapper, atomic budget reservation, and a report built the same shape as
+`workflow.py`'s. `tests/unit/test_parity.py` proves the loop and the graph
+agree on `graph_single_check.json` — the one fixture both can run, since
+`dispatch_registry` wraps only `query_logs` until Unit 1c. Unit 1c wraps the
+remaining three tools; 1d retires the loop once conformance parity extends to
+them too.
+
+Graph state (`GraphState`, a `TypedDict`) is JSON-only and holds the full
+projection §5 requires: receipts, evidence records (not just IDs — see the
+§5 amendment below), `investigation_id`, `incident_id`, budget counters, and
+phase. Nothing survives off-state between graph turns: `dispatch_tool`
+rebuilds a `ReservationLedger` from state's receipts on every call via the
+new `ReservationLedger.from_receipts` constructor, and `_rebuild_store`
+does the same for an `EvidenceStore`.
+
+A hazard the pre-edit report caught before implementation began: a
+`ReservationLedger` built inside `dispatch_tool` is a node-local object, so
+if the wrapped backend raises, the node never returns and LangGraph never
+learns about the fresh `RESERVED` receipt that reservation already wrote —
+silently reopening the exact gap `tool_wrappers.py` exists to close (a
+crashed check leaving no receipt at all). The fix is `dispatch_tool` catching
+around its own call to the wrapper, writing `ledger.receipts()` into the
+state update it returns, and routing to `final_report` via the ordinary
+`normalize_evidence` conditional edge — a modeled transition, not an
+exception escaping `invoke()`. `test_graph.py`'s
+`test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report`
+is the regression test.
+
+`TECHNICAL_SPEC.md` §11's second half — "a test proves no tracing client is
+constructed and no tracing request is attempted" — is now closed.
+`graph.py` is the first module that actually imports `langchain-core`, which
+made it testable for the first time; `tests/security/test_no_tracing.py`
+asserts no `langsmith.client.Client` is ever constructed, no `httpx`/
+`requests` send is attempted, and both tracing variables read `"false"`
+after a full graph run — not the weaker (and false)
+`"langsmith" not in sys.modules`, which the module docstring explains.
+
+Independent dual review of the frozen snapshot found two P1s, both fixed:
+`route_after_normalize` bounded its loop only by remaining tool/model-call
+budget, not by turn count, so a denied second proposal (which spends no
+slot) let the graph ask a third `INVESTIGATE` turn the loop never asks and
+the model contract has no stage for; and `investigate`/`final_assessment`
+had the same node-local-value-lost-on-crash shape the pre-edit report had
+already caught and fixed for `dispatch_tool`'s ledger, applied to the
+model-call budget instead — a model call already counted before a raise
+was invisible in the final report once the node's frame was gone. Both are
+now `_StageCounters`/`_ask_with_repair`/`try`/`except GraphBubbleUp: raise`
+inside all three nodes that can crash mid-attempt, with regression tests at
+both the graph level (`test_graph.py`) and the orchestrator-comparison
+level (`test_parity.py`), each demonstrated failing against the pre-fix
+code before landing. The review also restored `dispatch_tool`'s event
+vocabulary (`proposal_denied`/`check_started`/`check_finished{outcome}`,
+matching the loop's names and outcome semantics instead of one event
+carrying `policy_result` for every case) and widened its `except` to cover
+the full state-update tail, not just the wrapper call. `check_finished`
+also carries `duration_ms`, taken from the receipt rather than measured
+between the two events: `authorize()` runs inside `wrapper.dispatch`,
+invisible to the node, so both events fire together only after dispatch
+already returned, with the real backend call sitting entirely in the gap
+*before* `check_started`. **Under the graph orchestrator, do not compute a
+check's duration from `check_started`'s and `check_finished`'s
+timestamps in `events.jsonl` — that gap is not a timing bracket, unlike
+the loop's, where `check_started` fires before the backend call begins.**
+`ToolReceipt.duration_ms` is the one authoritative figure for either
+orchestrator.
 
 **Known gaps carried into Milestone 2:**
 
+- `dispatch_tool`'s `proposal_denied` event carries `reason` but not the
+  free-text `message` `PolicyDecision` produces (`workflow.py:297` has it;
+  `DispatchResult` carries only the receipt, which has no message field).
+  Widening `DispatchResult` to expose it would reopen `tool_wrappers.py` a
+  second time for one field. Deferred to Unit 1c, which already has to
+  touch that module to add the other three wrappers — one widening pass
+  then, for all four tools, instead of two. Unit 1c's parity test should
+  compare full event field dicts, not just event names, so this gap closes
+  visibly when it lands rather than staying silently forgotten.
+- `graph.py` binds the concrete `ReplayToolCallingModel`, not a
+  `ReasoningModel`-style protocol the way `workflow.py` binds
+  `ReasoningModel`. A `propose()`-shaped protocol would be speculative with
+  only one implementation to validate its shape against — `CLAUDE.md`
+  forbids indirection without a concrete demonstrated need, and one
+  implementation is not that. Closes when the live Claude adapter unit adds
+  a second implementation to design the protocol against.
 - `evaluation.py`'s `count_control` (`evaluation.py:164-183`) reads only
   `policy_result` and `reason_code`, never `outcome` or the new `state`
   field, so a run ending with a `RESERVED` receipt is invisible to the
-  scorer's `ControlCounts`. Scorer changes were out of scope for Unit 1a;
-  this closes once Milestone 2 makes reservations durable across a
+  scorer's `ControlCounts`. Scorer changes were out of scope for Unit 1a or
+  1b; this closes once Milestone 2 makes reservations durable across a
   checkpoint resume.
-- `TECHNICAL_SPEC.md` §11 permits `langsmith` as an inert transitive
-  dependency only if "tracing is force-disabled at the entry point **and** a
-  test proves no tracing client is constructed and no tracing request is
-  attempted." Unit 1a satisfies only the first half — `src/causalops/__init__.py`
-  forces both tracing variables off, proven by
-  `tests/unit/test_tracing_disabled.py`. The second half cannot be tested
-  until something actually constructs a `langchain-core` client, which is
-  Unit 1b's `graph.py`. Do not read Unit 1a as closing §11 fully.
 - `ToolReceipt`'s lifecycle validator checks `state` against `outcome`/
   `result_digest`/`evidence_id` only. It does not (yet) reject a `RESERVED`
   receipt carrying a `reason_code` or a nonzero `duration_ms`, or a
