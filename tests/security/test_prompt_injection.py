@@ -1,4 +1,6 @@
-"""An instruction hidden inside stored evidence must stay inert (section 7).
+"""An instruction hidden inside stored evidence must stay inert.
+
+(TECHNICAL_OVERVIEW.md's Investigator tools and policy section.)
 
 Telemetry is untrusted data, not instructions. The first test below stores
 evidence whose summary is itself a prompt-injection attempt and drives a real

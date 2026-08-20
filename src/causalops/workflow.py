@@ -49,7 +49,9 @@ def utc_now() -> datetime:
 
 
 def add_usage(total: ModelUsage | None, latest: ModelUsage) -> ModelUsage:
-    """Usage accumulates across a run; section 11 publishes the total, not the last."""
+    """Usage accumulates across a run; the report publishes the total, not
+    the last call.
+    """
     if total is None:
         return latest
     return ModelUsage(
