@@ -114,9 +114,12 @@ CREATED
   regardless of which node performs dispatch. The boundary is now stated by
   intent rather than tied to one framework class. Import analysis alone is
   insufficient proof, because a backend can reach the dispatch node by
-  injection rather than import — as `workflow.py`'s existing `RunCheck`
-  callable already does, at `cli.py:154`. See §9 for the full control this
-  requires. The P0 severity of a direct backend binding is unchanged.
+  injection rather than import — as `graph.py`'s `dispatch_tool` node does,
+  through the registry `cli.py:160`'s `dispatch_registry(...)` call builds.
+  Each backend arrives at that call as a `lambda` argument, never a name
+  `graph.py` itself imports, and is wrapped by a factory into the
+  `ToolWrapper` the registry actually holds. See §9 for the full control
+  this requires. The P0 severity of a direct backend binding is unchanged.
 - V2 replaces the legacy “provider tool use is a failure” behavior with an
   explicit native-tool-call protocol. The Claude adapter parses a provider tool
   call into a strict registered-tool request; the replay adapter emits the same

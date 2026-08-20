@@ -17,11 +17,11 @@ cannot: that every registered dispatch callable was actually produced by the
 factory below, and that a denied proposal never reaches a backend.
 
 Order is the whole point: authorize, reserve, dispatch, settle exactly once.
-`workflow.py:302` calls `record_tool_executed()` only after `run_check`
-returns, so a backend that raises today leaves no receipt at all -- the crash
-is invisible in `receipts.jsonl`. Reserving before dispatch makes that crash
-visible in-process: the call to the backend below is deliberately outside any
-`try`/`except`, so a raising backend still leaves a `RESERVED` receipt in
+The now-retired `workflow.py` called `record_tool_executed()` only after
+`run_check` returned, so a backend that raised there left no receipt at all --
+the crash was invisible in `receipts.jsonl`. Reserving before dispatch makes
+that crash visible in-process: the call to the backend below is deliberately
+outside any `try`/`except`, so a raising backend still leaves a `RESERVED` receipt in
 `ledger.receipts()`. Durability across a process restart -- so the crash is
 visible after the fact too, not just to a caller still holding the ledger --
 is Milestone 2's job, once graph state is checkpointed to SQLite.
@@ -78,9 +78,9 @@ class ReservationLedger:
     the same call that records the `RESERVED` receipt, so nothing can
     authorize two checks against one remaining slot. A denied proposal is
     recorded too (via `record()`) but never spends a slot -- the same rule
-    the legacy loop already enforces (`test_workflow.py`'s
-    `test_a_denied_proposal_costs_a_model_call_but_no_check_slot`), now
-    enforced here as well.
+    the now-retired loop already enforced (`test_graph.py`'s
+    `test_a_denied_proposal_costs_a_model_call_but_no_check_slot`, ported
+    from the loop's own test of the same name), now enforced here as well.
 
     `slots_left()` counts only receipts whose `policy_result` is `ALLOWED`
     (`RESERVED` or `SETTLED`, either way), so it cannot drift from the
@@ -363,7 +363,7 @@ def _make_wrapper[ArgsT: BaseModel](
             proposal, scope, seen_fingerprints, budgets, ledger.slots_left()
         )
         # A fingerprint is marked seen whether the decision allows or denies
-        # it, matching workflow.py's existing order: a denial is not a reason
+        # it, matching the retired loop's own order: a denial is not a reason
         # to let the same proposal be retried.
         seen_fingerprints.add(decision.fingerprint)
         if decision.result is PolicyResult.DENIED:

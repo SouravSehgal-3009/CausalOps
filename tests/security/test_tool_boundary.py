@@ -1,10 +1,12 @@
 """The tool-policy-bypass control `TECHNICAL_SPEC.md` §9 requires.
 
 No tool backend may be reachable except through a policy wrapper. An import
-scan alone cannot prove that: `workflow.py` imports no backend module today,
-yet reaches every one of them by injection at `cli.py:154`
-(`registered_check_runner(...)` is passed in as a bare `RunCheck` callable,
-never imported by name where it is called). §9 requires three independent
+scan alone cannot prove that: `graph.py` imports no backend module, yet
+reaches every one of them through the registry `cli.py:160`'s
+`dispatch_registry(...)` call builds. Each backend arrives at that call as a
+`lambda` argument, never a name `graph.py` itself imports, and is wrapped by
+a factory into the `ToolWrapper` the registry actually holds -- control #2
+below checks exactly that construction. §9 requires three independent
 controls, and this file is all three:
 
 1. An AST import test -- necessary, not sufficient, for the reason above.

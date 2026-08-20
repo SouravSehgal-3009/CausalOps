@@ -40,6 +40,7 @@ from causalops.domain import (
     ReasonCode,
     ReceiptState,
     RootCauseCode,
+    ToolOutcome,
     ToolProposal,
 )
 from causalops.evidence import build_evidence
@@ -161,10 +162,10 @@ def test_the_run_records_its_states_in_order() -> None:
 def test_the_graph_loops_back_for_a_second_check_when_budget_allows(
     tmp_path: Path,
 ) -> None:
-    """Reproduces `workflow.py:150`'s guard at the graph's `normalize_evidence`
-    conditional edge: with the default budget (two executed checks, four
-    model calls), a second `INVESTIGATE` turn is asked and its proposal is
-    dispatched too."""
+    """Reproduces the retired loop's own guard at the graph's
+    `normalize_evidence` conditional edge: with the default budget (two
+    executed checks, four model calls), a second `INVESTIGATE` turn is asked
+    and its proposal is dispatched too."""
     script = {
         "initial_plan": [plan_json(proposal=logs_proposal())],
         "hypothesis_update": [plan_json(proposal=another_logs_proposal())],
@@ -245,7 +246,8 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
     # ported: only the exception's class name may reach the event log or the
     # report, never its message text -- `graph.py`'s `dispatch_tool` except
     # handler records `error=type(error).__name__` only, the same redaction
-    # rule `workflow.py`'s `internal_error()` already enforces.
+    # rule the now-retired `workflow.py`'s `internal_error()` already
+    # enforced.
     recorded = "".join(event.model_dump_json() for event in recorder.events)
     assert "RuntimeError" in recorded
     assert "lab unreachable" not in recorded
@@ -292,10 +294,12 @@ def test_a_broken_tool_call_round_trip_is_an_internal_error_not_a_model_mistake(
     which would misattribute an internal bug to the model. That
     `AssertionError` then reaches `run_graph_investigation`'s own outer
     containment the same way any other unmodeled node exception would --
-    exactly how `workflow.py`'s `run_investigation` already turns an
-    `AssertionError` deep in the loop into `internal_error()` rather than
-    letting it crash the caller -- so the observable outcome here is a safe
-    `FAILED_SAFE`/`INTERNAL_ERROR` report, not a raised exception."""
+    exactly how the now-retired `workflow.py`'s own `run_investigation` (a
+    different function from `cli.py`'s dispatcher of the same name today)
+    already turned an `AssertionError` deep in the loop into
+    `internal_error()` rather than letting it crash the caller -- so the
+    observable outcome here is a safe `FAILED_SAFE`/`INTERNAL_ERROR` report,
+    not a raised exception."""
     monkeypatch.setattr(graph_module, "parse_tool_call", lambda call: None)
 
     result, recorder = investigate_via_graph(graph_replay_model())
@@ -356,12 +360,12 @@ def test_a_denied_proposal_never_reaches_the_backend_through_the_graph(
 def test_the_graph_does_not_ask_a_third_investigate_turn_after_a_denial(
     tmp_path: Path,
 ) -> None:
-    """P1-1's regression test. `workflow.py`'s loop calls `plan_second_check()`
-    at most once, from `run()`, regardless of whether the second proposal is
-    allowed or denied -- there is no third ask, because `investigate()`'s own
-    stage mapping has no third stage to ask (turn >= 1 always means
-    `HYPOTHESIS_UPDATE`). A denial does not spend a slot
-    (`ReservationLedger.slots_left()`), so a router bounded only by
+    """P1-1's regression test. The now-retired `workflow.py`'s loop called
+    `plan_second_check()` at most once, from `run()`, regardless of whether
+    the second proposal was allowed or denied -- there was no third ask,
+    because `investigate()`'s own stage mapping has no third stage to ask
+    (turn >= 1 always means `HYPOTHESIS_UPDATE`). A denial does not spend a
+    slot (`ReservationLedger.slots_left()`), so a router bounded only by
     `tools_left()`/`model_calls_left()` would loop for a phantom third turn
     here, exhausting this fixture's single scripted `hypothesis_update`
     response. `model_turn < 2` in `route_after_normalize` is what prevents
@@ -431,16 +435,63 @@ def test_a_crashing_model_still_reports_the_spent_call() -> None:
     assert "provider timeout" not in result.report.model_dump_json()
 
 
-# --- Unit 1d-1: behaviours `graph.py` already implements but that, until now,
-# only `test_workflow.py` proved. `workflow.py` and `test_workflow.py` stay in
-# the tree beside these -- each port below asserts the same *property* its
-# loop original does, not a copied-over literal, since the two orchestrators'
-# numbers can legitimately differ (see `_build_report`'s two documented
-# differences from `Investigation.report()`). Every fixture reused here
-# (`correct_abstention.json`, `repair_then_valid.json`, `malformed_output.json`,
-# `forged_citation.json`, `valid_diagnosis.json`) is orchestrator-independent:
-# a stage-response script with no `{{...}}` placeholders, so the exact same
-# checked-in file already used by `test_workflow.py` works for the graph too.
+# --- Unit 1d-1/1d-2: behaviours `graph.py` already implements but that, until
+# now, only `test_workflow.py` proved. Each port below asserts the same
+# *property* its loop original does, not a copied-over literal, since the two
+# orchestrators' numbers can legitimately differ (see `_build_report`'s two
+# documented differences from `Investigation.report()`). Every fixture reused
+# here (`correct_abstention.json`, `repair_then_valid.json`,
+# `malformed_output.json`, `forged_citation.json`, `valid_diagnosis.json`,
+# `service_out_of_scope.json`, `duplicate_proposal.json`) is
+# orchestrator-independent: a stage-response script with no `{{...}}`
+# placeholders, so the exact same checked-in file `test_workflow.py` used
+# works for the graph too. `workflow.py` and `test_workflow.py` were deleted
+# in Unit 1d-2, once every behaviour they alone proved had a port here.
+
+
+def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
+    """`test_workflow.py::test_a_denied_proposal_costs_a_model_call_but_no_check_slot`,
+    ported: `service_out_of_scope.json` proposes a `query_metric` check
+    against `billing`, which `incident_scope()` does not name, so the wrapper
+    denies it before any backend call and the model has no safe check left to
+    propose -- an abstention that still spent the model call the denied
+    proposal used."""
+    backend = RecordingMetricBackend()
+    registry = registry_with(run_metric=backend)
+
+    result, _ = investigate_via_graph(
+        fixture_model("service_out_of_scope.json"), registry=registry
+    )
+
+    receipt = result.receipts[0]
+    assert receipt.policy_result is PolicyResult.DENIED
+    assert receipt.reason_code is ReasonCode.UNKNOWN_SERVICE
+    assert receipt.outcome is ToolOutcome.NOT_EXECUTED
+    assert backend.calls == []
+    # A denial is not terminal: the run reached a valid abstention anyway.
+    assert result.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
+    assert result.report.tools_executed == 0
+    assert result.report.model_calls_used == 3
+    assert len(result.evidence) == 2
+
+
+def test_the_same_proposal_twice_is_denied_as_a_duplicate() -> None:
+    """`test_workflow.py::test_the_same_proposal_twice_is_denied_as_a_duplicate`,
+    ported: `duplicate_proposal.json` scripts the identical `query_metric`
+    proposal for both `initial_plan` and `hypothesis_update`; the second
+    fingerprints the same as the first and is denied without reaching the
+    backend a second time."""
+    backend = RecordingMetricBackend()
+    registry = registry_with(run_metric=backend)
+
+    result, _ = investigate_via_graph(
+        fixture_model("duplicate_proposal.json"), registry=registry
+    )
+
+    assert result.receipts[0].policy_result is PolicyResult.ALLOWED
+    assert result.receipts[1].reason_code is ReasonCode.DUPLICATE_PROPOSAL
+    assert result.report.tools_executed == 1
+    assert len(backend.calls) == 1
 
 
 def test_a_scripted_abstention_stops_early_and_abstains() -> None:

@@ -104,7 +104,7 @@ def test_importing_the_investigator_never_loads_the_evaluator() -> None:
     """Catches what a syntax scan cannot, such as a dynamic import."""
     script = (
         "import sys\n"
-        "import causalops.cli, causalops.workflow, causalops.run_records\n"
+        "import causalops.cli, causalops.run_records\n"
         f"print({EVALUATOR_MODULE!r} in sys.modules)\n"
     )
 

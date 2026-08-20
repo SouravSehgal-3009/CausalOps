@@ -2,13 +2,19 @@ import json
 from pathlib import Path
 
 import pytest
-from fake_incident import alert_packet, incident_scope, packet_evidence
+from fake_incident import (
+    alert_packet,
+    change_row,
+    incident_scope,
+    packet_evidence,
+    write_changes,
+)
 from fake_machine import FAKE_API_KEY, FakeProbe
 
 from causalops import cli
 from causalops.cli import MODEL_CHECK_NOTE, build_parser, exit_code, render_report
 from causalops.doctor import CheckResult, CheckStatus, DoctorReasonCode, DoctorReport
-from causalops.domain import StoredIncident
+from causalops.domain import StoredIncident, ToolOutcome, ToolReceipt
 from causalops.scenario_control import LabError, LabReasonCode
 from causalops.telemetry import RunPaths
 
@@ -115,28 +121,6 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
         parser.parse_args(["scenario", "start", "a_family"])
 
 
-def test_investigate_defaults_to_the_loop_orchestrator() -> None:
-    parser = build_parser()
-
-    parsed = parser.parse_args(["investigate", "abc", "--model", "replay"])
-
-    assert parsed.orchestrator == "loop"
-
-
-def test_investigate_accepts_the_graph_orchestrator_and_rejects_others() -> None:
-    parser = build_parser()
-
-    parsed = parser.parse_args(
-        ["investigate", "abc", "--model", "replay", "--orchestrator", "graph"]
-    )
-    assert parsed.orchestrator == "graph"
-
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["investigate", "abc", "--model", "replay", "--orchestrator", "both"]
-        )
-
-
 def test_a_lab_command_reports_a_refusal_with_its_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -217,19 +201,28 @@ def test_main_reports_a_missing_project_root_without_creating_directories(
     assert list(workspace.iterdir()) == []
 
 
-def test_investigate_with_the_graph_orchestrator_runs_end_to_end(
+def test_investigate_runs_an_investigation_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`test_cli.py`'s other `--orchestrator` tests exercise only
-    `build_parser`; the one end-to-end CLI test that actually runs an
-    investigation (`tests/integration/test_configuration_change.py`) is
-    docker-marked, CI-deselected, and never passes `--orchestrator` at all.
-    Nothing in the fast suite calls `run_graph_orchestrated_investigation`
+    """The one end-to-end CLI test that actually runs an investigation
+    (`tests/integration/test_configuration_change.py`) is docker-marked and
+    CI-deselected. Nothing else in the fast suite calls `run_investigation`
     through the CLI -- a `run_logs_check` signature change or a
-    `GRAPH_REPLAY_FIXTURE` rename could ship green. This fabricates a
-    `StoredIncident` and a log file directly, the way the docker-marked test
-    relies on the scenario controller to do, and drives `cli.main` through
-    the real `--orchestrator graph` path."""
+    `REPLAY_FIXTURE` rename could ship green. This fabricates a
+    `StoredIncident`, a log file, and a changes file directly, the way the
+    docker-marked test relies on the scenario controller to do, and drives
+    `cli.main` through the real graph-orchestrated `investigate` path.
+    `lab_diagnosis.json` scripts two checks -- `query_logs` then
+    `list_recent_changes` -- so without a `changes.json` for the second, that
+    check would return `UNAVAILABLE`.
+
+    `report.tools_executed` cannot prove the second check actually ran: it
+    counts reserved slots, not successes, so it reads 2 whether
+    `list_recent_changes` succeeded or came back `UNAVAILABLE`. Reading
+    `receipts.jsonl` and asserting both outcomes are `EXECUTED` is the only
+    check here that would fail if the `changes.json` write above were
+    deleted -- following `test_configuration_change.py`'s own pattern for
+    reading a finished run's artifacts back off disk."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
@@ -254,19 +247,25 @@ def test_investigate_with_the_graph_orchestrator_runs_end_to_end(
         + "\n",
         encoding="utf-8",
     )
+    write_changes(paths, [change_row(offset=60)])
 
-    exit_status = cli.main(
-        [
-            "investigate",
-            scope.incident_id,
-            "--model",
-            "replay",
-            "--orchestrator",
-            "graph",
-        ]
-    )
+    exit_status = cli.main(["investigate", scope.incident_id, "--model", "replay"])
 
     assert exit_status == 0
     printed = capsys.readouterr().out
     assert "DIAGNOSED CONFIG_CHANGE" in printed
     assert "artifacts:" in printed
+
+    investigation_id = printed.strip().splitlines()[-2]
+    receipts_file = (
+        tmp_path / "results" / "investigations" / investigation_id / "receipts.jsonl"
+    )
+    receipts = [
+        ToolReceipt.model_validate_json(line)
+        for line in receipts_file.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert [receipt.outcome for receipt in receipts] == [
+        ToolOutcome.EXECUTED,
+        ToolOutcome.EXECUTED,
+    ]

@@ -423,10 +423,12 @@ none of those values.
 src/causalops/
   cli.py
   domain.py
-  workflow.py
+  graph.py
   prompts.py
   models.py
   tools.py
+  tool_calls.py
+  tool_wrappers.py
   policy.py
   evidence.py
   prometheus.py
@@ -450,9 +452,10 @@ tests/
 results/
 ```
 
-Milestone 1 adds `graph.py`, `tool_calls.py`, and `tool_wrappers.py` to
-`src/causalops/`; none of the three exists yet. Create new directories only
-when an implemented vertical slice needs them.
+Milestone 1 added `graph.py`, `tool_calls.py`, and `tool_wrappers.py` to
+`src/causalops/`, and Unit 1d-2 removed `workflow.py` once the graph
+orchestrator it ran beside had proven conformance parity with it. Create new
+directories only when an implemented vertical slice needs them.
 
 ## Incident identity and initial evidence
 
@@ -486,22 +489,32 @@ metrics, diagnostic logs, or root-cause-specific language.
 
 ## Investigation workflow and budgets
 
-This is the current, implemented loop in `src/causalops/workflow.py`.
-Milestone 1 adds a parallel LangGraph orchestrator beside it (a new
-`GraphPhase` enum, tracked in Part III), retired only after conformance
-parity is demonstrated — this loop is not replaced yet.
+This is the current, implemented LangGraph orchestrator in
+`src/causalops/graph.py` (`GraphPhase`, tracked in Part III). Milestone 1
+built it beside a loop orchestrator in `src/causalops/workflow.py`, ran both
+against the same incidents, and retired the loop once a 144-pair differential
+sweep demonstrated conformance parity between the two — `workflow.py` is
+gone as of Unit 1d-2.
 
 ```text
 CREATED
-  -> PLAN_FIRST_CHECK
-  -> VALIDATE_FIRST_CHECK
-  -> EXECUTE_FIRST_CHECK
-  -> UPDATE_AND_PLAN_SECOND
-  -> VALIDATE_SECOND_CHECK
-  -> EXECUTE_SECOND_CHECK
+  -> INVESTIGATE
+  -> DISPATCH_TOOL -> NORMALIZE_EVIDENCE -> INVESTIGATE   (repeats once more,
+                                                            budget permitting)
   -> FINAL_ASSESSMENT
+  -> FINAL_REPORT
   -> DIAGNOSED | INSUFFICIENT_EVIDENCE | FAILED_SAFE
 ```
+
+`INVESTIGATE` routes to `DISPATCH_TOOL` when the model proposes a tool check,
+straight to `FINAL_ASSESSMENT` when it stops early, or to `FINAL_REPORT` on
+an unrecoverable failure. After `NORMALIZE_EVIDENCE`, `route_after_normalize`
+checks `failure_reason` first — any failure set upstream (by `investigate` or
+`dispatch_tool`) routes straight to `FINAL_REPORT`, skipping a second turn
+entirely — and only then applies the loop-back condition: the graph returns
+to `INVESTIGATE` for a second turn only while `model_turn < 2` and budget
+remains, otherwise it moves on to `FINAL_ASSESSMENT`. This is `build_graph`'s
+own edge set (`graph.py`), not a paraphrase of it.
 
 The second check may be skipped when the update concludes that available
 evidence is already sufficient or no useful safe check remains.
@@ -765,9 +778,9 @@ adapter exists and cannot be tested until it does.
 | Arbitrary query execution | Template enums only; reject raw PromQL, shell, SQL, URL, and path input | built — `tests/unit/test_policy.py`, `test_tools.py` |
 | Scope escape | Incident-labelled backends and allowlists; deny cross-run service, time, file, and evidence access | built — `tests/unit/test_telemetry.py`, `test_policy.py` |
 | Forged citations | Resolve opaque evidence IDs from active store; reject missing and cross-incident IDs | built — `tests/unit/test_policy.py`, `src/causalops/replay_fixtures/forged_citation.json` |
-| Resource exhaustion | Enforce call, time, row, sample, and byte limits, and per-kind context quotas (`evidence.CONTEXT_QUOTAS`) — distinct from the unbuilt token-counted input cap, see "Default limits" above | built — `tests/unit/test_workflow.py`, `test_telemetry.py` |
+| Resource exhaustion | Enforce call, time, row, sample, and byte limits, and per-kind context quotas (`evidence.CONTEXT_QUOTAS`) — distinct from the unbuilt token-counted input cap, see "Default limits" above | built — `tests/unit/test_graph.py`, `test_telemetry.py` |
 | Scenario contamination | Reset volumes/state and assert health and empty run scope before the next scenario | built — `tests/integration/test_scenario_reset_isolation.py` |
-| Model/tool failure | Timeout and malformed-output fixtures produce deterministic terminal states | built — `tests/unit/test_workflow.py` |
+| Model/tool failure | Timeout and malformed-output fixtures produce deterministic terminal states | built — `tests/unit/test_graph.py`, `test_tool_wrappers.py` |
 | Credential leakage | Environment-only API key plus redaction; verify it never reaches CLI text, config, artifacts, logs, reports, receipts, or errors | Phase 3 — no code path reads or handles an API key yet |
 | Provider data leakage | Send only bounded synthetic incident context; verify requests exclude secrets, evaluator ground truth, and host paths | Phase 3 — no provider request exists yet |
 | Unbounded provider spend | Durably flushed write-ahead reservations plus settled/outstanding accounting; verify both caps, crash behavior, and no request after denial | Phase 3 — no cost ledger exists yet; caps superseded, see Part III |
@@ -777,13 +790,13 @@ adapter exists and cannot be tested until it does.
 - Domain invariants and valid/invalid transitions (`test_domain.py`).
 - Every valid and invalid disposition/root-cause pairing, including proof that
   only application code can create `FAILED_SAFE` (`test_domain.py`,
-  `test_workflow.py`).
-- One structured-output repair and repair exhaustion (`test_workflow.py`,
+  `test_graph.py`).
+- One structured-output repair and repair exhaustion (`test_graph.py`,
   `test_replay_model.py`).
 - Denied-proposal accounting and duplicate fingerprints (`test_policy.py`,
-  `replay_fixtures/duplicate_proposal.json`).
+  `test_graph.py`, `replay_fixtures/duplicate_proposal.json`).
 - Deterministic clock, evidence ordering, quotas, and truncation markers
-  (`test_evidence.py`, `test_workflow.py`).
+  (`test_evidence.py`, `test_graph.py`).
 - Development/evaluation seed separation (`test_scenario_control.py`).
 - Healthy start, bounded fault activation, repeatable signals, and cleanup for
   every incident family (`test_incident_families.py`,
@@ -797,9 +810,10 @@ adapter exists and cannot be tested until it does.
   below 2.5 GiB available RAM, and success (`test_doctor.py`).
 
 The tool-timeout and dependency-unavailable behavior above are covered by
-the threat table's *Model/tool failure* row (`test_workflow.py`) and
-*Resource exhaustion* row (`test_workflow.py`, `test_telemetry.py`); the
-finalized-result immutability proof is covered by the *Scenario
+the threat table's *Model/tool failure* row (`test_graph.py`,
+`test_tool_wrappers.py`) and *Resource exhaustion* row (`test_graph.py`,
+`test_telemetry.py`); the finalized-result immutability proof is covered by
+the *Scenario
 contamination* row (`test_scenario_reset_isolation.py`) — same tests, same
 citations, listed once.
 
@@ -857,7 +871,9 @@ defined at the top of this document.
 
 ## Milestone 1 — Bounded tool-graph parity
 
-**Status:** in progress. Unit 0 (this document and the matching
+**Status:** complete, pending final dual review and commit (Unit 1d-2 is
+frozen for review on branch `retire-investigation-loop`, not yet committed).
+Unit 0 (this document and the matching
 `TECHNICAL_SPEC.md` amendments) has landed, and so has the housekeeping unit
 ahead of 1a (`9ffdc95`, merged `b3f5da0`): `tests/unit/import_scan.py` and the
 `write_log`/`log_row` promotion into `fake_incident.py`, plus the last of the
@@ -1040,7 +1056,7 @@ tie on `observed_at` to fall through to the id tie-break.
 **Known gaps carried into Milestone 2:**
 
 - `graph.py` binds the concrete `ReplayToolCallingModel`, not a
-  `ReasoningModel`-style protocol the way `workflow.py` binds
+  `ReasoningModel`-style protocol the way the now-retired `workflow.py` bound
   `ReasoningModel`. A `propose()`-shaped protocol would be speculative with
   only one implementation to validate its shape against — `CLAUDE.md`
   forbids indirection without a concrete demonstrated need, and one
@@ -1058,17 +1074,30 @@ tie on `observed_at` to fall through to the id tie-break.
   `policy_result` other than `ALLOWED`. Nothing constructs those combinations
   today and the docstring does not claim they are closed; tightening is
   deferred, not forgotten.
-- `dispatch_tool`'s crash handler (`graph.py`) carries only the *receipt*
-  out of a mid-attempt crash, not evidence: its `except` block's return has
-  no `"evidence"` key, so state's evidence list is left exactly as it was
-  before that dispatch. Evidence built but not returned is unreferenced —
-  its receipt stays `RESERVED`, already marking the check incomplete —
-  except in the narrow settle-then-crash window, where `ledger.settle()`
-  has already produced a `SETTLED` receipt carrying a real
-  `evidence_id`/`result_digest` before `wrapper.dispatch()` returns its
-  `DispatchResult` to the node. Nothing cross-checks that window today.
-  Carrying evidence through this handler, the way the receipt already is,
-  is deferred to **Unit 1d**.
+- **Closed in Unit 1d-1.** `dispatch_tool`'s crash handler (`graph.py`) used
+  to carry only the *receipt* out of a mid-attempt crash, not evidence: its
+  `except` block's return had no `"evidence"` key, so a `SETTLED` receipt
+  minted in the narrow settle-then-crash window (a crash inside
+  `wrapper.dispatch`, after `ledger.settle()` succeeded but before
+  `DispatchResult` was constructed and returned) would cite an `Evidence`
+  record that never entered state. `ledger.settle()` now durably stores that
+  record the instant it runs, keyed by `receipt_id`, and the handler's
+  `recovered_evidence = [record.model_dump(mode="json") for record in
+  ledger.evidence()]` recovers it. One narrower gap remains, unrelated to
+  this fix and not closed by it: if this handler's own `recorder.event` call
+  raises, that exception propagates out of the node, losing this dispatch's
+  receipt as well as its evidence — the code comment at the crash handler
+  says so.
+- `telemetry.registered_check_runner` and the `RunCheck` alias it returns
+  (`domain.py:359`) are orphaned production code: `workflow.py`'s loop was
+  their only caller, and `cli.py`'s graph path calls `dispatch_registry`
+  instead, never `registered_check_runner`. The function is correct and
+  still tested directly (`test_telemetry.py`), just unreachable from
+  anywhere that runs — nothing in `src/` calls it any more. Deleting it is a
+  separable decision from Unit 1d-2: it would also touch `test_telemetry.py`
+  and `fake_incident.py`'s `check_runner`, which is why it was not folded
+  into this unit. Owner-approved as a recorded gap, not a blocker, on the
+  simplicity reviewer's suggestion.
 
 **Deliberate, not a gap:** `domain.py`'s `SCHEMA_VERSION` stayed `"1"` even
 though `ToolReceipt`'s persisted shape changed (the new `state` field,
@@ -1079,6 +1108,29 @@ receipt — no consumer keys behavior on the version string, and `results/`/
 migrate. Revisit this the moment a reader (a replay fixture, an external
 consumer, a migration script) actually depends on the version number
 distinguishing the two shapes.
+
+Unit 1d-1 ported every loop-only behaviour `test_workflow.py` alone proved
+into `test_graph.py`, run against the graph while `workflow.py` still ran
+beside it, so a reviewer could recompute the frozen parity literals
+independently against the live loop one last time before that comparison
+became impossible. This is also where the settle-then-crash evidence-carry
+fix above landed, plus `MODEL_OUTPUT_INVALID`, `WALL_CLOCK_EXPIRED`,
+`MODEL_CALL_BUDGET_EXHAUSTED`, three `FORGED_EVIDENCE_REFERENCE` variants,
+`INSUFFICIENT_EVIDENCE`, usage accumulation, digest determinism, and
+`TIMEOUT`/`UNAVAILABLE`/`ERROR` tool outcomes (the last three landing in
+`test_tool_wrappers.py`, not `test_graph.py`).
+
+Unit 1d-2 ported the two remaining loop-only tests (a denied proposal that
+still spends a model call but no check slot; the same proposal proposed
+twice, denied as a duplicate the second time), then deleted `workflow.py`,
+`test_workflow.py`, and `InvestigationState` outright. `cli.py`'s
+`--orchestrator` flag is gone with it — `investigate` now always runs the
+graph, against `lab_diagnosis.json` (`REPLAY_FIXTURE`), the same fixture the
+retired loop used by default. `tests/unit/test_parity.py` was renamed to
+`test_graph_frozen_reports.py`, its job from this point on a regression pin
+on the graph's own behaviour rather than a two-orchestrator comparison — no
+new fix landed in this unit; the evidence-carry fix above is 1d-1's, not
+1d-2's.
 
 ## Milestone 2 — Durable escalation and local retrieval
 
