@@ -16,15 +16,20 @@ from causalops.domain import (
     Disposition,
     Evidence,
     FinalAssessment,
+    GraphPhase,
     IncidentScope,
     InitialPlan,
     InvestigationReport,
     ModelDisposition,
+    PolicyResult,
     ReasonCode,
+    ReceiptState,
     RootCauseCode,
+    ToolOutcome,
     ToolReceipt,
     Versions,
 )
+from causalops.tools import ToolName
 
 
 def assessment(
@@ -184,3 +189,74 @@ def test_the_alert_packet_names_its_own_initial_evidence() -> None:
 
     assert packet.symptom_evidence_id == SYMPTOM_EVIDENCE_ID
     assert packet.topology_evidence_id != packet.symptom_evidence_id
+
+
+def test_the_graph_phase_enum_matches_the_seven_phases_in_the_spec() -> None:
+    """`TECHNICAL_SPEC.md` §5's diagram, not just what Unit 1a implements --
+    `graph.py` (Unit 1b) is the first consumer of this enum."""
+    assert [phase.value for phase in GraphPhase] == [
+        "CREATED",
+        "INVESTIGATE",
+        "DISPATCH_TOOL",
+        "NORMALIZE_EVIDENCE",
+        "FINAL_ASSESSMENT",
+        "ESCALATION_INTERRUPT",
+        "FINAL_REPORT",
+    ]
+
+
+def receipt(**overrides: object) -> ToolReceipt:
+    fields: dict[str, object] = {
+        "receipt_id": "receipt-1",
+        "incident_id": "inc-1",
+        "tool": ToolName.QUERY_LOGS,
+        "fingerprint": "f" * 8,
+        "policy_result": PolicyResult.ALLOWED,
+        "state": ReceiptState.RESERVED,
+        "requested_at": WINDOW_START,
+        "duration_ms": 0,
+    }
+    fields.update(overrides)
+    return ToolReceipt(**fields)  # type: ignore[arg-type]
+
+
+def test_a_receipt_defaults_to_settled() -> None:
+    receipt = ToolReceipt(
+        receipt_id="receipt-1",
+        incident_id="inc-1",
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        outcome=ToolOutcome.EXECUTED,
+        requested_at=WINDOW_START,
+        duration_ms=5,
+    )
+
+    assert receipt.state is ReceiptState.SETTLED
+
+
+def test_a_reserved_receipt_with_no_result_yet_is_valid() -> None:
+    built = receipt()
+
+    assert built.state is ReceiptState.RESERVED
+    assert built.outcome is None
+
+
+def test_a_reserved_receipt_cannot_carry_an_outcome() -> None:
+    with pytest.raises(ValidationError):
+        receipt(outcome=ToolOutcome.EXECUTED)
+
+
+def test_a_reserved_receipt_cannot_carry_a_result_digest() -> None:
+    with pytest.raises(ValidationError):
+        receipt(result_digest="digest")
+
+
+def test_a_reserved_receipt_cannot_carry_an_evidence_id() -> None:
+    with pytest.raises(ValidationError):
+        receipt(evidence_id="evidence-1")
+
+
+def test_a_settled_receipt_must_carry_an_outcome() -> None:
+    with pytest.raises(ValidationError):
+        receipt(state=ReceiptState.SETTLED)

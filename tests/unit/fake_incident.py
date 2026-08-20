@@ -260,3 +260,36 @@ def check_runner(
         )
 
     return run
+
+
+class RecordingLogsBackend:
+    """A `run_logs` stand-in for `query_logs_wrapper` that records every call
+    instead of touching the lab. Matches `FakeProbe.disk_paths`: a plain list
+    a test can assert against with whole-list `==`, so "the spy was never
+    called" is a one-line assertion.
+
+    Set `raises` to make the backend fail mid-dispatch instead of returning,
+    for testing that a crash still leaves a visible reserved receipt.
+    """
+
+    def __init__(
+        self,
+        outcome: CheckOutcome | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        self.calls: list[QueryLogsArguments] = []
+        self.raises = raises
+        self.outcome = outcome or CheckOutcome(
+            outcome=ToolOutcome.EXECUTED,
+            kind=EvidenceKind.LOG,
+            source="query_logs",
+            summary="1 row matched",
+            payload={"row_count": 1},
+            duration_ms=5,
+        )
+
+    def __call__(self, arguments: QueryLogsArguments) -> CheckOutcome:
+        self.calls.append(arguments)
+        if self.raises is not None:
+            raise self.raises
+        return self.outcome

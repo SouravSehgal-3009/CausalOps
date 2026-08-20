@@ -85,9 +85,17 @@ def checks_section(receipts: Sequence[ToolReceipt]) -> list[str]:
     )
     for receipt in receipts:
         reason = receipt.reason_code.value if receipt.reason_code else "-"
+        # A receipt reaching a finished report should already be settled; a
+        # reserved one here means the run stopped mid-dispatch, and the report
+        # says so plainly instead of crashing on a missing outcome.
+        outcome = (
+            receipt.outcome.value
+            if receipt.outcome is not None
+            else f"unsettled ({receipt.state.value.lower()})"
+        )
         lines.append(
             f"| `{receipt.tool.value}` | {receipt.policy_result.value} | "
-            f"{receipt.outcome.value} | `{reason}` | {receipt.duration_ms} ms |"
+            f"{outcome} | `{reason}` | {receipt.duration_ms} ms |"
         )
     return lines
 
