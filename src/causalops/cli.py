@@ -13,7 +13,14 @@ from causalops.doctor import (
     project_root_not_found,
     run_doctor,
 )
-from causalops.domain import Budgets, Disposition, GraphPhase, StoredIncident
+from causalops.domain import (
+    Budgets,
+    Disposition,
+    GraphPhase,
+    InvestigationResult,
+    StoredIncident,
+    utc_now,
+)
 from causalops.graph import run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
@@ -36,7 +43,7 @@ from causalops.telemetry import (
     run_topology_check,
 )
 from causalops.tool_wrappers import dispatch_registry
-from causalops.workflow import InvestigationResult, run_investigation, utc_now
+from causalops.workflow import run_investigation
 
 # Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md's
 # Tests specified for the live Claude adapter section describes the

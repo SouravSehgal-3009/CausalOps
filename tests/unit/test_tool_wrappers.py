@@ -23,8 +23,11 @@ from fake_incident import (
     write_topology,
 )
 
+import causalops.tool_wrappers as tool_wrappers_module
 from causalops.domain import (
     Budgets,
+    CheckOutcome,
+    EvidenceKind,
     PolicyResult,
     ReasonCode,
     ReceiptState,
@@ -281,6 +284,144 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt() -> None:
     assert only_receipt.state is ReceiptState.RESERVED
     assert only_receipt.outcome is None
     assert backend.calls == [(logs_proposal().arguments, incident_scope())]
+
+
+def test_a_crash_after_settle_still_leaves_evidence_recoverable_from_the_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settle-then-crash window, targeted precisely: `ledger.settle()`
+    inside `_make_wrapper`'s `dispatch()` already durably recorded the
+    receipt's `evidence_id`/`result_digest` before this test's monkeypatch
+    makes the very next statement -- constructing the `DispatchResult` that
+    hands the `Evidence` object back to the caller -- raise instead. This is
+    a narrower, later crash than
+    `test_a_raising_backend_leaves_a_visible_reserved_receipt` above: that one
+    crashes inside the backend, before `settle()` ever runs, and leaves a
+    `RESERVED` receipt. This one crashes after `settle()` already succeeded,
+    and the fix under test is that the `Evidence` object itself -- not just
+    the digest/id already on the receipt -- survives in the ledger despite
+    the crash."""
+    original_init = tool_wrappers_module.DispatchResult.__init__
+
+    def crashing_init(self: object, **data: object) -> None:
+        if data.get("evidence") is not None:
+            raise RuntimeError("crash after settle, before handoff")
+        original_init(self, **data)  # type: ignore[misc]
+
+    monkeypatch.setattr(tool_wrappers_module.DispatchResult, "__init__", crashing_init)
+    backend = RecordingLogsBackend()
+    wrapper = query_logs_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    with pytest.raises(RuntimeError, match="crash after settle, before handoff"):
+        wrapper.dispatch(
+            logs_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+        )
+
+    (only_receipt,) = ledger.receipts()
+    assert only_receipt.state is ReceiptState.SETTLED
+    assert only_receipt.evidence_id is not None
+    (only_evidence,) = ledger.evidence()
+    assert only_evidence.evidence_id == only_receipt.evidence_id
+    assert only_evidence.content_hash == only_receipt.result_digest
+
+
+def test_an_unavailable_outcome_settles_with_no_evidence_but_still_spends_a_slot() -> (
+    None
+):
+    """`_make_wrapper.dispatch` builds evidence only when the backend reports
+    `EXECUTED` (`tool_wrappers.py:374-393`) -- untested until now for any of
+    the three non-`EXECUTED` outcomes a backend can report. `workflow.py`'s
+    loop already proves this for `UNAVAILABLE`
+    (`test_workflow.py::test_an_unavailable_check_is_recorded_without_evidence`);
+    this is the same property against the wrapper's independent
+    implementation of the same rule."""
+    outcome = CheckOutcome(
+        outcome=ToolOutcome.UNAVAILABLE,
+        kind=EvidenceKind.LOG,
+        source="query_logs",
+        summary="the log service did not respond",
+        reason_code=ReasonCode.TOOL_UNAVAILABLE,
+        duration_ms=8,
+    )
+    backend = RecordingLogsBackend(outcome=outcome)
+    wrapper = query_logs_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        logs_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.UNAVAILABLE
+    assert result.receipt.reason_code is ReasonCode.TOOL_UNAVAILABLE
+    assert result.receipt.state is ReceiptState.SETTLED
+    assert result.receipt.evidence_id is None
+    assert result.receipt.result_digest is None
+    assert result.evidence is None
+    assert ledger.evidence() == ()
+    # A slot is still spent: an attempt was made, whether or not it produced
+    # evidence.
+    assert ledger.slots_left() == 1
+
+
+def test_a_timed_out_outcome_settles_with_no_evidence_but_still_spends_a_slot() -> None:
+    """Same property as the `UNAVAILABLE` case above, for `TIMEOUT` --
+    `test_workflow.py::test_a_check_that_times_out_still_spends_its_slot`'s
+    loop-level counterpart."""
+    outcome = CheckOutcome(
+        outcome=ToolOutcome.TIMEOUT,
+        kind=EvidenceKind.METRIC,
+        source="query_metric",
+        summary="the metric backend did not respond in time",
+        reason_code=ReasonCode.TOOL_TIMEOUT,
+        duration_ms=10000,
+    )
+    backend = RecordingMetricBackend(outcome=outcome)
+    wrapper = query_metric_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        metric_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.TIMEOUT
+    assert result.receipt.reason_code is ReasonCode.TOOL_TIMEOUT
+    assert result.receipt.evidence_id is None
+    assert result.evidence is None
+    assert ledger.evidence() == ()
+    assert ledger.slots_left() == 1
+
+
+def test_an_error_outcome_settles_with_no_evidence_but_still_spends_a_slot() -> None:
+    """Same property again, for `ERROR` --
+    `test_workflow.py::test_a_failing_check_records_the_error_without_evidence`'s
+    loop-level counterpart. Distinct from
+    `test_a_raising_backend_leaves_a_visible_reserved_receipt` above: this
+    backend does not raise, it returns a settled `ERROR` outcome, which is a
+    different code path through `dispatch()` (past `run_check(...)`, into
+    `settle()`) than a raising backend ever reaches."""
+    outcome = CheckOutcome(
+        outcome=ToolOutcome.ERROR,
+        kind=EvidenceKind.CHANGE,
+        source="list_recent_changes",
+        summary="the change log could not be read",
+        reason_code=ReasonCode.TOOL_ERROR,
+        duration_ms=4,
+    )
+    backend = RecordingChangesBackend(outcome=outcome)
+    wrapper = list_recent_changes_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        changes_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.ERROR
+    assert result.receipt.reason_code is ReasonCode.TOOL_ERROR
+    assert result.receipt.evidence_id is None
+    assert result.evidence is None
+    assert ledger.evidence() == ()
+    assert ledger.slots_left() == 1
 
 
 def test_a_ledger_rebuilt_from_receipts_reports_the_same_slots_left() -> None:

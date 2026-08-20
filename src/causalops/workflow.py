@@ -1,11 +1,12 @@
 """The bounded investigation loop from CREATED to one of three terminal states."""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, JsonValue
 
 from causalops.domain import (
+    DEFAULT_BUDGETS,
     Budgets,
     CheckOutcome,
     Clock,
@@ -17,6 +18,7 @@ from causalops.domain import (
     InitialAlertPacket,
     InitialPlan,
     InvestigationReport,
+    InvestigationResult,
     InvestigationState,
     ModelDisposition,
     ModelUsage,
@@ -28,6 +30,7 @@ from causalops.domain import (
     ToolProposal,
     ToolReceipt,
     Versions,
+    utc_now,
 )
 from causalops.evidence import EvidenceStore, build_evidence, digest_text, new_opaque_id
 from causalops.models import ModelRequest, ReasoningModel, Stage, parse_response
@@ -41,11 +44,11 @@ from causalops.prompts import (
 from causalops.run_records import RunRecorder
 from causalops.tools import TOOL_REGISTRY_VERSION
 
-DEFAULT_BUDGETS = Budgets()
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+# `DEFAULT_BUDGETS`, `InvestigationResult`, and `utc_now` now live in
+# `domain.py` -- domain vocabulary that happened to live here, not orchestrator
+# logic. Importing them here (rather than only in `domain.py`) keeps every
+# existing caller and test that does
+# `from causalops.workflow import InvestigationResult, ...` working unchanged.
 
 
 def add_usage(total: ModelUsage | None, latest: ModelUsage) -> ModelUsage:
@@ -425,16 +428,6 @@ class Investigation:
             receipt_ids=tuple(receipt.receipt_id for receipt in self.receipts),
             limitations=limitations,
         )
-
-
-class InvestigationResult(BaseModel):
-    """The report plus the artifacts that belong beside it when it is finalized."""
-
-    model_config = ConfigDict(frozen=True)
-
-    report: InvestigationReport
-    evidence: tuple[Evidence, ...]
-    receipts: tuple[ToolReceipt, ...]
 
 
 def run_investigation(
