@@ -956,17 +956,89 @@ the loop's, where `check_started` fires before the backend call begins.**
 `ToolReceipt.duration_ms` is the one authoritative figure for either
 orchestrator.
 
+Unit 1c (`wrap-remaining-tools`) wraps the other three tools —
+`query_metric`, `list_recent_changes`, `get_topology` — and pays the two
+debts Unit 1b's gap list named below. `tool_wrappers.py` gained one generic
+factory, `_make_wrapper[ArgsT: BaseModel](tool, arguments_type, run_check)`,
+built and proven against a standalone `mypy --strict` repro (including the
+negative case: a backend typed for the wrong *argument type* is a `mypy`
+error) before it replaced what would otherwise have been four near-identical
+copies of the dispatch body. The type binding is only between
+`arguments_type` and `run_check`; `tool` is a plain `ToolName` with no type
+relationship to either, so a factory call where `tool` itself disagrees with
+`arguments_type` still type-checks (caught only at dispatch time, by the
+`isinstance` check, not by `mypy`) — see P3-1's fix to the runtime error
+message below. `query_logs_wrapper` and three new named siblings
+(`query_metric_wrapper`, `list_recent_changes_wrapper`, `get_topology_wrapper`)
+are now thin aliases over it. The backend seam is uniform across all four —
+`Callable[[ArgsT, IncidentScope], CheckOutcome]` — even though only
+`query_metric`'s backend reads the scope it is given (the PromQL `incident`
+label); the other three ignore it, which was judged a smaller cost than a
+fourth, differently-shaped factory.
+
+`dispatch_registry` is now keyword-only and requires all four backends —
+`run_metric`, `run_logs`, `run_changes`, `run_topology` — and always builds
+the full four-tool registry; there is no longer a way to build a partial one
+through it. A caller that genuinely needs a partial registry (only
+`test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached`
+does) builds the `dict[ToolName, ToolWrapper]` by hand instead — exactly the
+type `dispatch_registry` itself returns. The keyword-only signature was
+chosen over relying on the four argument types' structural distinctness
+under `mypy` alone: a stale positional call now fails at the Python call
+itself, in plain `pytest` output, at every call site, not only under a
+separate `mypy` run. `cli.py`'s graph path now wires all four real backends
+(`run_metric_check` against `DEFAULT_PROMETHEUS_URL`, the other three
+against the run's `RunPaths`) instead of `query_logs` alone.
+
+`tests/security/test_tool_boundary.py`'s spy control is now four independent
+spies (`fake_incident.py`'s `RecordingBackend[ArgsT: BaseModel]` and its four
+named subclasses), each asserted `.calls == []` separately after every
+tool's out-of-scope proposal is denied — a single shared spy would have kept
+passing even if only one of four wrappers were actually reachable.
+`get_topology`'s only refusable shape is a cross-incident id
+(`policy.authorize`'s `CROSS_INCIDENT_REQUEST` branch, produced nowhere
+else), not a service or window, since its arguments carry nothing else.
+
+Parity (`test_parity.py`) changed in two ways. First, `DispatchResult`
+gained a defaulted `message: str = ""` field, threaded from
+`PolicyDecision.message` through `_denied_receipt`, so `dispatch_tool`'s
+`proposal_denied` event now carries `message` the same way the loop's always
+has — closing the first gap below. Second, and larger: every dispatch mints
+receipt/evidence ids through `new_opaque_id()`, and the loop and the graph
+call it independently, so their id sequences differed by construction even
+on an identical script. `run_both` now monkeypatches `new_opaque_id` in
+every module holding its own imported copy of the name
+(`causalops.evidence`, `causalops.graph`, `causalops.tool_wrappers`,
+`causalops.workflow`) to a plain call-counter, reset to zero immediately
+before each orchestrator's own run. Because both orchestrators mint a
+receipt id before an evidence id, once per dispatch, in the same order
+regardless of which tool, the two id sequences come out byte-identical, not
+merely equal in shape — which turns `final_context_digest`, `evidence_ids`,
+and `receipt_ids` from excluded fields into hard equalities. Only wall-clock
+fields remain excluded. `assert_dispatch_events_agree` additionally compares
+the ordered `(name, fields)` pairs of the four dispatch-vocabulary events
+(`proposal_received`, `proposal_denied`, `check_started`, `check_finished`),
+excluding `at`/`sequence`/`state` because none of the three lives inside
+`fields` to begin with, and treating the graph's `check_finished.duration_ms`
+as a documented superset of the loop's.
+
+`lab_diagnosis.json` — the loop's own default fixture, two executed checks
+across two tools (`query_logs` then `list_recent_changes`) — is now also a
+parity scenario (`test_the_loop_and_the_graph_agree_on_two_executed_checks`),
+the first in this file where a tool besides `query_logs` does real work
+under the graph. **It passed on the first run, with every comparison above
+exact — the correctness reviewer's own measurement (byte-identical digests,
+identical evidence/receipt ids, 10 clock reads each) held for the two-tool
+case too, and no divergence needed classifying.** The pre-edit report had
+predicted a divergence was likely here; tracing `EvidenceStore.ordered()`'s
+sort key (`observed_at`, `kind`, `evidence_id`) before implementing showed
+why it would not be one — each orchestrator's own `StepClock` only advances,
+so check-order determines evidence order regardless of the two orchestrators'
+absolute tick counts, and `lab_diagnosis.json`'s four evidence kinds never
+tie on `observed_at` to fall through to the id tie-break.
+
 **Known gaps carried into Milestone 2:**
 
-- `dispatch_tool`'s `proposal_denied` event carries `reason` but not the
-  free-text `message` `PolicyDecision` produces (`workflow.py:297` has it;
-  `DispatchResult` carries only the receipt, which has no message field).
-  Widening `DispatchResult` to expose it would reopen `tool_wrappers.py` a
-  second time for one field. Deferred to Unit 1c, which already has to
-  touch that module to add the other three wrappers — one widening pass
-  then, for all four tools, instead of two. Unit 1c's parity test should
-  compare full event field dicts, not just event names, so this gap closes
-  visibly when it lands rather than staying silently forgotten.
 - `graph.py` binds the concrete `ReplayToolCallingModel`, not a
   `ReasoningModel`-style protocol the way `workflow.py` binds
   `ReasoningModel`. A `propose()`-shaped protocol would be speculative with
@@ -986,6 +1058,17 @@ orchestrator.
   `policy_result` other than `ALLOWED`. Nothing constructs those combinations
   today and the docstring does not claim they are closed; tightening is
   deferred, not forgotten.
+- `dispatch_tool`'s crash handler (`graph.py`) carries only the *receipt*
+  out of a mid-attempt crash, not evidence: its `except` block's return has
+  no `"evidence"` key, so state's evidence list is left exactly as it was
+  before that dispatch. Evidence built but not returned is unreferenced —
+  its receipt stays `RESERVED`, already marking the check incomplete —
+  except in the narrow settle-then-crash window, where `ledger.settle()`
+  has already produced a `SETTLED` receipt carrying a real
+  `evidence_id`/`result_digest` before `wrapper.dispatch()` returns its
+  `DispatchResult` to the node. Nothing cross-checks that window today.
+  Carrying evidence through this handler, the way the receipt already is,
+  is deferred to **Unit 1d**.
 
 **Deliberate, not a gap:** `domain.py`'s `SCHEMA_VERSION` stayed `"1"` even
 though `ToolReceipt`'s persisted shape changed (the new `state` field,

@@ -4,10 +4,12 @@ The IDs here stand in for what the scenario controller will produce in Step 3.
 """
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 
 from causalops.domain import (
     CheckOutcome,
@@ -30,12 +32,17 @@ from causalops.domain import (
 )
 from causalops.evidence import content_hash
 from causalops.models import ModelRequest, ModelResponse, ReplayReasoningModel
+from causalops.prometheus import MAX_METRIC_SAMPLES
 from causalops.telemetry import RunPaths
+from causalops.tool_wrappers import ToolWrapper, dispatch_registry
 from causalops.tools import (
+    GetTopologyArguments,
+    ListRecentChangesArguments,
     LogFilter,
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    ToolName,
 )
 
 FIXTURE_DIR = (
@@ -129,6 +136,29 @@ def log_row(
     }
 
 
+def write_changes(paths: RunPaths, entries: list[dict[str, object]]) -> None:
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.changes_file.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def change_row(
+    offset: int, service: str = "orders", summary: str = "config update"
+) -> dict[str, object]:
+    return {
+        "at": (WINDOW_START + timedelta(seconds=offset)).isoformat(),
+        "service": service,
+        "summary": summary,
+    }
+
+
+def write_topology(
+    paths: RunPaths, edges: list[str], services: tuple[str, ...] = SERVICES
+) -> None:
+    paths.root.mkdir(parents=True, exist_ok=True)
+    manifest = {"services": list(services), "edges": edges}
+    paths.topology_file.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def metric_proposal(service: str = "gateway") -> ToolProposal:
     return ToolProposal(
         arguments=QueryMetricArguments(
@@ -153,6 +183,24 @@ def logs_proposal(row_limit: int = 20) -> ToolProposal:
         ),
         evidence_gap="whether inventory timed out",
         expected_observation="timeout rows from inventory",
+    )
+
+
+def changes_proposal(service: str = "orders") -> ToolProposal:
+    return ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        evidence_gap="whether orders had a recent change",
+        expected_observation="a change matching the errors",
+    )
+
+
+def topology_proposal(incident_id: str = INCIDENT_ID) -> ToolProposal:
+    return ToolProposal(
+        arguments=GetTopologyArguments(incident_id=incident_id),
+        evidence_gap="how orders connects to its dependencies",
+        expected_observation="the recorded service topology",
     )
 
 
@@ -262,34 +310,162 @@ def check_runner(
     return run
 
 
-class RecordingLogsBackend:
-    """A `run_logs` stand-in for `query_logs_wrapper` that records every call
-    instead of touching the lab. Matches `FakeProbe.disk_paths`: a plain list
-    a test can assert against with whole-list `==`, so "the spy was never
-    called" is a one-line assertion.
+class RecordingBackend[ArgsT: BaseModel]:
+    """A backend seam stand-in that records every call instead of touching the
+    lab -- the shape every `_make_wrapper` backend now takes,
+    `Callable[[ArgsT, IncidentScope], CheckOutcome]`. Matches `FakeProbe.disk_paths`:
+    a plain list a test can assert against with whole-list `==`, so "the spy
+    was never called" is a one-line assertion, independently, per tool.
+
+    `calls` records the full `(arguments, scope)` pair, not just the
+    arguments -- `query_metric`'s backend is the one seam that actually reads
+    the scope it is handed (the PromQL `incident` label, cross-incident
+    isolation for the only networked backend), and only recording the
+    arguments would leave no spy able to prove a wrapper forwarded the right
+    scope at dispatch time rather than some other one.
 
     Set `raises` to make the backend fail mid-dispatch instead of returning,
-    for testing that a crash still leaves a visible reserved receipt.
+    for testing that a crash still leaves a visible reserved receipt. Each
+    tool's named subclass below only supplies its own default `CheckOutcome`
+    shape -- the recording/raising behaviour lives here once.
     """
 
     def __init__(
         self,
+        default_outcome: CheckOutcome,
         outcome: CheckOutcome | None = None,
         raises: Exception | None = None,
     ) -> None:
-        self.calls: list[QueryLogsArguments] = []
+        self.calls: list[tuple[ArgsT, IncidentScope]] = []
         self.raises = raises
-        self.outcome = outcome or CheckOutcome(
-            outcome=ToolOutcome.EXECUTED,
-            kind=EvidenceKind.LOG,
-            source="query_logs",
-            summary="1 row matched",
-            payload={"row_count": 1},
-            duration_ms=5,
-        )
+        self.outcome = outcome or default_outcome
 
-    def __call__(self, arguments: QueryLogsArguments) -> CheckOutcome:
-        self.calls.append(arguments)
+    def __call__(self, arguments: ArgsT, scope: IncidentScope) -> CheckOutcome:
+        self.calls.append((arguments, scope))
         if self.raises is not None:
             raise self.raises
         return self.outcome
+
+
+class RecordingMetricBackend(RecordingBackend[QueryMetricArguments]):
+    def __init__(
+        self, outcome: CheckOutcome | None = None, raises: Exception | None = None
+    ) -> None:
+        super().__init__(
+            CheckOutcome(
+                outcome=ToolOutcome.EXECUTED,
+                kind=EvidenceKind.METRIC,
+                source="query_metric",
+                summary="p95 latency rose to 900 ms",
+                payload={"sample_count": 1},
+                duration_ms=5,
+            ),
+            outcome,
+            raises,
+        )
+
+
+class RecordingLogsBackend(RecordingBackend[QueryLogsArguments]):
+    def __init__(
+        self, outcome: CheckOutcome | None = None, raises: Exception | None = None
+    ) -> None:
+        super().__init__(
+            CheckOutcome(
+                outcome=ToolOutcome.EXECUTED,
+                kind=EvidenceKind.LOG,
+                source="query_logs",
+                summary="1 row matched",
+                payload={"row_count": 1},
+                duration_ms=5,
+            ),
+            outcome,
+            raises,
+        )
+
+
+class RecordingChangesBackend(RecordingBackend[ListRecentChangesArguments]):
+    def __init__(
+        self, outcome: CheckOutcome | None = None, raises: Exception | None = None
+    ) -> None:
+        super().__init__(
+            CheckOutcome(
+                outcome=ToolOutcome.EXECUTED,
+                kind=EvidenceKind.CHANGE,
+                source="list_recent_changes",
+                summary="1 recent change on orders",
+                payload={"change_count": 1},
+                duration_ms=5,
+            ),
+            outcome,
+            raises,
+        )
+
+
+class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments]):
+    def __init__(
+        self, outcome: CheckOutcome | None = None, raises: Exception | None = None
+    ) -> None:
+        super().__init__(
+            CheckOutcome(
+                outcome=ToolOutcome.EXECUTED,
+                kind=EvidenceKind.TOPOLOGY,
+                source="get_topology",
+                summary="1 service edge",
+                payload={"edge_count": 1},
+                duration_ms=5,
+            ),
+            outcome,
+            raises,
+        )
+
+
+class UnexpectedBackendCall(AssertionError):
+    """A logs-only test's script proposed a tool its registry only stubs."""
+
+
+def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
+    """Wired into the three tool slots a `logs_only_registry` test does not
+    care about. Raising here instead of returning a benign outcome means a
+    test whose script unexpectedly proposes one of those tools fails loudly.
+    The raise stays after `dispatch()`'s own `ledger.reserve()` -- moving it
+    earlier would drop the reserved-receipt guarantee `tool_wrappers.py`
+    exists to hold even for a crashing backend -- and the recorded event
+    logs only `type(error).__name__` (`workflow.py:379-386`'s deliberate
+    rule, since error text can quote untrusted input), so the diagnostic
+    lives in this exception's own name instead: `events.jsonl` reads
+    `backend_crashed {'error': 'UnexpectedBackendCall'}`, self-explanatory
+    without needing this message at all."""
+    raise UnexpectedBackendCall("this tool backend was not expected to be called")
+
+
+def logs_only_registry(
+    run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome],
+) -> dict[ToolName, ToolWrapper]:
+    """The full four-tool registry `dispatch_registry` now requires, with
+    only `query_logs` backed by a real or spy callable -- for the many
+    existing tests that only ever script a `query_logs` proposal. See
+    `_unexpected_call` for what happens if that assumption ever stops
+    holding for one of them."""
+    return dispatch_registry(
+        run_metric=_unexpected_call,
+        run_logs=run_logs,
+        run_changes=_unexpected_call,
+        run_topology=_unexpected_call,
+    )
+
+
+class RecordingPrometheus(NamedTuple):
+    """The loopback server's address, plus every PromQL string it received."""
+
+    url: str
+    queries: list[str]
+
+
+def prometheus_body(sample_count: int = MAX_METRIC_SAMPLES + 5) -> bytes:
+    """More samples than `MAX_METRIC_SAMPLES` by default, matching
+    `test_telemetry.py`'s own truncation test -- a real-backend test that
+    only wants a successful response doesn't care that it is truncated."""
+    values = [[float(index), str(index * 0.5)] for index in range(sample_count)]
+    return json.dumps(
+        {"status": "success", "data": {"result": [{"values": values}]}}
+    ).encode("utf-8")
