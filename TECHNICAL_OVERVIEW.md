@@ -5,7 +5,7 @@
 > landing in the same commit as the code it describes
 > **Audience:** project owner, contributors, reviewers, and coding agents
 
-## Vocabulary: phase, milestone, unit
+## Vocabulary: phase, milestone, unit, section
 
 This project uses four different grouping words across its documents. They
 mean different things and must not be swapped:
@@ -20,12 +20,17 @@ mean different things and must not be swapped:
 - **Unit** — one bounded, independently reviewable chunk of work inside a
   milestone, following the owner-controlled review protocol in `CLAUDE.md`.
   This document itself landed as Unit 0.
+- **Section** — one `##`/`###` heading in *this* document, referenced by name
+  ("the CLI contract section") rather than by number, because headings move
+  as the document grows. Numbered references (`§9`) belong only to
+  `TECHNICAL_SPEC.md`, which is a fixed contract that does not get
+  restructured the same way.
 
-Three of these four things happen to come in groups of three — three phases,
-three milestones, three units already named inside Milestone 1 (0, 1a, 1b).
-That overlap is coincidental, not structural. Use "phase" only for v1
-history and "milestone" only for a v2 release; never call a unit a step, or
-a milestone a phase.
+Phases and milestones happen to both number three; that overlap is
+coincidental, not structural, and units and sections do not follow a fixed
+count. Use "phase" only for v1 history, "milestone" only for a v2 release,
+and "section" only for a heading in this document; never call a unit a step,
+or a milestone a phase.
 
 ## Document authority
 
@@ -853,20 +858,72 @@ defined at the top of this document.
 ## Milestone 1 — Bounded tool-graph parity
 
 **Status:** in progress. Unit 0 (this document and the matching
-`TECHNICAL_SPEC.md` amendments) has landed. Units 1a (the trust boundary:
-`GraphPhase`, `tool_calls.py`, `tool_wrappers.py`, and the three-part
-tool-policy-bypass proof required by `TECHNICAL_SPEC.md` §9 — an AST import
-test showing the dispatch node imports no backend module, a wrapper-identity
-test showing every registered dispatch callable is wrapper-produced rather
-than merely un-imported, and a spy-backend test showing a denied proposal
-never invokes it) and 1b (the orchestration: `graph.py`, the CLI
-`--orchestrator` flag, parity tests) have not started.
+`TECHNICAL_SPEC.md` amendments) has landed, and so has the housekeeping unit
+ahead of 1a (`9ffdc95`, merged `b3f5da0`): `tests/unit/import_scan.py` and the
+`write_log`/`log_row` promotion into `fake_incident.py`, plus the last of the
+stale numbered-section references.
+
+Unit 1a (the trust boundary) has landed: `GraphPhase` (the seven phases in
+§5's diagram, including `ESCALATION_INTERRUPT`, ahead of any code that reaches
+it — the same precedent as `InvestigationState` naming every state a run can
+reach); `ToolReceipt`'s `RESERVED`/`SETTLED` lifecycle and its coherence
+validator; `tool_calls.py` (native-tool-call parsing, dependency-free);
+`tool_wrappers.py` (`query_logs`'s policy wrapper, `ReservationLedger`, and
+`DispatchResult`); `src/causalops/__init__.py` force-disabling both LangSmith
+tracing variables unconditionally at import time; and the three-part
+tool-policy-bypass proof required by `TECHNICAL_SPEC.md` §9 in
+`tests/security/test_tool_boundary.py` — an AST import test showing the
+wrapper module imports no backend module, a wrapper-identity test showing
+every registered dispatch callable both is a `ToolWrapper` *and* was actually
+built by a wrapper factory (a module-private factory token makes direct
+construction raise `TypeError`, not merely an unenforced naming convention),
+and a spy-backend test, parameterised over every registered tool, showing a
+denied proposal never invokes one. `langgraph` and `langchain-core` landed in
+this unit deliberately ahead of any code importing them, to isolate the
+dependency's lock/CI risk from Unit 1b's orchestration code.
+
+Unit 1b (the orchestration: `graph.py`, the CLI `--orchestrator` flag, parity
+tests, and wiring `tool_wrappers.py` into an actual dispatch node) has not
+started.
 
 Per `TECHNICAL_SPEC.md` §12: run one replay incident through a LangGraph
 `StateGraph` with native tool-call parsing, one policy wrapper, atomic budget
 reservation, and the existing report and scorer — then wrap the remaining
 three tools and retire the duplicate orchestration only after conformance
 parity is demonstrated.
+
+**Known gaps carried into Milestone 2:**
+
+- `evaluation.py`'s `count_control` (`evaluation.py:164-183`) reads only
+  `policy_result` and `reason_code`, never `outcome` or the new `state`
+  field, so a run ending with a `RESERVED` receipt is invisible to the
+  scorer's `ControlCounts`. Scorer changes were out of scope for Unit 1a;
+  this closes once Milestone 2 makes reservations durable across a
+  checkpoint resume.
+- `TECHNICAL_SPEC.md` §11 permits `langsmith` as an inert transitive
+  dependency only if "tracing is force-disabled at the entry point **and** a
+  test proves no tracing client is constructed and no tracing request is
+  attempted." Unit 1a satisfies only the first half — `src/causalops/__init__.py`
+  forces both tracing variables off, proven by
+  `tests/unit/test_tracing_disabled.py`. The second half cannot be tested
+  until something actually constructs a `langchain-core` client, which is
+  Unit 1b's `graph.py`. Do not read Unit 1a as closing §11 fully.
+- `ToolReceipt`'s lifecycle validator checks `state` against `outcome`/
+  `result_digest`/`evidence_id` only. It does not (yet) reject a `RESERVED`
+  receipt carrying a `reason_code` or a nonzero `duration_ms`, or a
+  `policy_result` other than `ALLOWED`. Nothing constructs those combinations
+  today and the docstring does not claim they are closed; tightening is
+  deferred, not forgotten.
+
+**Deliberate, not a gap:** `domain.py`'s `SCHEMA_VERSION` stayed `"1"` even
+though `ToolReceipt`'s persisted shape changed (the new `state` field,
+`outcome` becoming optional). The change is backward-compatible — every
+existing constructor call still produces a valid, equivalently-interpreted
+receipt — no consumer keys behavior on the version string, and `results/`/
+`runs/` are empty in this repository, so there is no persisted artifact to
+migrate. Revisit this the moment a reader (a replay fixture, an external
+consumer, a migration script) actually depends on the version number
+distinguishing the two shapes.
 
 ## Milestone 2 — Durable escalation and local retrieval
 

@@ -8,6 +8,7 @@ from causalops.domain import (
     ModelDisposition,
     PolicyResult,
     ReasonCode,
+    ReceiptState,
     RootCauseCode,
     ToolOutcome,
     ToolReceipt,
@@ -78,6 +79,19 @@ def denied_receipt() -> ToolReceipt:
     )
 
 
+def reserved_receipt() -> ToolReceipt:
+    return ToolReceipt(
+        receipt_id="receipt-2",
+        incident_id=INCIDENT_ID,
+        tool="query_logs",  # type: ignore[arg-type]
+        fingerprint="g" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        state=ReceiptState.RESERVED,
+        requested_at=WINDOW_START,
+        duration_ms=0,
+    )
+
+
 def test_a_diagnosis_report_shows_what_it_rests_on() -> None:
     symptom, topology = packet_evidence()
 
@@ -129,3 +143,15 @@ def test_the_report_carries_no_evaluator_words() -> None:
 
     for evaluator_word in ("expected", "predicate", "seed", "scenario"):
         assert evaluator_word not in text
+
+
+def test_an_unsettled_check_reads_as_unsettled_not_a_blank_outcome() -> None:
+    """A receipt reaching a finished report should already be settled; a
+    reserved one means the run stopped mid-dispatch, and the report says so
+    instead of crashing on a missing outcome (report.py's outcome is None
+    branch)."""
+    text = render_report(
+        diagnosed_report(("evidence-1",)), [], [reserved_receipt()], "replay"
+    )
+
+    assert "| `query_logs` | ALLOWED | unsettled (reserved) | `-` | 0 ms |" in text

@@ -7,6 +7,10 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "psutil>=6",
     "pydantic>=2",
+    # Land in Unit 1a even though nothing imports them yet, so the lock/CI risk
+    # of adding them is isolated from Unit 1b's orchestration code.
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
 ]
 
 [project.scripts]

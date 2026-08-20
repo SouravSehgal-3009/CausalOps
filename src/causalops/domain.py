@@ -96,6 +96,24 @@ class InvestigationState(StrEnum):
     FINAL_ASSESSMENT = "FINAL_ASSESSMENT"
 
 
+class GraphPhase(StrEnum):
+    """The LangGraph phases from `TECHNICAL_SPEC.md` §5's diagram.
+
+    This describes the graph the spec defines, not just what Unit 1a builds --
+    `graph.py` (Unit 1b) is the first consumer. `InvestigationState` above is
+    the precedent for naming every phase a state machine can reach, including
+    ones no code visits yet.
+    """
+
+    CREATED = "CREATED"
+    INVESTIGATE = "INVESTIGATE"
+    DISPATCH_TOOL = "DISPATCH_TOOL"
+    NORMALIZE_EVIDENCE = "NORMALIZE_EVIDENCE"
+    FINAL_ASSESSMENT = "FINAL_ASSESSMENT"
+    ESCALATION_INTERRUPT = "ESCALATION_INTERRUPT"
+    FINAL_REPORT = "FINAL_REPORT"
+
+
 class Budgets(BaseModel):
     """The limits this step enforces. Provider limits arrive with the Claude model."""
 
@@ -218,8 +236,25 @@ class ToolProposal(BaseModel):
         return self.arguments.tool
 
 
+class ReceiptState(StrEnum):
+    """Has this check run yet? Separate from `ToolOutcome`, which answers what
+    happened once it did. `TECHNICAL_SPEC.md` §5 requires a wrapper to reserve
+    budget before it calls a backend; `RESERVED` is that reservation made
+    visible, so a crash between reserving and settling still leaves a receipt
+    instead of vanishing silently (see `tool_wrappers.py`)."""
+
+    RESERVED = "RESERVED"
+    SETTLED = "SETTLED"
+
+
 class ToolReceipt(BaseModel):
-    """What a proposal did, whether or not it was allowed to run."""
+    """What a proposal did, whether or not it was allowed to run.
+
+    `state` defaults to `SETTLED` because every receipt built before this unit
+    is one-shot: policy decides, the backend runs (or doesn't), and the receipt
+    is written once with a known outcome. Only the new reservation path in
+    `tool_wrappers.py` ever constructs a `RESERVED` receipt.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -229,12 +264,28 @@ class ToolReceipt(BaseModel):
     tool: ToolName
     fingerprint: str
     policy_result: PolicyResult
-    outcome: ToolOutcome
+    state: ReceiptState = ReceiptState.SETTLED
+    outcome: ToolOutcome | None = None
     reason_code: ReasonCode | None = None
     requested_at: UtcDatetime
     duration_ms: int = Field(ge=0)
     result_digest: str | None = None
     evidence_id: str | None = None
+
+    @model_validator(mode="after")
+    def check_lifecycle_coherence(self) -> Self:
+        carries_a_result = (
+            self.outcome is not None
+            or self.result_digest is not None
+            or self.evidence_id is not None
+        )
+        if self.state is ReceiptState.RESERVED and carries_a_result:
+            raise ValueError(
+                "a reserved receipt has not run yet and cannot carry a result"
+            )
+        if self.state is ReceiptState.SETTLED and self.outcome is None:
+            raise ValueError("a settled receipt must carry an outcome")
+        return self
 
 
 class InitialPlan(BaseModel):
