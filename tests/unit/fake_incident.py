@@ -436,8 +436,10 @@ class UnexpectedBackendCall(BaseException):
 
     `BaseException`, not `Exception`: a test-double guard must escape the
     code under test, not be caught by it. `graph.py`'s `dispatch_tool` (and
-    `workflow.py`'s `run_investigation`, before it) both catch `Exception`
-    around a backend call -- an `Exception` subclass here would be swallowed
+    the now-retired `workflow.py`'s own `run_investigation` -- a different
+    function from `cli.py`'s dispatcher of the same name today -- before it)
+    both catch `Exception` around a backend call -- an `Exception` subclass
+    here would be swallowed
     into a normal `FAILED_SAFE`/`INTERNAL_ERROR` report, which is exactly the
     outcome a test asserting `_unexpected_call` was never reached is supposed
     to be impossible to produce by accident. The seventh variant of this
@@ -454,7 +456,7 @@ def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
     The raise stays after `dispatch()`'s own `ledger.reserve()` -- moving it
     earlier would drop the reserved-receipt guarantee `tool_wrappers.py`
     exists to hold even for a crashing backend -- and the recorded event
-    logs only `type(error).__name__` (`workflow.py:379-386`'s deliberate
+    logs only `type(error).__name__` (the retired loop's own deliberate
     rule, since error text can quote untrusted input), so the diagnostic
     lives in this exception's own name instead: `events.jsonl` reads
     `backend_crashed {'error': 'UnexpectedBackendCall'}`, self-explanatory

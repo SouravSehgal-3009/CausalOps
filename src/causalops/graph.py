@@ -2,10 +2,12 @@
 policy-wrapped dispatch node `tool_wrappers.py` built and nothing else consumed
 before this module.
 
-`workflow.py`'s `Investigation` loop stays in place, unchanged, beside this --
-`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity, and `cli.py`'s
-`--orchestrator` flag lets an owner run either path against the same incident.
-1d retires the loop only once conformance parity is demonstrated.
+Unit 1a built this beside `workflow.py`'s `Investigation` loop, unchanged, so
+an owner could run either path against the same incident and compare --
+`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity. Unit 1d-1
+demonstrated that parity with a 144-pair differential sweep across 13
+dimensions; Unit 1d-2 then retired the loop, `workflow.py` and `cli.py`'s
+`--orchestrator` flag included. This file is now the only orchestrator.
 
 Graph state is a JSON-only `TypedDict`: nothing here lives off-state.
 `tool_wrappers.py`'s `ReservationLedger` and `evidence.py`'s `EvidenceStore`
@@ -17,7 +19,7 @@ redesign of anything in this file.
 Two nodes decide whether the run continues, stops safely, or asks for a
 diagnosis; `final_report` never makes that decision, it only serializes
 whatever `investigate`/`dispatch_tool`/`final_assessment` already decided,
-the same separation `workflow.py`'s `Investigation.report()` keeps between
+the same separation `workflow.py`'s `Investigation.report()` kept between
 deciding an outcome and writing it down.
 
 Every node that can raise mid-attempt (`investigate`, `dispatch_tool`,
@@ -31,7 +33,7 @@ re-raised first in all three, since it is a control-flow signal (interrupt,
 drain, parent command), not a failure -- Milestone 2 adds `interrupt()`.
 
 `ReplayToolCallingModel` is the only model type this file binds -- not the
-plain `ReasoningModel` protocol `workflow.py` uses. That is a known,
+plain `ReasoningModel` protocol `workflow.py` used. That is a known,
 deliberate gap: a `propose()`-shaped protocol for the tool-calling adapter
 would be speculative with only one implementation to validate its shape
 against. It closes when the live Claude adapter unit adds a second one.
@@ -168,7 +170,7 @@ def _expired(started_at: str, budgets: Budgets, clock: Clock) -> bool:
 def _accumulate_usage(
     existing: dict[str, JsonValue] | None, latest: ModelUsage | None
 ) -> dict[str, JsonValue] | None:
-    """Mirrors `workflow.py`'s `add_usage`: the report publishes the total
+    """Mirrored `workflow.py`'s `add_usage`: the report publishes the total
     across every model call, not the last one."""
     if latest is None:
         return existing
@@ -277,7 +279,7 @@ class _StageCounters:
 
     A plain stateful object, not `nonlocal` split across two near-identical
     node bodies, because a top-level helper has no way to mutate a caller's
-    locals -- the same reason `BudgetLedger` exists in `workflow.py`.
+    locals -- the same reason `BudgetLedger` existed in `workflow.py`.
     `record_call` must run *before* the model call it is counting, not
     after, so that a node's `except` handler still reports an attempt that
     raised -- the same "reserve before the risky call" ordering
@@ -325,14 +327,16 @@ def _render_stage_request(
     repair_errors: str | None,
 ) -> tuple[ModelRequest, str]:
     """The context-render-and-digest step every model call needs, identical
-    for `INVESTIGATE` and `FINAL_ASSESSMENT`. `workflow.py`'s `call_model`
-    keeps its own copy of this same logic rather than importing this
-    function: `graph.py` and `workflow.py` are two independent
-    orchestrators running side by side until 1d retires the loop, and
-    reaching across that boundary for one shared helper would couple their
-    lifecycles for no present benefit -- `test_parity.py` is what actually
-    guards the two copies from drifting apart in the meantime, not shared
-    code.
+    for `INVESTIGATE` and `FINAL_ASSESSMENT`. While `workflow.py` still ran,
+    its `call_model` kept its own copy of this same logic rather than
+    importing this function -- the two orchestrators ran side by side and
+    reaching across that boundary for one shared helper would have coupled
+    their lifecycles for no present benefit, with `test_parity.py` guarding
+    the two copies from drifting apart in the meantime. Unit 1d-2 retired
+    `workflow.py` and that duplication with it; this function now has no
+    copy to drift from, and `test_graph_frozen_reports.py` (`test_parity.py`,
+    renamed) is a plain regression pin on this file's own behaviour, not a
+    two-orchestrator drift guard.
     """
     evidence, markers = store.context_evidence()
     context = render_context(
@@ -536,10 +540,12 @@ def _make_investigate(
             # hazard `dispatch_tool` closes for a reserved tool receipt,
             # applied here to the model-call budget. Unlike the turn-0-only
             # rule above, a crash always ends the run: `workflow.py`'s
-            # `plan_second_check()` only swallows a stage that returns
-            # `None` normally, never one that raises -- a raise there
-            # propagates out of `run()` to `run_investigation`'s own outer
-            # containment regardless of which stage crashed.
+            # `plan_second_check()` only ever swallowed a stage that returned
+            # `None` normally, never one that raised -- a raise there
+            # propagated out of `run()` to the loop's own top-level entry
+            # point (`workflow.py`'s own `run_investigation`, a different
+            # function from `cli.py`'s dispatcher of the same name today)
+            # regardless of which stage crashed.
             recorder.event(
                 GraphPhase.INVESTIGATE.value,
                 "internal_error",
@@ -585,7 +591,8 @@ def _make_dispatch_tool(
             # `authorize()` runs inside `wrapper.dispatch`, invisible from
             # here, so this node cannot emit an event at the exact moment
             # authorization passes the way `workflow.py`'s `check_started`
-            # does. What it can restore is the loop's event *vocabulary*:
+            # once did. What it can restore is the retired loop's event
+            # *vocabulary*:
             # a denial is `proposal_denied`, never `check_finished`, and an
             # executed check gets both `check_started` and `check_finished`
             # rather than one event carrying `policy_result` for both cases.
@@ -593,7 +600,8 @@ def _make_dispatch_tool(
             # `check_started` and `check_finished` are both emitted here,
             # after `wrapper.dispatch` has already returned -- the backend
             # call already happened in the gap *before* `check_started`, so
-            # this pair is not a timing bracket the way the loop's is. The
+            # this pair is not a timing bracket the way the retired loop's
+            # was. The
             # receipt's own `duration_ms` (measured inside the wrapper,
             # around the real call) is the authoritative figure;
             # `check_finished` carries it explicitly so nothing has to
@@ -838,18 +846,18 @@ def _make_route_after_normalize(
         if state["failure_reason"] is not None:
             return "final_report"
         receipts = _rebuild_receipts(state)
-        # `workflow.py`'s loop calls `plan_second_check()` at most once, from
-        # `run()` -- never a third time, regardless of whether the second
-        # proposal was allowed or denied. A denial does not spend a slot
-        # (`ReservationLedger.slots_left()`), so `tools_left()` alone cannot
-        # bound the turn count the way it does in the loop, where there is
-        # structurally no third ask. `investigate` maps every turn past 0 to
-        # `HYPOTHESIS_UPDATE` (`graph.py`'s stage mapping), and there is no
+        # `workflow.py`'s retired loop called `plan_second_check()` at most
+        # once, from `run()` -- never a third time, regardless of whether the
+        # second proposal was allowed or denied. A denial does not spend a
+        # slot (`ReservationLedger.slots_left()`), so `tools_left()` alone
+        # cannot bound the turn count the way it did in the loop, where there
+        # was structurally no third ask. `investigate` maps every turn past 0
+        # to `HYPOTHESIS_UPDATE` (`graph.py`'s stage mapping), and there is no
         # third planning stage in the model contract at all -- a phantom
         # third turn would ask a stage the contract cannot express, not
-        # merely one the loop skips. `model_turn` is 1 once turn 0's
+        # merely one the loop skipped. `model_turn` is 1 once turn 0's
         # dispatch has run and 2 once turn 1's has; capping at `< 2`
-        # reproduces the loop's actual bound instead of the budget's
+        # reproduces the loop's own former bound instead of the budget's
         # incidental one.
         if (
             state["model_turn"] < 2

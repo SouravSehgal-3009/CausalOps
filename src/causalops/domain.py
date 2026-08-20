@@ -85,24 +85,14 @@ class ReasonCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
-class InvestigationState(StrEnum):
-    CREATED = "CREATED"
-    PLAN_FIRST_CHECK = "PLAN_FIRST_CHECK"
-    VALIDATE_FIRST_CHECK = "VALIDATE_FIRST_CHECK"
-    EXECUTE_FIRST_CHECK = "EXECUTE_FIRST_CHECK"
-    UPDATE_AND_PLAN_SECOND = "UPDATE_AND_PLAN_SECOND"
-    VALIDATE_SECOND_CHECK = "VALIDATE_SECOND_CHECK"
-    EXECUTE_SECOND_CHECK = "EXECUTE_SECOND_CHECK"
-    FINAL_ASSESSMENT = "FINAL_ASSESSMENT"
-
-
 class GraphPhase(StrEnum):
     """The LangGraph phases from `TECHNICAL_SPEC.md` §5's diagram.
 
     This describes the graph the spec defines, not just what Unit 1a builds --
-    `graph.py` (Unit 1b) is the first consumer. `InvestigationState` above is
-    the precedent for naming every phase a state machine can reach, including
-    ones no code visits yet.
+    `graph.py` (Unit 1b) is the first consumer. Names every phase a state
+    machine can reach, including ones no code visits yet -- the precedent set
+    by `InvestigationState`, the retired loop orchestrator's own state enum
+    (removed in Unit 1d-2, once `workflow.py` no longer used it).
     """
 
     CREATED = "CREATED"
@@ -430,8 +420,9 @@ def utc_now() -> datetime:
 class InvestigationResult(BaseModel):
     """The report plus the artifacts that belong beside it when it is finalized.
 
-    Domain vocabulary, not orchestrator-specific: both `workflow.py`'s loop and
-    `graph.py`'s LangGraph orchestrator produce one of these from a finished run.
+    Domain vocabulary, not orchestrator-specific: `graph.py`'s LangGraph
+    orchestrator produces one of these from a finished run today, and so did
+    `workflow.py`'s loop before it was retired in Unit 1d-2.
     """
 
     model_config = ConfigDict(frozen=True)

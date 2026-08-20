@@ -123,9 +123,10 @@ def test_a_denied_proposal_never_reaches_the_backend() -> None:
     assert result.evidence is None
     assert backend.calls == []
     # A denial is recorded (so ledger.receipts() is the complete list, denials
-    # included) but never spends a slot -- the same rule the legacy loop
-    # already enforces for a denied proposal (test_workflow.py's
-    # test_a_denied_proposal_costs_a_model_call_but_no_check_slot).
+    # included) but never spends a slot -- the same rule the now-retired loop
+    # already enforced for a denied proposal (test_graph.py's
+    # test_a_denied_proposal_costs_a_model_call_but_no_check_slot, ported
+    # from the loop's own test of the same name).
     assert ledger.receipts() == (result.receipt,)
     assert ledger.slots_left() == 2
 
@@ -331,8 +332,8 @@ def test_an_unavailable_outcome_settles_with_no_evidence_but_still_spends_a_slot
 ):
     """`_make_wrapper.dispatch` builds evidence only when the backend reports
     `EXECUTED` (`tool_wrappers.py:374-393`) -- untested until now for any of
-    the three non-`EXECUTED` outcomes a backend can report. `workflow.py`'s
-    loop already proves this for `UNAVAILABLE`
+    the three non-`EXECUTED` outcomes a backend can report. The now-retired
+    `workflow.py`'s loop already proved this for `UNAVAILABLE`
     (`test_workflow.py::test_an_unavailable_check_is_recorded_without_evidence`);
     this is the same property against the wrapper's independent
     implementation of the same rule."""

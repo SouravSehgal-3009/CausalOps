@@ -16,7 +16,6 @@ from causalops.doctor import (
 from causalops.domain import (
     Budgets,
     Disposition,
-    GraphPhase,
     InvestigationResult,
     StoredIncident,
     utc_now,
@@ -37,13 +36,11 @@ from causalops.scenario_control import (
 from causalops.system_probe import SystemProbe
 from causalops.telemetry import (
     RunPaths,
-    registered_check_runner,
     run_changes_check,
     run_logs_check,
     run_topology_check,
 )
 from causalops.tool_wrappers import dispatch_registry
-from causalops.workflow import run_investigation
 
 # Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md's
 # Tests specified for the live Claude adapter section describes the
@@ -56,13 +53,10 @@ MODEL_CHECK_NOTE = (
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # `dispatch_registry` wraps all four tools as of Unit 1c, so the graph
-# orchestrator could run `lab_diagnosis.json` (the loop's own fixture, two
-# executed checks across two tools) too -- `tests/unit/test_parity.py` proves
-# exactly that. `graph_single_check.json` stays the CLI's own graph fixture
-# regardless: it is a smaller, single-check script kept for a fast, readable
-# `--orchestrator graph` run, not a sign the graph still wraps fewer tools.
-LOOP_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
-GRAPH_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "graph_single_check.json"
+# orchestrator runs `lab_diagnosis.json` -- two executed checks across two
+# tools -- exactly as the retired loop orchestrator did; parity between the
+# two was established in Unit 1d-1 before the loop was retired.
+REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,13 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     investigation.add_argument("incident_id")
     investigation.add_argument("--model", choices=("replay",), required=True)
-    investigation.add_argument(
-        "--orchestrator",
-        choices=("loop", "graph"),
-        default="loop",
-        help="loop is the existing Investigation class; graph is the LangGraph "
-        "StateGraph orchestrator.",
-    )
     return parser
 
 
@@ -156,38 +143,12 @@ def run_scenario_command(root: Path, arguments: argparse.Namespace) -> int:
     return 0
 
 
-def run_loop_investigation(
-    incident: StoredIncident, paths: RunPaths, budgets: Budgets, recorder: RunRecorder
-) -> InvestigationResult:
-    model = ReplayReasoningModel(
-        LOOP_REPLAY_FIXTURE,
-        substitutions={
-            "incident_id": incident.scope.incident_id,
-            "window_start": incident.scope.started_at.isoformat(),
-            "window_end": incident.scope.ended_at.isoformat(),
-            "symptom_evidence_id": incident.packet.symptom_evidence_id,
-        },
-    )
-    return run_investigation(
-        incident.scope,
-        incident.packet,
-        incident.evidence,
-        model,
-        registered_check_runner(
-            paths, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
-        ),
-        recorder,
-        budgets,
-        utc_now,
-    )
-
-
-def run_graph_orchestrated_investigation(
+def run_investigation(
     incident: StoredIncident, paths: RunPaths, budgets: Budgets, recorder: RunRecorder
 ) -> InvestigationResult:
     model = ReplayToolCallingModel(
         ReplayReasoningModel(
-            GRAPH_REPLAY_FIXTURE,
+            REPLAY_FIXTURE,
             substitutions={
                 "incident_id": incident.scope.incident_id,
                 "window_start": incident.scope.started_at.isoformat(),
@@ -216,12 +177,9 @@ def run_graph_orchestrated_investigation(
     )
 
 
-# Loads the incident, picks an orchestrator, and writes the result -- the
-# CLI's one job for `investigate`, kept in one function even though each
-# orchestrator's own setup is factored out above.
-def run_investigate_command(
-    root: Path, incident_id: str, model_name: str, orchestrator: str
-) -> int:
+# Loads the incident and writes the investigation's result -- the CLI's one
+# job for `investigate`.
+def run_investigate_command(root: Path, incident_id: str, model_name: str) -> int:
     paths = RunPaths(root=root / "runs" / incident_id)
     if not paths.incident_file.is_file():
         raise LabError(
@@ -232,19 +190,7 @@ def run_investigate_command(
     )
     budgets = Budgets()
     recorder = RunRecorder(utc_now)
-    # `run_investigation`/`run_graph_investigation` each record their own
-    # `investigation_started` event; this one records which orchestrator the
-    # owner chose, so the JSONL event log names it even though the loop and
-    # the graph never import CLI-level concerns like this flag.
-    recorder.event(
-        GraphPhase.CREATED.value, "orchestrator_selected", orchestrator=orchestrator
-    )
-    if orchestrator == "graph":
-        result = run_graph_orchestrated_investigation(
-            incident, paths, budgets, recorder
-        )
-    else:
-        result = run_loop_investigation(incident, paths, budgets, recorder)
+    result = run_investigation(incident, paths, budgets, recorder)
     written = finalize_investigation(
         root / "results",
         result.report,
@@ -275,9 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_lab_command(root, arguments.action)
         if arguments.command == "scenario":
             return run_scenario_command(root, arguments)
-        return run_investigate_command(
-            root, arguments.incident_id, arguments.model, arguments.orchestrator
-        )
+        return run_investigate_command(root, arguments.incident_id, arguments.model)
     except (LabError, RunRecordError) as refusal:
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         return 1
