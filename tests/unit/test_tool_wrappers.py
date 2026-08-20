@@ -261,6 +261,106 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt() -> None:
     assert backend.calls == [logs_proposal().arguments]
 
 
+def test_a_ledger_rebuilt_from_receipts_reports_the_same_slots_left() -> None:
+    """`graph.py`'s dispatch node has no live ledger to hold between calls --
+    only the receipt list graph state already carries. This is the property
+    that makes rebuilding safe: a ledger built fresh from the same receipts
+    a prior ledger produced must count the same remaining slots, or budget
+    accounting would drift silently across a dispatch."""
+    original = ReservationLedger(executed_tools_budget=2)
+    wrapper = query_logs_wrapper(RecordingLogsBackend())
+    seen: set[str] = set()
+    wrapper.dispatch(
+        logs_proposal(), incident_scope(), seen, Budgets(), original, StepClock()
+    )
+    wrapper.dispatch(
+        another_logs_proposal(),
+        incident_scope(),
+        seen,
+        Budgets(),
+        original,
+        StepClock(),
+    )
+
+    rebuilt = ReservationLedger.from_receipts(
+        original.receipts(), executed_tools_budget=2
+    )
+
+    assert rebuilt.slots_left() == original.slots_left()
+    assert rebuilt.receipts() == original.receipts()
+
+
+def test_from_receipts_refuses_a_duplicate_receipt_id() -> None:
+    """`record()` already raises on a duplicate `receipt_id`
+    (`test_record_refuses_an_allowed_receipt` covers a different one of its
+    guards); `from_receipts` is a second way to populate the same internal
+    dict and needs the same protection, or a colliding `receipt_id` would
+    silently keep only the last entry instead of surfacing the corruption."""
+    receipt = ToolReceipt(
+        receipt_id="receipt-1",
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        state=ReceiptState.RESERVED,
+        requested_at=WINDOW_START,
+        duration_ms=0,
+    )
+
+    with pytest.raises(ValueError, match="duplicate receipt_id"):
+        ReservationLedger.from_receipts([receipt, receipt], executed_tools_budget=2)
+
+
+def test_a_receipt_round_trips_through_json_without_losing_fidelity() -> None:
+    """Graph state stores receipts as `model_dump(mode="json")` dicts, not
+    live `ToolReceipt` objects. If that round trip lost anything -- a
+    timestamp's timezone, an enum's value -- budget accounting would corrupt
+    silently, since `slots_left()` reads `policy_result` off the
+    reconstructed object."""
+    ledger = ReservationLedger(executed_tools_budget=1)
+    reserved = ledger.reserve(
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        requested_at=WINDOW_START,
+    )
+    assert reserved is not None
+
+    dumped = reserved.model_dump(mode="json")
+    reloaded = ToolReceipt.model_validate(dumped)
+
+    assert reloaded == reserved
+
+
+def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
+    """The `RESERVED` case above is the least-populated shape a receipt can
+    take -- `outcome`, `reason_code`, `result_digest`, and `evidence_id` are
+    all still `None`. A `SETTLED` receipt with every optional field filled
+    in is the harder case to prove lossless, and the more representative one
+    for what Milestone 2's checkpoint resume actually has to survive."""
+    ledger = ReservationLedger(executed_tools_budget=1)
+    reserved = ledger.reserve(
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        requested_at=WINDOW_START,
+    )
+    assert reserved is not None
+    settled = ledger.settle(
+        receipt_id=reserved.receipt_id,
+        outcome=ToolOutcome.EXECUTED,
+        reason_code=None,
+        duration_ms=12,
+        result_digest="digest",
+        evidence_id="evidence-1",
+    )
+
+    dumped = settled.model_dump(mode="json")
+    reloaded = ToolReceipt.model_validate(dumped)
+
+    assert reloaded == settled
+
+
 def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:
     wrapper = query_logs_wrapper(RecordingLogsBackend())
     wrong_tool_proposal = ToolProposal(

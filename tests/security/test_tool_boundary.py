@@ -34,7 +34,7 @@ from causalops.tools import LogFilter, QueryLogsArguments, ToolName
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIR = REPOSITORY / "src" / PACKAGE
 BACKEND_MODULES = {f"{PACKAGE}.telemetry", f"{PACKAGE}.prometheus"}
-DISPATCH_SOURCE_FILES = ("tool_wrappers.py", "tool_calls.py")
+DISPATCH_SOURCE_FILES = ("tool_wrappers.py", "tool_calls.py", "graph.py")
 
 
 def out_of_scope_logs_proposal() -> ToolProposal:

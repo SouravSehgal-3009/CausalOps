@@ -23,9 +23,10 @@ visible after the fact too, not just to a caller still holding the ledger --
 is Milestone 2's job, once graph state is checkpointed to SQLite.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict
 
@@ -84,6 +85,28 @@ class ReservationLedger:
     def __init__(self, executed_tools_budget: int) -> None:
         self._budget = executed_tools_budget
         self._receipts: dict[str, ToolReceipt] = {}
+
+    @classmethod
+    def from_receipts(
+        cls, receipts: Sequence[ToolReceipt], executed_tools_budget: int
+    ) -> Self:
+        """Rebuild a ledger from a prior dispatch's full receipt list.
+
+        Graph state holds receipts as plain JSON, not a live ledger -- see
+        the class docstring above on why nothing survives off-state. A graph
+        dispatch node reconstructs a ledger this way on every call, so
+        `slots_left()` always reflects exactly what state already recorded
+        and a rebuilt ledger can never drift from the one that wrote those
+        receipts in the first place.
+        """
+        ledger = cls(executed_tools_budget)
+        for receipt in receipts:
+            if receipt.receipt_id in ledger._receipts:
+                raise ValueError(
+                    f"duplicate receipt_id {receipt.receipt_id} in from_receipts"
+                )
+            ledger._receipts[receipt.receipt_id] = receipt
+        return ledger
 
     def slots_left(self) -> int:
         spent = sum(

@@ -12,8 +12,11 @@ Phases 1 and 2 are complete: the synthetic lab, Prometheus and JSONL
 telemetry, all four incident families, the four read-only tool backends,
 the replay-driven investigation loop, policy, budgets, run records, and
 scoring. `causalops investigate <incident-id> --model replay` runs an
-incident end to end. There is no live Claude adapter yet — see
-`TECHNICAL_OVERVIEW.md` Part I, "Phase 3 — never started."
+incident end to end. `--orchestrator graph|loop` (default `loop`) picks
+between the LangGraph `StateGraph` orchestrator and the original loop —
+see `TECHNICAL_OVERVIEW.md` Part III for what each currently supports.
+There is no live Claude adapter yet — see `TECHNICAL_OVERVIEW.md` Part I,
+"Phase 3 — never started."
 
 ## Check this machine
 
