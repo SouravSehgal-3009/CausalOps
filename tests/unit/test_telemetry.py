@@ -1,12 +1,10 @@
 import json
 import threading
 import time
-import urllib.parse
 from collections.abc import Iterator
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import NamedTuple
 
 import pytest
 from fake_incident import (
@@ -14,8 +12,10 @@ from fake_incident import (
     SERVICES,
     WINDOW_END,
     WINDOW_START,
+    RecordingPrometheus,
     incident_scope,
     log_row,
+    prometheus_body,
     write_log,
 )
 
@@ -44,49 +44,6 @@ from causalops.tools import (
     QueryLogsArguments,
     QueryMetricArguments,
 )
-
-SAMPLE_COUNT = MAX_METRIC_SAMPLES + 5
-
-
-class RecordingPrometheus(NamedTuple):
-    """The loopback server's address, plus every PromQL string it received."""
-
-    url: str
-    queries: list[str]
-
-
-def prometheus_body() -> bytes:
-    values = [[float(index), str(index * 0.5)] for index in range(SAMPLE_COUNT)]
-    return json.dumps(
-        {"status": "success", "data": {"result": [{"values": values}]}}
-    ).encode("utf-8")
-
-
-@pytest.fixture
-def fake_prometheus() -> Iterator[RecordingPrometheus]:
-    """A loopback stand-in for Prometheus; a local server keeps the test hermetic."""
-    queries: list[str] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            received = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            queries.append(received.get("query", [""])[0])
-            payload = prometheus_body()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, format: str, *args: object) -> None:
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield RecordingPrometheus(f"http://127.0.0.1:{server.server_port}", queries)
-    server.shutdown()
-    server.server_close()
 
 
 @pytest.fixture
@@ -139,7 +96,8 @@ def logs_arguments(
 
 
 def test_a_metric_query_returns_bounded_samples(
-    tmp_path: Path, fake_prometheus: RecordingPrometheus
+    tmp_path: Path,
+    fake_prometheus: RecordingPrometheus,
 ) -> None:
     outcome = run_metric_check(
         metric_arguments(), incident_scope(), fake_prometheus.url, 5

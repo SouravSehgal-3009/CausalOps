@@ -11,6 +11,7 @@ from fake_incident import (
     alert_packet,
     assessment_json,
     incident_scope,
+    logs_only_registry,
     logs_proposal,
     metric_proposal,
     packet_evidence,
@@ -32,7 +33,7 @@ from causalops.domain import (
 from causalops.graph import GRAPH_RECURSION_LIMIT, run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunRecorder
-from causalops.tool_wrappers import ToolWrapper, dispatch_registry
+from causalops.tool_wrappers import ToolWrapper, query_logs_wrapper
 from causalops.tools import LogFilter, QueryLogsArguments, ToolName
 from causalops.workflow import InvestigationResult
 
@@ -63,12 +64,15 @@ def investigate_via_graph(
 ) -> tuple[InvestigationResult, RunRecorder]:
     ticking = clock or StepClock()
     recorder = RunRecorder(ticking)
+    resolved_registry = (
+        registry if registry is not None else logs_only_registry(RecordingLogsBackend())
+    )
     result = run_graph_investigation(
         incident_scope(),
         alert_packet(),
         packet_evidence(),
         model,
-        registry if registry is not None else dispatch_registry(RecordingLogsBackend()),
+        resolved_registry,
         recorder,
         budgets or Budgets(),
         ticking,
@@ -165,7 +169,7 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
     `test_tool_wrappers.py::test_a_raising_backend_leaves_a_visible_reserved_receipt`
     at the orchestrator level."""
     backend = RecordingLogsBackend(raises=RuntimeError("lab unreachable"))
-    registry = dispatch_registry(backend)
+    registry = logs_only_registry(backend)
 
     result, recorder = investigate_via_graph(graph_replay_model(), registry=registry)
 
@@ -179,7 +183,7 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
     # service -- the backend was reached exactly once, with that proposal's
     # arguments, before it raised.
     assert len(backend.calls) == 1
-    assert backend.calls[0].service == "orders"
+    assert backend.calls[0][0].service == "orders"
     names = [event.name for event in recorder.events]
     assert "backend_crashed" in names
     # The crash is a modeled transition (see `graph.py`'s `dispatch_tool`):
@@ -192,17 +196,25 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
 def test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached(
     tmp_path: Path,
 ) -> None:
-    """`dispatch_registry` only wraps `query_logs` until Unit 1c. A proposal
-    for a registered-but-unwrapped tool must not reach any backend --
+    """`dispatch_registry` always builds the full four-tool registry now, so
+    a genuinely partial registry -- the shape this test needs -- has to be
+    built by hand instead: a plain `dict[ToolName, ToolWrapper]` holding only
+    `query_logs`, the same type `dispatch_registry` itself returns. The
+    property this guards outlives the tool count: a proposal for a
+    registered-but-unwrapped tool must not reach any backend --
     `dispatch_tool` looks the tool up inside the same `try` that calls the
-    wrapper, so a missing entry is contained exactly like a backend crash."""
+    wrapper, so a missing entry is contained exactly like a backend crash.
+    Milestone 2's `search_runbooks` will be exactly this shape again before
+    it, too, gets a wrapper."""
     script = {
         "initial_plan": [plan_json(proposal=metric_proposal())],
         "final_assessment": [assessment_json()],
     }
     model = ReplayToolCallingModel(replay_model(tmp_path, script))
     backend = RecordingLogsBackend()
-    registry = dispatch_registry(backend)
+    registry: dict[ToolName, ToolWrapper] = {
+        ToolName.QUERY_LOGS: query_logs_wrapper(backend)
+    }
 
     result, _ = investigate_via_graph(model, registry=registry)
 
@@ -272,7 +284,7 @@ def test_a_denied_proposal_never_reaches_the_backend_through_the_graph(
     }
     model = ReplayToolCallingModel(replay_model(tmp_path, script))
     backend = RecordingLogsBackend()
-    registry = dispatch_registry(backend)
+    registry = logs_only_registry(backend)
 
     result, _ = investigate_via_graph(model, registry=registry)
 

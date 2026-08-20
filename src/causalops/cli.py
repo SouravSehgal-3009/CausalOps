@@ -16,7 +16,7 @@ from causalops.doctor import (
 from causalops.domain import Budgets, Disposition, GraphPhase, StoredIncident
 from causalops.graph import run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
-from causalops.prometheus import DEFAULT_PROMETHEUS_URL
+from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
 from causalops.scenario_control import (
@@ -28,7 +28,13 @@ from causalops.scenario_control import (
     start_scenario,
 )
 from causalops.system_probe import SystemProbe
-from causalops.telemetry import RunPaths, registered_check_runner, run_logs_check
+from causalops.telemetry import (
+    RunPaths,
+    registered_check_runner,
+    run_changes_check,
+    run_logs_check,
+    run_topology_check,
+)
 from causalops.tool_wrappers import dispatch_registry
 from causalops.workflow import InvestigationResult, run_investigation, utc_now
 
@@ -42,11 +48,12 @@ MODEL_CHECK_NOTE = (
 )
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
-# The loop orchestrator can call all four tools through `registered_check_runner`,
-# so its fixture scripts a second check on a tool the graph orchestrator does not
-# wrap yet (Unit 1c). `graph_single_check.json` proposes only `query_logs`, the
-# one tool `dispatch_registry` wraps this unit -- see `graph.py`'s module
-# docstring and `TECHNICAL_SPEC.md` §12.
+# `dispatch_registry` wraps all four tools as of Unit 1c, so the graph
+# orchestrator could run `lab_diagnosis.json` (the loop's own fixture, two
+# executed checks across two tools) too -- `tests/unit/test_parity.py` proves
+# exactly that. `graph_single_check.json` stays the CLI's own graph fixture
+# regardless: it is a smaller, single-check script kept for a fast, readable
+# `--orchestrator graph` run, not a sign the graph still wraps fewer tools.
 LOOP_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 GRAPH_REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "graph_single_check.json"
 
@@ -85,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("loop", "graph"),
         default="loop",
         help="loop is the existing Investigation class; graph is the LangGraph "
-        "StateGraph orchestrator (query_logs only until Unit 1c).",
+        "StateGraph orchestrator.",
     )
     return parser
 
@@ -182,7 +189,14 @@ def run_graph_orchestrated_investigation(
             },
         )
     )
-    registry = dispatch_registry(lambda arguments: run_logs_check(arguments, paths))
+    registry = dispatch_registry(
+        run_metric=lambda arguments, scope: run_metric_check(
+            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
+        ),
+        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
+        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
+        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
+    )
     return run_graph_investigation(
         incident.scope,
         incident.packet,

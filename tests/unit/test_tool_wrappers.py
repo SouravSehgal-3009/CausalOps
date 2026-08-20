@@ -2,14 +2,25 @@ from pathlib import Path
 
 import pytest
 from fake_incident import (
+    INCIDENT_ID,
     WINDOW_END,
     WINDOW_START,
+    RecordingChangesBackend,
     RecordingLogsBackend,
+    RecordingMetricBackend,
+    RecordingPrometheus,
+    RecordingTopologyBackend,
     StepClock,
+    change_row,
+    changes_proposal,
     incident_scope,
     log_row,
     logs_proposal,
+    metric_proposal,
+    topology_proposal,
+    write_changes,
     write_log,
+    write_topology,
 )
 
 from causalops.domain import (
@@ -21,15 +32,26 @@ from causalops.domain import (
     ToolProposal,
     ToolReceipt,
 )
-from causalops.telemetry import RunPaths, run_logs_check
+from causalops.prometheus import run_metric_check
+from causalops.telemetry import (
+    RunPaths,
+    run_changes_check,
+    run_logs_check,
+    run_topology_check,
+)
 from causalops.tool_wrappers import (
     ReceiptAlreadySettled,
     ReservationLedger,
     ToolWrapper,
     dispatch_registry,
+    get_topology_wrapper,
+    list_recent_changes_wrapper,
     query_logs_wrapper,
+    query_metric_wrapper,
 )
 from causalops.tools import (
+    GetTopologyArguments,
+    ListRecentChangesArguments,
     LogFilter,
     MetricTemplate,
     QueryLogsArguments,
@@ -80,7 +102,7 @@ def test_an_allowed_check_executes_and_settles_with_evidence() -> None:
     assert result.receipt.policy_result is PolicyResult.ALLOWED
     assert result.evidence is not None
     assert result.evidence.receipt_id == result.receipt.receipt_id
-    assert backend.calls == [logs_proposal().arguments]
+    assert backend.calls == [(logs_proposal().arguments, incident_scope())]
 
 
 def test_a_denied_proposal_never_reaches_the_backend() -> None:
@@ -258,7 +280,7 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt() -> None:
     (only_receipt,) = ledger.receipts()
     assert only_receipt.state is ReceiptState.RESERVED
     assert only_receipt.outcome is None
-    assert backend.calls == [logs_proposal().arguments]
+    assert backend.calls == [(logs_proposal().arguments, incident_scope())]
 
 
 def test_a_ledger_rebuilt_from_receipts_reports_the_same_slots_left() -> None:
@@ -374,7 +396,9 @@ def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:
         expected_observation="observation",
     )
 
-    with pytest.raises(ValueError, match="query_logs wrapper received"):
+    with pytest.raises(
+        ValueError, match="query_logs wrapper expects QueryLogsArguments, got Query"
+    ):
         wrapper.dispatch(
             wrong_tool_proposal,
             incident_scope(),
@@ -386,11 +410,19 @@ def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:
 
 
 def test_the_registry_holds_only_wrapper_produced_entries() -> None:
-    registry = dispatch_registry(RecordingLogsBackend())
+    """All four tools now, not just `query_logs` -- `dispatch_registry` always
+    builds the full registry as of Unit 1c."""
+    registry = dispatch_registry(
+        run_metric=RecordingMetricBackend(),
+        run_logs=RecordingLogsBackend(),
+        run_changes=RecordingChangesBackend(),
+        run_topology=RecordingTopologyBackend(),
+    )
 
-    assert set(registry) == {ToolName.QUERY_LOGS}
-    assert isinstance(registry[ToolName.QUERY_LOGS], ToolWrapper)
-    assert registry[ToolName.QUERY_LOGS].tool is ToolName.QUERY_LOGS
+    assert set(registry) == set(ToolName)
+    for tool in ToolName:
+        assert isinstance(registry[tool], ToolWrapper)
+        assert registry[tool].tool is tool
 
 
 def test_the_real_backend_executes_against_a_written_log_file(tmp_path: Path) -> None:
@@ -403,7 +435,7 @@ def test_the_real_backend_executes_against_a_written_log_file(tmp_path: Path) ->
         [log_row(1, service="inventory", event="upstream_timeout")],
         service="inventory",
     )
-    wrapper = query_logs_wrapper(lambda args: run_logs_check(args, paths))
+    wrapper = query_logs_wrapper(lambda args, scope: run_logs_check(args, paths))
     ledger = ReservationLedger(executed_tools_budget=2)
 
     result = wrapper.dispatch(
@@ -413,3 +445,211 @@ def test_the_real_backend_executes_against_a_written_log_file(tmp_path: Path) ->
     assert result.receipt.outcome is ToolOutcome.EXECUTED
     assert result.evidence is not None
     assert result.evidence.payload["row_count"] == 1
+
+
+# -- Unit 1c: the three tools query_logs's wrapper proved the shape against --
+#
+# One allowed-executes test and one denied-untouched test per tool, mirroring
+# the query_logs coverage above at a lighter weight: the dispatch body
+# (authorize -> reserve -> dispatch -> settle) is the same generic factory for
+# all four, already proven exhaustively against query_logs, so what is new
+# per tool here is only "does this tool's own wrapper reach this tool's own
+# backend with this tool's own arguments" -- plus one real-backend test per
+# tool, for the same reason `test_the_real_backend_executes_against_a_written_log_file`
+# exists: a spy that is never wired to the real backend would make every
+# other test in this section pass for the wrong reason.
+
+
+def out_of_scope_metric_proposal() -> ToolProposal:
+    return ToolProposal(
+        arguments=QueryMetricArguments(
+            template=MetricTemplate.GATEWAY_ERROR_RATE,
+            service="billing",
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+        ),
+        evidence_gap="whether billing's error rate moved",
+        expected_observation="nothing, billing is out of scope",
+    )
+
+
+def test_query_metric_wrapper_executes_and_settles_with_evidence() -> None:
+    backend = RecordingMetricBackend()
+    wrapper = query_metric_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        metric_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    assert backend.calls == [(metric_proposal().arguments, incident_scope())]
+
+
+def test_query_metric_wrapper_denies_an_out_of_scope_proposal_untouched() -> None:
+    backend = RecordingMetricBackend()
+    wrapper = query_metric_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        out_of_scope_metric_proposal(),
+        incident_scope(),
+        set(),
+        Budgets(),
+        ledger,
+        StepClock(),
+    )
+
+    assert result.receipt.policy_result is PolicyResult.DENIED
+    assert result.receipt.reason_code is ReasonCode.UNKNOWN_SERVICE
+    assert backend.calls == []
+
+
+def test_the_real_metric_backend_executes_against_a_loopback_prometheus(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    """`run_metric_check` needs the `IncidentScope` for the PromQL `incident`
+    label -- the one backend seam that actually reads the scope argument
+    every wrapper is now given."""
+    wrapper = query_metric_wrapper(
+        lambda args, scope: run_metric_check(args, scope, fake_prometheus.url, 5)
+    )
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        metric_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    # The wrapper forwarded `dispatch()`'s own `incident_scope()` through to
+    # `run_metric_check`, not some other scope: the PromQL the fake server
+    # actually received names this dispatch's incident in the `incident`
+    # label -- the cross-incident isolation this backend seam exists for.
+    assert f'incident="{incident_scope().incident_id}"' in fake_prometheus.queries[-1]
+
+
+def out_of_scope_changes_proposal() -> ToolProposal:
+    return ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="billing", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        evidence_gap="whether billing changed recently",
+        expected_observation="nothing, billing is out of scope",
+    )
+
+
+def test_list_recent_changes_wrapper_executes_and_settles_with_evidence() -> None:
+    backend = RecordingChangesBackend()
+    wrapper = list_recent_changes_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        changes_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    assert backend.calls == [(changes_proposal().arguments, incident_scope())]
+
+
+def test_list_recent_changes_wrapper_denies_an_out_of_scope_proposal_untouched() -> (
+    None
+):
+    backend = RecordingChangesBackend()
+    wrapper = list_recent_changes_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        out_of_scope_changes_proposal(),
+        incident_scope(),
+        set(),
+        Budgets(),
+        ledger,
+        StepClock(),
+    )
+
+    assert result.receipt.policy_result is PolicyResult.DENIED
+    assert result.receipt.reason_code is ReasonCode.UNKNOWN_SERVICE
+    assert backend.calls == []
+
+
+def test_the_real_changes_backend_executes_against_a_written_changes_file(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    write_changes(paths, [change_row(1)])
+    wrapper = list_recent_changes_wrapper(
+        lambda args, scope: run_changes_check(args, paths)
+    )
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        changes_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    assert result.evidence.payload["change_count"] == 1
+
+
+def out_of_scope_topology_proposal() -> ToolProposal:
+    """`get_topology`'s only field beyond `tool` is `incident_id` -- its one
+    refusable shape is a cross-incident id (`policy.authorize`'s
+    `CROSS_INCIDENT_REQUEST` branch), not a service or window."""
+    return ToolProposal(
+        arguments=GetTopologyArguments(incident_id="a" * len(INCIDENT_ID)),
+        evidence_gap="another incident's topology",
+        expected_observation="nothing, that incident is out of scope",
+    )
+
+
+def test_get_topology_wrapper_executes_and_settles_with_evidence() -> None:
+    backend = RecordingTopologyBackend()
+    wrapper = get_topology_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        topology_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    assert backend.calls == [(topology_proposal().arguments, incident_scope())]
+
+
+def test_get_topology_wrapper_denies_a_cross_incident_proposal_untouched() -> None:
+    backend = RecordingTopologyBackend()
+    wrapper = get_topology_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        out_of_scope_topology_proposal(),
+        incident_scope(),
+        set(),
+        Budgets(),
+        ledger,
+        StepClock(),
+    )
+
+    assert result.receipt.policy_result is PolicyResult.DENIED
+    assert result.receipt.reason_code is ReasonCode.CROSS_INCIDENT_REQUEST
+    assert backend.calls == []
+
+
+def test_the_real_topology_backend_executes_against_a_written_manifest(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    write_topology(paths, ["gateway>orders"])
+    wrapper = get_topology_wrapper(lambda args, scope: run_topology_check(args, paths))
+    ledger = ReservationLedger(executed_tools_budget=2)
+
+    result = wrapper.dispatch(
+        topology_proposal(), incident_scope(), set(), Budgets(), ledger, StepClock()
+    )
+
+    assert result.receipt.outcome is ToolOutcome.EXECUTED
+    assert result.evidence is not None
+    assert result.evidence.payload["edge_count"] == 1

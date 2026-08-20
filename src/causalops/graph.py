@@ -587,11 +587,6 @@ def _make_dispatch_tool(
             # a denial is `proposal_denied`, never `check_finished`, and an
             # executed check gets both `check_started` and `check_finished`
             # rather than one event carrying `policy_result` for both cases.
-            # The denial's free-text `message` (`PolicyDecision.message`) is
-            # not available here -- `DispatchResult` carries only the
-            # receipt, which has no message field -- and is deferred to
-            # Unit 1c, which already touches `tool_wrappers.py` to add the
-            # other three wrappers.
             #
             # `check_started` and `check_finished` are both emitted here,
             # after `wrapper.dispatch` has already returned -- the backend
@@ -610,6 +605,7 @@ def _make_dispatch_tool(
                         if result.receipt.reason_code
                         else ""
                     ),
+                    message=result.message,
                 )
             else:
                 recorder.event(
@@ -645,9 +641,19 @@ def _make_dispatch_tool(
             # into the state update now is the only way it survives; letting
             # this exception propagate out of the node would lose it, the
             # exact gap `tool_wrappers.py`'s reservation exists to close.
-            # The `try` covers the full tail deliberately: a settled receipt
-            # and its evidence must not be lost to a crash after the backend
-            # already returned, only before the state update below is built.
+            # The `try` covers the full tail deliberately, but only the
+            # *receipt* is carried out through this handler -- the return
+            # below has no "evidence" key, so state's evidence list is left
+            # exactly as it was before this dispatch. Evidence built but not
+            # returned is simply unreferenced: its receipt stays `RESERVED`,
+            # which already marks the check as not completed. The one narrow
+            # exception is the settle-then-crash window -- a crash between
+            # `ledger.settle()` succeeding and `wrapper.dispatch()` returning
+            # its `DispatchResult` -- where a `SETTLED` receipt can carry a
+            # real `evidence_id`/`result_digest` for an `Evidence` record
+            # that never enters state. Nothing cross-checks that today;
+            # carrying evidence through this handler, the way the receipt
+            # already is, is deferred to Unit 1d.
             recorder.event(
                 GraphPhase.DISPATCH_TOOL.value,
                 "backend_crashed",

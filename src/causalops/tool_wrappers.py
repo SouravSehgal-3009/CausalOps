@@ -2,9 +2,13 @@
 
 `TECHNICAL_SPEC.md` §5 makes a direct backend binding a P0 trust-boundary
 violation: a dispatch node may reach a backend only through a policy wrapper,
-never a bare backend function. This module is that wrapper for `query_logs`,
-the first of the four tools (the other three follow in Unit 1c once this
-shape is proven against a real backend).
+never a bare backend function. This module is that wrapper for all four
+registered tools. Unit 1a proved the shape against `query_logs` and a real
+backend first; `_make_wrapper` below is that same dispatch body generalised
+over which tool, which argument type, and which backend seam -- proven under
+`mypy --strict` including the negative case (a backend typed for the wrong
+tool is a type error, not a runtime surprise) before it replaced the four
+near-identical copies four factories would have been.
 
 Nothing here imports `causalops.telemetry` or `causalops.prometheus` -- see
 `tests/security/test_tool_boundary.py` for the AST test that checks that, plus
@@ -45,7 +49,13 @@ from causalops.domain import (
 )
 from causalops.evidence import build_evidence, new_opaque_id
 from causalops.policy import authorize
-from causalops.tools import QueryLogsArguments, ToolName
+from causalops.tools import (
+    GetTopologyArguments,
+    ListRecentChangesArguments,
+    QueryLogsArguments,
+    QueryMetricArguments,
+    ToolName,
+)
 
 
 class ReceiptAlreadySettled(Exception):
@@ -201,13 +211,20 @@ class ReservationLedger:
 
 
 class DispatchResult(BaseModel):
-    """What one dispatch attempt produced: the receipt, settled or denied, and
-    the evidence it produced, if any."""
+    """What one dispatch attempt produced: the receipt, settled or denied,
+    the evidence it produced, if any, and the free-text `message` a denial
+    carries (`PolicyDecision.message`). The message lives here, not on
+    `ToolReceipt`, so nothing that serialises a receipt into graph state
+    changes shape -- it survives exactly long enough for the caller (today,
+    `graph.py`'s `dispatch_tool`) to put it in a `proposal_denied` event.
+    Defaulted so the seven other call sites that only ever look at `receipt`
+    or `evidence` are unaffected."""
 
     model_config = ConfigDict(frozen=True)
 
     receipt: ToolReceipt
     evidence: Evidence | None = None
+    message: str = ""
 
 
 DispatchFn = Callable[
@@ -250,6 +267,7 @@ def _denied_receipt(
     scope: IncidentScope,
     fingerprint: str,
     reason_code: ReasonCode | None,
+    message: str,
     clock: Clock,
 ) -> DispatchResult:
     receipt = ToolReceipt(
@@ -263,18 +281,42 @@ def _denied_receipt(
         requested_at=clock(),
         duration_ms=0,
     )
-    return DispatchResult(receipt=receipt)
+    return DispatchResult(receipt=receipt, message=message)
 
 
-def query_logs_wrapper(
-    run_logs: Callable[[QueryLogsArguments], CheckOutcome],
+def _make_wrapper[ArgsT: BaseModel](
+    tool: ToolName,
+    arguments_type: type[ArgsT],
+    run_check: Callable[[ArgsT, IncidentScope], CheckOutcome],
 ) -> ToolWrapper:
-    """Builds the one path from a parsed `query_logs` proposal to a backend.
+    """Builds the one path from a parsed proposal for `tool` to a backend.
 
-    `run_logs` is the backend seam, mirroring `registered_check_runner`'s
+    `run_check` is the backend seam, mirroring `registered_check_runner`'s
     existing closure pattern in `telemetry.py` -- this module needs no import
-    of `telemetry.py` itself, which is exactly what the AST import test
-    checks.
+    of `telemetry.py` or `prometheus.py` themselves, which is exactly what
+    the AST import test checks.
+
+    The seam takes the `IncidentScope` for all four tools, even though only
+    `query_metric`'s backend reads it (the PromQL `incident` label --
+    `prometheus.py:177-179` -- is cross-incident isolation, and unlike
+    `paths`/`base_url`/`timeout` it is per-dispatch, not something a caller
+    can close over). The other three ignore it. One seam shape beats three
+    identical ones plus a fourth that differs only in an unused parameter.
+
+    `arguments_type` narrows `proposal.arguments` -- a `ToolArguments` union
+    member -- down to `ArgsT` for the `isinstance` check below, and that
+    narrowing is what lets `run_check(proposal.arguments, scope)` type-check
+    under `mypy --strict`: `ArgsT` is inferred once, consistently, from both
+    `arguments_type` and `run_check`'s own parameter type, so a factory call
+    that pairs the wrong backend with the wrong argument type is a `mypy`
+    error, not a runtime one. That binding is only between `arguments_type`
+    and `run_check` -- `tool` is a plain `ToolName` with no type relationship
+    to either, so mypy cannot catch a factory call where `tool` itself
+    disagrees with `arguments_type` (`_make_wrapper(ToolName.GET_TOPOLOGY,
+    QueryLogsArguments, run_logs)` type-checks fine). The error message below
+    names what this wrapper instance actually expects and actually got,
+    never `tool`, so it stays informative even under that kind of
+    construction-time mismatch.
     """
 
     def dispatch(
@@ -285,9 +327,10 @@ def query_logs_wrapper(
         ledger: ReservationLedger,
         clock: Clock,
     ) -> DispatchResult:
-        if not isinstance(proposal.arguments, QueryLogsArguments):
+        if not isinstance(proposal.arguments, arguments_type):
             raise ValueError(
-                f"query_logs wrapper received {proposal.tool.value} arguments"
+                f"{tool.value} wrapper expects {arguments_type.__name__}, "
+                f"got {type(proposal.arguments).__name__}"
             )
         decision = authorize(
             proposal, scope, seen_fingerprints, budgets, ledger.slots_left()
@@ -298,7 +341,12 @@ def query_logs_wrapper(
         seen_fingerprints.add(decision.fingerprint)
         if decision.result is PolicyResult.DENIED:
             result = _denied_receipt(
-                proposal, scope, decision.fingerprint, decision.reason_code, clock
+                proposal,
+                scope,
+                decision.fingerprint,
+                decision.reason_code,
+                decision.message,
+                clock,
             )
             ledger.record(result.receipt)
             return result
@@ -320,7 +368,9 @@ def query_logs_wrapper(
                 "used the same slots_left() value -- should be unreachable"
             )
 
-        outcome = run_logs(proposal.arguments)  # not caught -- see module docstring
+        outcome = run_check(  # not caught -- see module docstring
+            proposal.arguments, scope
+        )
         evidence = None
         if outcome.outcome is ToolOutcome.EXECUTED:
             evidence = build_evidence(
@@ -343,15 +393,65 @@ def query_logs_wrapper(
         return DispatchResult(receipt=settled, evidence=evidence)
 
     return ToolWrapper(
-        tool=ToolName.QUERY_LOGS,
-        dispatch=dispatch,
-        _factory_token=_WRAPPER_FACTORY_TOKEN,
+        tool=tool, dispatch=dispatch, _factory_token=_WRAPPER_FACTORY_TOKEN
     )
 
 
+def query_metric_wrapper(
+    run_metric: Callable[[QueryMetricArguments, IncidentScope], CheckOutcome],
+) -> ToolWrapper:
+    """Thin named alias over `_make_wrapper` -- see its docstring. The one
+    wrapper whose backend seam actually reads the `IncidentScope` it is
+    given."""
+    return _make_wrapper(ToolName.QUERY_METRIC, QueryMetricArguments, run_metric)
+
+
+def query_logs_wrapper(
+    run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome],
+) -> ToolWrapper:
+    """Thin named alias over `_make_wrapper` -- see its docstring."""
+    return _make_wrapper(ToolName.QUERY_LOGS, QueryLogsArguments, run_logs)
+
+
+def list_recent_changes_wrapper(
+    run_changes: Callable[[ListRecentChangesArguments, IncidentScope], CheckOutcome],
+) -> ToolWrapper:
+    """Thin named alias over `_make_wrapper` -- see its docstring."""
+    return _make_wrapper(
+        ToolName.LIST_RECENT_CHANGES, ListRecentChangesArguments, run_changes
+    )
+
+
+def get_topology_wrapper(
+    run_topology: Callable[[GetTopologyArguments, IncidentScope], CheckOutcome],
+) -> ToolWrapper:
+    """Thin named alias over `_make_wrapper` -- see its docstring. `policy.authorize`
+    gives `get_topology` its own branch (a cross-incident id is the only way to
+    deny it), but that is a policy-module concern, invisible here."""
+    return _make_wrapper(ToolName.GET_TOPOLOGY, GetTopologyArguments, run_topology)
+
+
 def dispatch_registry(
-    run_logs: Callable[[QueryLogsArguments], CheckOutcome],
+    *,
+    run_metric: Callable[[QueryMetricArguments, IncidentScope], CheckOutcome],
+    run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome],
+    run_changes: Callable[[ListRecentChangesArguments, IncidentScope], CheckOutcome],
+    run_topology: Callable[[GetTopologyArguments, IncidentScope], CheckOutcome],
 ) -> dict[ToolName, ToolWrapper]:
-    """Every value here is wrapper-produced. Unit 1c adds the other three
-    tools; nothing may ever add a bare backend callable to this table."""
-    return {ToolName.QUERY_LOGS: query_logs_wrapper(run_logs)}
+    """Every value here is wrapper-produced, for all four registered tools.
+
+    Keyword-only, and all four required: a call built for the old
+    single-argument signature fails immediately with a `TypeError`, not a
+    silently reordered or partially-defaulted backend, and there is no way to
+    build a partial registry through this function at all. A caller that
+    genuinely needs a partial registry (see
+    `test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached`)
+    builds the `dict[ToolName, ToolWrapper]` directly -- it is exactly the
+    type this function returns.
+    """
+    return {
+        ToolName.QUERY_METRIC: query_metric_wrapper(run_metric),
+        ToolName.QUERY_LOGS: query_logs_wrapper(run_logs),
+        ToolName.LIST_RECENT_CHANGES: list_recent_changes_wrapper(run_changes),
+        ToolName.GET_TOPOLOGY: get_topology_wrapper(run_topology),
+    }

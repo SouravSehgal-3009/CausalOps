@@ -32,13 +32,13 @@ from fake_incident import (
     StepClock,
     alert_packet,
     incident_scope,
+    logs_only_registry,
     packet_evidence,
 )
 
 from causalops.graph import run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunRecorder
-from causalops.tool_wrappers import dispatch_registry
 
 FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -61,7 +61,7 @@ def run_one_graph_investigation() -> None:
     model = ReplayToolCallingModel(
         ReplayReasoningModel(FIXTURE, substitutions=substitutions)
     )
-    registry = dispatch_registry(RecordingLogsBackend())
+    registry = logs_only_registry(RecordingLogsBackend())
     recorder = RunRecorder(StepClock())
     run_graph_investigation(
         scope, packet, packet_evidence(), model, registry, recorder, clock=StepClock()
