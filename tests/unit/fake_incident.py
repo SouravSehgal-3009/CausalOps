@@ -30,6 +30,7 @@ from causalops.domain import (
 )
 from causalops.evidence import content_hash
 from causalops.models import ModelRequest, ModelResponse, ReplayReasoningModel
+from causalops.telemetry import RunPaths
 from causalops.tools import (
     LogFilter,
     MetricTemplate,
@@ -101,6 +102,31 @@ def packet_evidence() -> tuple[Evidence, Evidence]:
             content_hash=content_hash(topology_payload),
         ),
     )
+
+
+def write_log(
+    paths: RunPaths, rows: list[dict[str, object]], service: str = "orders"
+) -> None:
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    lines = "".join(json.dumps(row) + "\n" for row in rows)
+    (paths.logs / f"{service}.jsonl").write_text(lines, encoding="utf-8")
+
+
+def log_row(
+    offset: int,
+    severity: str = "error",
+    event: str = "config_rejected_request",
+    detail: str = "x",
+    service: str = "orders",
+) -> dict[str, object]:
+    return {
+        "at": (WINDOW_START + timedelta(seconds=offset)).isoformat(),
+        "request_id": f"r{offset}",
+        "service": service,
+        "severity": severity,
+        "event": event,
+        "fields": {"config_key": "require_order_token", "detail": detail},
+    }
 
 
 def metric_proposal(service: str = "gateway") -> ToolProposal:

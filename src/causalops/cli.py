@@ -30,8 +30,10 @@ from causalops.system_probe import SystemProbe
 from causalops.telemetry import RunPaths, registered_check_runner
 from causalops.workflow import run_investigation, utc_now
 
-# Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md section 9
-# also requires an authenticated model-metadata request, which arrives in Phase 3.
+# Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md's
+# Tests specified for the live Claude adapter section describes the
+# authenticated model-metadata request this still lacks; it arrives with the
+# live Claude adapter, not yet scheduled to a specific v2 unit.
 MODEL_CHECK_NOTE = (
     "Not checked yet: the authenticated claude-sonnet-5 metadata request "
     "arrives in a later step."

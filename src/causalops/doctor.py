@@ -9,8 +9,9 @@ from pydantic import BaseModel, ConfigDict
 
 from causalops.system_probe import SystemProbe
 
-# TECHNICAL_OVERVIEW.md section 3 states the memory thresholds in GiB and the disk
-# threshold in GB, so memory uses 1024**3 and disk uses 10**9 on purpose.
+# TECHNICAL_OVERVIEW.md's Supported development platforms section states the
+# memory thresholds in GiB and the disk threshold in GB, so memory uses 1024**3
+# and disk uses 10**9 on purpose.
 MINIMUM_TOTAL_MEMORY_BYTES = int(7.5 * 1024**3)
 ADVISORY_AVAILABLE_MEMORY_BYTES = int(2.5 * 1024**3)
 MINIMUM_FREE_DISK_BYTES = 12 * 10**9

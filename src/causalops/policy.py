@@ -2,7 +2,8 @@
 
 Unknown tools, templates, and filters cannot reach this module: they have no
 representation in the typed arguments, so schema validation rejects them first.
-What remains are the scope, ordering, and budget rules from section 7.
+What remains are the scope, ordering, and budget rules from the Investigator
+tools and policy section.
 """
 
 from collections.abc import Container
@@ -48,7 +49,8 @@ def authorize(
 ) -> PolicyDecision:
     mark = fingerprint(proposal.arguments)
     # The loop skips a check it cannot afford, so this denial is the boundary
-    # guarantee section 7 asks for rather than a path the workflow normally takes.
+    # guarantee the Investigator tools and policy section asks for, rather than a
+    # path the workflow normally takes.
     if tools_remaining <= 0:
         return deny(
             mark, ReasonCode.BUDGET_EXHAUSTED, "no diagnostic check budget left"

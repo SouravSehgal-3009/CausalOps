@@ -15,6 +15,8 @@ from fake_incident import (
     WINDOW_END,
     WINDOW_START,
     incident_scope,
+    log_row,
+    write_log,
 )
 
 from causalops.domain import (
@@ -62,7 +64,7 @@ def prometheus_body() -> bytes:
 
 @pytest.fixture
 def fake_prometheus() -> Iterator[RecordingPrometheus]:
-    """A loopback stand-in for Prometheus, which section 12 allows in tests."""
+    """A loopback stand-in for Prometheus; a local server keeps the test hermetic."""
     queries: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -134,28 +136,6 @@ def logs_arguments(
         window_end=WINDOW_END,
         row_limit=row_limit,
     )
-
-
-def write_log(paths: RunPaths, rows: list[dict[str, object]]) -> None:
-    paths.logs.mkdir(parents=True, exist_ok=True)
-    lines = "".join(json.dumps(row) + "\n" for row in rows)
-    (paths.logs / "orders.jsonl").write_text(lines, encoding="utf-8")
-
-
-def log_row(
-    offset: int,
-    severity: str = "error",
-    event: str = "config_rejected_request",
-    detail: str = "x",
-) -> dict[str, object]:
-    return {
-        "at": (WINDOW_START + timedelta(seconds=offset)).isoformat(),
-        "request_id": f"r{offset}",
-        "service": "orders",
-        "severity": severity,
-        "event": event,
-        "fields": {"config_key": "require_order_token", "detail": detail},
-    }
 
 
 def test_a_metric_query_returns_bounded_samples(

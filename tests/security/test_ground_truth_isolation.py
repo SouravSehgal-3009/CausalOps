@@ -1,10 +1,14 @@
-"""Ground truth must stay on the evaluator side of the line (section 3)."""
+"""Ground truth must stay on the evaluator side of the line.
 
-import ast
+(TECHNICAL_OVERVIEW.md's Logical ground-truth isolation section.)
+"""
+
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+from import_scan import PACKAGE, imported_modules
 
 from causalops.domain import (
     Evidence,
@@ -19,7 +23,6 @@ from causalops.evidence import content_hash
 from causalops.prompts import render_context
 from causalops.telemetry import RunPaths
 
-PACKAGE = "causalops"
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIR = REPOSITORY / "src" / PACKAGE
 LAB_SERVICES_DIR = REPOSITORY / "lab" / "services"
@@ -31,29 +34,6 @@ EVALUATOR_DIRECTORY = "evaluator"
 
 WINDOW_START = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
 WINDOW_END = datetime(2026, 8, 16, 10, 30, tzinfo=UTC)
-
-
-def imported_modules(source: Path) -> set[str]:
-    """Every module name a file imports, with relative imports resolved.
-
-    `import causalops.evaluation`, `from causalops.evaluation import X`,
-    `from . import evaluation`, and `from .evaluation import X` all have to resolve
-    to the same dotted name, or this test can pass while the rule is broken.
-    """
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            if node.level:
-                base = f"{PACKAGE}.{base}" if base else PACKAGE
-            if base:
-                names.add(base)
-            names.update(
-                f"{base}.{alias.name}" if base else alias.name for alias in node.names
-            )
-    return names
 
 
 def sample_evidence() -> Evidence:
