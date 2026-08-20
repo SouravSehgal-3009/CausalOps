@@ -1,54 +1,53 @@
-"""The loop and the graph agree on one replay incident.
+"""The graph reproduces the loop's own recorded outcome on five scripts.
 
-`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity: Milestone 1
-only retires `workflow.py`'s loop (Unit 1d) once the two orchestrators are
-shown to agree on the same script. This file is that proof --
-`graph_single_check.json` for the single-check happy path, plus three
-throwaway scripts for the branch cases a happy-path fixture cannot reach
-(a first-turn denial that still permits a second turn, a second-turn denial
-that must not -- P1-1's regression at the orchestrator-comparison level --
-and a model that crashes mid-run, P1-2's), plus `lab_diagnosis.json` for the
-two-executed-check, two-tool case none of the single-check scenarios reach.
-As of Unit 1c, `dispatch_registry` wraps all four tools, so every scenario
-here runs against the same real backends the CLI wires, not spies.
+Through Unit 1c, this file ran the loop and the graph side by side and
+compared their live output (`TECHNICAL_SPEC.md` §12's bounded tool-graph
+parity gate for retiring `workflow.py`). That gate is now met -- a reviewer's
+144-pair differential sweep found zero divergence across 13 dimensions -- and
+Unit 1d-1 converts this file accordingly: each scenario below now runs the
+graph alone, against literal values captured from the loop's actual last-known
+output while both orchestrators were still callable side by side. Unit 1d-2
+deletes `workflow.py` entirely; this file's job from that point on is a
+regression pin on the graph's own behaviour, not a comparison.
+
+**One property has no successor and is dropped outright, not reworded**: "the
+loop and the graph asked the same stages in the same order" was a genuine
+two-orchestrator comparison. With one orchestrator left, there is nothing left
+to compare it against -- each test below still asserts the graph's own stage
+sequence against a frozen expected list, which is a different, weaker claim
+than the original, and is named as such rather than presented as equivalent.
+
+`graph_single_check.json` covers the single-check happy path; three throwaway
+scripts cover branch cases it cannot reach (a first-turn denial that still
+permits a second turn, a second-turn denial that must not -- P1-1's
+regression, pinned here at the orchestrator level -- and a model that crashes
+mid-run, P1-2's); `lab_diagnosis.json` covers the two-executed-check, two-tool
+case none of the single-check scripts reach. Every scenario runs against the
+same real backends `cli.py` wires, not spies, matching Unit 1c's coverage.
 
 **Every dispatch attempt mints receipt/evidence ids through `new_opaque_id()`
-(`evidence.py:37`), and each orchestrator calls it independently** -- the
-loop and the graph do not share one call sequence. Left alone, that makes
-receipt ids, evidence ids, and `final_context_digest` (which quotes evidence
-ids in the rendered prompt) incomparable by construction: any two independent
-`uuid4()` sequences differ, so equality there would prove nothing. `run_both`
-closes that gap instead of excluding it: `_install_counting_ids` replaces
-`new_opaque_id` with a plain call-counter, reset to zero immediately before
-each orchestrator's own run. If the two orchestrators mint ids in the same
-order for the same operations -- receipt before evidence, once per dispatch,
-regardless of which tool -- their two id sequences are then byte-identical,
-not merely equal in shape. That turns three of the four things the docstring
-below used to list as excluded into hard equalities; only wall-clock fields
-remain excluded, because nothing here makes two independent `StepClock`
-instances tick in lockstep, or needs to.
+(`evidence.py:37`).** The id-normalisation harness below
+(`_install_counting_ids`) still runs before each test, for a different reason
+than it used to: it no longer aligns two independent orchestrators' id
+sequences, it makes *this one* orchestrator's ids deterministic, which is what
+lets the literals frozen in each test below match on every run rather than
+only the run that produced them.
 
-What is compared, and what is deliberately not:
+What each test pins, and what it does not:
 
-- The stage sequence each model was asked (`ReplayReasoningModel.requests`
-  already records this for the loop; `ReplayToolCallingModel.requests`
-  delegates to the same list for the graph).
+- The graph's own stage sequence (`ReplayToolCallingModel.requests`), where a
+  scenario's script depends on it.
 - Report-level, exactly: `disposition`, `root_cause`, `tools_executed`,
   `model_calls_used`, `repairs_used`, `invalid_responses`, `usage`,
-  `final_context_digest`, `evidence_ids`, and `receipt_ids` -- the last two
-  now compared as literal id sequences, not merely by kind or shape, thanks
-  to the id-normalisation harness above. Each receipt's full
-  `(policy_result, state, outcome, reason_code)` tuple is still compared too,
-  in order, alongside its now-exact `receipt_id`.
+  `final_context_digest`, `evidence_ids`, and `receipt_ids`. Each receipt's
+  full `(tool, policy_result, state, outcome, reason_code)` tuple is pinned
+  too, in order.
 - The dispatch-vocabulary event field dicts (`proposal_received`,
-  `proposal_denied`, `check_started`, `check_finished`) recorded by each
-  orchestrator's `RunRecorder`, compared as ordered `(name, fields)` pairs --
-  see `dispatch_events`/`assert_dispatch_events_agree` below for exactly
-  what is excluded from a `fields` dict and why.
-- Wall-clock fields (`latency_ms`, `started_at`, `finished_at`) are the one
-  thing still excluded: both orchestrators use independent `StepClock`
-  instances that tick a different number of times, and nothing about this
-  unit's id-normalisation touches that.
+  `proposal_denied`, `check_started`, `check_finished`) the graph's own
+  `RunRecorder` produced, as ordered `(name, fields)` pairs.
+- Wall-clock fields (`latency_ms`, `started_at`, `finished_at`) are excluded,
+  as they always were: nothing about a frozen literal makes `StepClock`
+  readings meaningful to pin.
 """
 
 from pathlib import Path
@@ -73,11 +72,14 @@ from fake_incident import (
 import causalops.evidence as evidence_module
 import causalops.graph as graph_module
 import causalops.tool_wrappers as tool_wrappers_module
-import causalops.workflow as workflow_module
 from causalops.domain import (
     Budgets,
+    Disposition,
     IncidentScope,
     InitialAlertPacket,
+    InvestigationReport,
+    InvestigationResult,
+    RootCauseCode,
     ToolProposal,
     ToolReceipt,
 )
@@ -86,7 +88,6 @@ from causalops.graph import run_graph_investigation
 from causalops.models import (
     ModelRequest,
     ModelResponse,
-    ReasoningModel,
     ReplayReasoningModel,
     ReplayToolCallingModel,
 )
@@ -94,15 +95,12 @@ from causalops.prometheus import run_metric_check
 from causalops.run_records import RunRecorder
 from causalops.telemetry import (
     RunPaths,
-    registered_check_runner,
     run_changes_check,
     run_logs_check,
     run_topology_check,
 )
 from causalops.tool_wrappers import dispatch_registry
 from causalops.tools import LogFilter, QueryLogsArguments, ToolName
-from causalops.workflow import InvestigationResult
-from causalops.workflow import run_investigation as run_loop_investigation
 
 FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -110,6 +108,14 @@ FIXTURE = (
     / "causalops"
     / "replay_fixtures"
     / "graph_single_check.json"
+)
+
+LAB_DIAGNOSIS_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "causalops"
+    / "replay_fixtures"
+    / "lab_diagnosis.json"
 )
 
 
@@ -162,13 +168,10 @@ def out_of_scope_logs_proposal() -> ToolProposal:
 
 class RaisesOnSecondCall:
     """Wraps a `ReplayReasoningModel` so its *second* `.respond()` call
-    raises, whichever orchestrator is driving it. `ReplayToolCallingModel`'s
-    `propose()` and `respond()` both delegate to `self.inner.respond(...)`,
-    so wrapping the inner model here (rather than the tool-calling adapter)
-    counts every underlying call regardless of which of the graph's two
-    entry points made it -- and the same wrapper drives the loop directly,
-    since it satisfies `ReasoningModel` itself.
-    """
+    raises. `ReplayToolCallingModel`'s `propose()` and `respond()` both
+    delegate to `self.inner.respond(...)`, so wrapping the inner model here
+    counts every underlying call regardless of which of the graph's two entry
+    points made it."""
 
     def __init__(self, inner: ReplayReasoningModel) -> None:
         self.inner = inner
@@ -187,9 +190,9 @@ class RaisesOnSecondCall:
 
 class _CountingIdGenerator:
     """A deterministic stand-in for `new_opaque_id()`: increasing integers
-    formatted to the same 32-hex-character shape a real opaque id has, so a
-    receipt/evidence id comparison across orchestrators is exact instead of
-    merely equal in kind."""
+    formatted to the same 32-hex-character shape a real opaque id has, so the
+    literals frozen below match on every run, not only the run that produced
+    them."""
 
     def __init__(self) -> None:
         self.count = 0
@@ -203,17 +206,9 @@ def _install_counting_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every module that did `from causalops.evidence import new_opaque_id`
     holds its own binding of that name -- patching
     `causalops.evidence.new_opaque_id` alone would leave `tool_wrappers.py`'s
-    and `workflow.py`'s own copies pointing at the real, `uuid4()`-backed
-    function. All four share one fresh counter, so a run's receipt id and
-    its evidence id fall on the same incrementing sequence, exactly as they
-    would if one real `new_opaque_id()` produced both."""
+    own copy pointing at the real, `uuid4()`-backed function."""
     generator = _CountingIdGenerator()
-    for module in (
-        evidence_module,
-        graph_module,
-        tool_wrappers_module,
-        workflow_module,
-    ):
+    for module in (evidence_module, graph_module, tool_wrappers_module):
         monkeypatch.setattr(module, "new_opaque_id", generator)
 
 
@@ -226,16 +221,7 @@ DISPATCH_EVENT_NAMES = {
 
 
 def dispatch_events(recorder: RunRecorder) -> list[tuple[str, dict[str, object]]]:
-    """The dispatch-vocabulary events, as ordered `(name, fields)` pairs.
-
-    Three things a whole-event comparison would need to strip are excluded
-    by construction instead, because none of them live inside `fields`:
-    `at` (each recorder owns an independent `StepClock`, read a different
-    number of times by each orchestrator), `sequence` (positional within one
-    recorder's own list), and `state` (the loop tags each event with the
-    stage it happened during; the graph tags every dispatch event
-    `DISPATCH_TOOL`; the two vocabularies do not overlap, and that is
-    inherent to the two orchestrators' shapes, not a defect in either)."""
+    """The dispatch-vocabulary events, as ordered `(name, fields)` pairs."""
     return [
         (event.name, dict(event.fields))
         for event in recorder.events
@@ -243,59 +229,23 @@ def dispatch_events(recorder: RunRecorder) -> list[tuple[str, dict[str, object]]
     ]
 
 
-def assert_dispatch_events_agree(
-    loop_recorder: RunRecorder, graph_recorder: RunRecorder
-) -> None:
-    loop_events = dispatch_events(loop_recorder)
-    graph_events = dispatch_events(graph_recorder)
-    assert len(loop_events) == len(graph_events)
-    for (loop_name, loop_fields), (graph_name, graph_fields) in zip(
-        loop_events, graph_events, strict=True
-    ):
-        assert loop_name == graph_name
-        if loop_name == "check_finished":
-            # The graph carries `duration_ms` as a documented superset (see
-            # this module's docstring); the loop's `check_finished` never
-            # had that field to begin with.
-            graph_fields = {
-                key: value
-                for key, value in graph_fields.items()
-                if key != "duration_ms"
-            }
-        assert loop_fields == graph_fields
-
-
-def run_both(
-    loop_model: ReasoningModel,
+def run_once(
     graph_model: ReplayToolCallingModel,
     paths: RunPaths,
     monkeypatch: pytest.MonkeyPatch,
     budgets: Budgets | None = None,
-) -> tuple[InvestigationResult, InvestigationResult, RunRecorder, RunRecorder]:
+) -> tuple[InvestigationResult, RunRecorder]:
+    """Runs the graph orchestrator alone. `run_both`'s old name for this half
+    is gone along with the loop half it used to run beside -- kept as one
+    function, not inlined per test, since all five scenarios wire the same
+    real four-tool registry the same way."""
     scope = incident_scope()
     packet = alert_packet()
     evidence_records = packet_evidence()
     resolved_budgets = budgets or Budgets()
 
     _install_counting_ids(monkeypatch)
-    loop_recorder = RunRecorder(StepClock())
-    loop_result = run_loop_investigation(
-        scope,
-        packet,
-        evidence_records,
-        loop_model,
-        registered_check_runner(paths, "http://unused", 10),
-        loop_recorder,
-        resolved_budgets,
-        StepClock(),
-    )
-
-    _install_counting_ids(monkeypatch)
     graph_recorder = RunRecorder(StepClock())
-    # All four real backends, the same ones `cli.py` wires -- a parity claim
-    # should be proven against what actually runs, not a spy. None of this
-    # file's scenarios reach `query_metric`, so its unreachable URL is never
-    # dialled; it is wired for real all the same, not stubbed out.
     registry = dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
             arguments, scope, "http://unused", 1
@@ -314,121 +264,155 @@ def run_both(
         resolved_budgets,
         StepClock(),
     )
-    return loop_result, graph_result, loop_recorder, graph_recorder
+    return graph_result, graph_recorder
 
 
-def assert_reports_agree(
-    loop_result: InvestigationResult, graph_result: InvestigationResult
+def assert_report_matches_frozen(
+    report: InvestigationReport,
+    *,
+    disposition: Disposition,
+    root_cause: RootCauseCode,
+    tools_executed: int,
+    model_calls_used: int,
+    repairs_used: int,
+    invalid_responses: int,
+    final_context_digest: str,
+    evidence_ids: tuple[str, ...],
+    receipt_ids: tuple[str, ...],
 ) -> None:
-    loop_report = loop_result.report
-    graph_report = graph_result.report
-    assert loop_report.disposition == graph_report.disposition
-    assert loop_report.root_cause == graph_report.root_cause
-    assert loop_report.tools_executed == graph_report.tools_executed
-    assert loop_report.model_calls_used == graph_report.model_calls_used
-    assert loop_report.repairs_used == graph_report.repairs_used
-    assert loop_report.invalid_responses == graph_report.invalid_responses
-    assert loop_report.usage == graph_report.usage
-    # Exact now, not merely equal-in-shape, thanks to the id-normalisation
-    # harness above: both orchestrators minted the same ids in the same
-    # order, so the digest that quotes them and the id sequences themselves
-    # are directly comparable.
-    assert loop_report.final_context_digest == graph_report.final_context_digest
-    assert loop_report.evidence_ids == graph_report.evidence_ids
-    assert loop_report.receipt_ids == graph_report.receipt_ids
-    assert [receipt_shape(r) for r in loop_result.receipts] == [
-        receipt_shape(r) for r in graph_result.receipts
-    ]
+    """Field-by-field comparison against literals frozen from the loop's
+    actual last-known output, not against another live run -- the same field
+    list `assert_reports_agree` used to compare between two orchestrators,
+    now compared against one orchestrator and a constant."""
+    assert report.disposition is disposition
+    assert report.root_cause is root_cause
+    assert report.tools_executed == tools_executed
+    assert report.model_calls_used == model_calls_used
+    assert report.repairs_used == repairs_used
+    assert report.invalid_responses == invalid_responses
+    assert report.usage is None
+    assert report.final_context_digest == final_context_digest
+    assert report.evidence_ids == evidence_ids
+    assert report.receipt_ids == receipt_ids
 
 
-def test_the_loop_and_the_graph_agree_on_one_replay_incident(
+def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Through Unit 1c this test ran the loop beside the graph on
+    `graph_single_check.json` and compared their live output; the values
+    below are that comparison's last agreement, frozen."""
     paths = RunPaths(root=tmp_path)
     write_orders_error_row(paths)
     scope = incident_scope()
     packet = alert_packet()
     subs = substitutions(scope, packet)
-
-    loop_model = ReplayReasoningModel(FIXTURE, substitutions=subs)
     graph_model = ReplayToolCallingModel(
         ReplayReasoningModel(FIXTURE, substitutions=subs)
     )
 
-    loop_result, graph_result, loop_recorder, graph_recorder = run_both(
-        loop_model, graph_model, paths, monkeypatch
+    result, recorder = run_once(graph_model, paths, monkeypatch)
+
+    assert [request.stage.value for request in graph_model.requests] == [
+        "initial_plan",
+        "hypothesis_update",
+        "final_assessment",
+    ]
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.DIAGNOSED,
+        root_cause=RootCauseCode.CONFIG_CHANGE,
+        tools_executed=1,
+        model_calls_used=3,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "ed690a1ae427badf456f7e4cb50ac532b980cbb601074e572de7fc78ed83dbfe"
+        ),
+        evidence_ids=(
+            SYMPTOM_EVIDENCE_ID,
+            "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+            "00000000000000000000000000000003",
+        ),
+        receipt_ids=("00000000000000000000000000000002",),
     )
-
-    assert [request.stage for request in loop_model.requests] == [
-        request.stage for request in graph_model.requests
+    assert [receipt_shape(r) for r in result.receipts] == [
+        (ToolName.QUERY_LOGS, "ALLOWED", "SETTLED", "EXECUTED", None)
     ]
-    assert_reports_agree(loop_result, graph_result)
-    assert_dispatch_events_agree(loop_recorder, graph_recorder)
-
-    # Both orchestrators collected the same evidence kinds, in the same
-    # order and now with the same ids too: the packet's symptom/topology
-    # records, then the one executed check's log evidence.
-    assert [record.kind for record in loop_result.evidence] == [
-        record.kind for record in graph_result.evidence
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
     ]
-    assert [record.evidence_id for record in loop_result.evidence] == [
-        record.evidence_id for record in graph_result.evidence
-    ]
-    assert EvidenceKind.LOG in [record.kind for record in graph_result.evidence]
-    assert SYMPTOM_EVIDENCE_ID in [
-        record.evidence_id for record in graph_result.evidence
+    assert [record.kind for record in result.evidence] == [
+        EvidenceKind.SYMPTOM,
+        EvidenceKind.TOPOLOGY,
+        EvidenceKind.LOG,
     ]
 
 
-def test_a_first_turn_denial_still_permits_a_second_turn(
+def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Scenario (a): an out-of-scope proposal on turn 0, denied, followed by
-    a scripted second proposal on turn 1. Both orchestrators must still ask
-    `HYPOTHESIS_UPDATE` -- `plan_second_check()` gates on whether turn 0
-    *proposed* something, not on whether it was *allowed* -- so this also
-    checks the `model_turn < 2` bound does not overreach into cutting off a
-    legitimate second turn.
-
-    This is a second, independent P1-1 regression, not only an overreach
-    guard: turn 0's denial does not spend a slot, so after turn 1 executes
-    (spending one of two), `tools_left()` is still 1 -- without
-    `model_turn < 2`, the router would loop for a phantom third turn here
-    too, on a script that never denies the second proposal at all. The
-    guard is what stops it, in both this scenario and (b)'s below."""
+    """P1-1's regression, pinned at the orchestrator level: an out-of-scope
+    proposal on turn 0, denied, still permits a second turn --
+    `plan_second_check()`'s graph equivalent gates on whether turn 0
+    *proposed* something, not on whether it was *allowed*."""
     paths = RunPaths(root=tmp_path)
     script = {
         "initial_plan": [plan_json(proposal=out_of_scope_logs_proposal())],
         "hypothesis_update": [plan_json(proposal=logs_proposal())],
         "final_assessment": [assessment_json()],
     }
-    loop_model = replay_model(tmp_path, script)
     graph_model = ReplayToolCallingModel(replay_model(tmp_path, script))
 
-    loop_result, graph_result, loop_recorder, graph_recorder = run_both(
-        loop_model, graph_model, paths, monkeypatch
-    )
+    result, recorder = run_once(graph_model, paths, monkeypatch)
 
-    assert [request.stage.value for request in loop_model.requests] == [
+    assert [request.stage.value for request in graph_model.requests] == [
         "initial_plan",
         "hypothesis_update",
         "final_assessment",
     ]
-    assert_reports_agree(loop_result, graph_result)
-    assert_dispatch_events_agree(loop_recorder, graph_recorder)
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.DIAGNOSED,
+        root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
+        tools_executed=1,
+        model_calls_used=3,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "0bc37313ccbaa1bc89ad576dfb200988ca959d2673de0dcd34edd2f35ce62ae2"
+        ),
+        evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
+        receipt_ids=(
+            "00000000000000000000000000000002",
+            "00000000000000000000000000000003",
+        ),
+    )
+    assert [receipt_shape(r) for r in result.receipts] == [
+        (ToolName.QUERY_LOGS, "DENIED", "SETTLED", "NOT_EXECUTED", "UNKNOWN_SERVICE"),
+        (ToolName.QUERY_LOGS, "ALLOWED", "SETTLED", "UNAVAILABLE", "TOOL_UNAVAILABLE"),
+    ]
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        (
+            "proposal_denied",
+            {"reason": "UNKNOWN_SERVICE", "message": "that service is out of scope"},
+        ),
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+    ]
 
 
-def test_a_repeated_proposal_after_one_executed_check(
+def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Scenario (b), P1-1's regression at the orchestrator-comparison level:
-    the same proposal scripted verbatim for both turns. Turn 0 executes;
-    turn 1's proposal fingerprints identically and is denied as a duplicate.
-    Before the fix, `route_after_normalize` had nothing stopping it from
-    looping for a phantom third turn (a denial does not spend a slot), which
-    would have asked `HYPOTHESIS_UPDATE` again and exhausted this script's
-    single scripted response for that stage -- diverging sharply from the
-    loop, which never asks a third time at all."""
+    """P1-1's other regression, pinned at the orchestrator level: the same
+    proposal scripted verbatim for both turns. Turn 0 executes; turn 1's
+    proposal fingerprints identically and is denied as a duplicate rather
+    than the router asking a phantom third turn."""
     paths = RunPaths(root=tmp_path)
     repeated = logs_proposal()
     script = {
@@ -436,95 +420,161 @@ def test_a_repeated_proposal_after_one_executed_check(
         "hypothesis_update": [plan_json(proposal=repeated)],
         "final_assessment": [assessment_json()],
     }
-    loop_model = replay_model(tmp_path, script)
     graph_model = ReplayToolCallingModel(replay_model(tmp_path, script))
 
-    loop_result, graph_result, loop_recorder, graph_recorder = run_both(
-        loop_model, graph_model, paths, monkeypatch
-    )
+    result, recorder = run_once(graph_model, paths, monkeypatch)
 
-    assert [request.stage.value for request in loop_model.requests] == [
+    assert [request.stage.value for request in graph_model.requests] == [
         "initial_plan",
         "hypothesis_update",
         "final_assessment",
     ]
-    assert_reports_agree(loop_result, graph_result)
-    assert_dispatch_events_agree(loop_recorder, graph_recorder)
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.DIAGNOSED,
+        root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
+        tools_executed=1,
+        model_calls_used=3,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "0bc37313ccbaa1bc89ad576dfb200988ca959d2673de0dcd34edd2f35ce62ae2"
+        ),
+        evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
+        receipt_ids=(
+            "00000000000000000000000000000002",
+            "00000000000000000000000000000003",
+        ),
+    )
+    assert [receipt_shape(r) for r in result.receipts] == [
+        (ToolName.QUERY_LOGS, "ALLOWED", "SETTLED", "UNAVAILABLE", "TOOL_UNAVAILABLE"),
+        (
+            ToolName.QUERY_LOGS,
+            "DENIED",
+            "SETTLED",
+            "NOT_EXECUTED",
+            "DUPLICATE_PROPOSAL",
+        ),
+    ]
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+        ("proposal_received", {"tool": "query_logs"}),
+        (
+            "proposal_denied",
+            {
+                "reason": "DUPLICATE_PROPOSAL",
+                "message": "this check was proposed already",
+            },
+        ),
+    ]
 
 
-def test_a_model_that_raises_on_its_second_call(
+def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Scenario (c), P1-2's regression at the orchestrator-comparison level.
-    `BudgetLedger.record_model_call()` runs before `self.model.respond()` in
-    the loop, so a crashed second call is still counted when
-    `internal_error()` builds the report -- that has always been true of
-    `workflow.py`. Before the graph's own fix, its node-local counters died
-    with the crashed node's frame instead, so the graph reported one fewer
-    call than the loop for the identical script."""
+    """P1-2's regression, pinned at the orchestrator level: `investigate`'s
+    `ask_once` calls `counters.record_call` *before* `model.propose`, so a
+    raising model must still leave `model_calls_used == 2` in the final
+    report, not 1 -- the second call was spent even though it never
+    returned."""
     paths = RunPaths(root=tmp_path)
     scope = incident_scope()
     packet = alert_packet()
     subs = substitutions(scope, packet)
-
-    loop_model = RaisesOnSecondCall(ReplayReasoningModel(FIXTURE, substitutions=subs))
     graph_model = ReplayToolCallingModel(
         RaisesOnSecondCall(ReplayReasoningModel(FIXTURE, substitutions=subs))
     )
 
-    loop_result, graph_result, loop_recorder, graph_recorder = run_both(
-        loop_model, graph_model, paths, monkeypatch
+    result, recorder = run_once(graph_model, paths, monkeypatch)
+
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.FAILED_SAFE,
+        root_cause=RootCauseCode.UNDETERMINED,
+        tools_executed=1,
+        model_calls_used=2,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "67b92dc34438566a373fb89780377510388271e973c993209fd6e35ac63cab5d"
+        ),
+        evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
+        receipt_ids=("00000000000000000000000000000002",),
     )
-
-    assert loop_result.report.model_calls_used == 2
-    assert_reports_agree(loop_result, graph_result)
-    assert_dispatch_events_agree(loop_recorder, graph_recorder)
-
-
-LAB_DIAGNOSIS_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "causalops"
-    / "replay_fixtures"
-    / "lab_diagnosis.json"
-)
+    assert [receipt_shape(r) for r in result.receipts] == [
+        (ToolName.QUERY_LOGS, "ALLOWED", "SETTLED", "UNAVAILABLE", "TOOL_UNAVAILABLE")
+    ]
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+    ]
 
 
-def test_the_loop_and_the_graph_agree_on_two_executed_checks(
+def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lab_diagnosis.json` -- the loop's own default fixture -- proposes
-    `query_logs` then `list_recent_changes`: two executed checks across two
-    tools, new ground for this file. Every scenario above ran a single
-    `query_logs` check; this is the first proof that the three tools Unit 1c
-    wrapped agree with the loop too, not just that the shape holds when
-    `query_logs` is the only tool involved."""
+    """`lab_diagnosis.json` proposes `query_logs` then `list_recent_changes`:
+    two executed checks across two tools, the only scenario here that is not
+    a single-`query_logs` script -- proof that the three tools Unit 1c
+    wrapped agreed with the loop too, not just that the shape held when
+    `query_logs` was the only tool involved."""
     paths = RunPaths(root=tmp_path)
     write_orders_error_row(paths)
     write_changes(paths, [change_row(1)])
     scope = incident_scope()
     packet = alert_packet()
     subs = substitutions(scope, packet)
-
-    loop_model = ReplayReasoningModel(LAB_DIAGNOSIS_FIXTURE, substitutions=subs)
     graph_model = ReplayToolCallingModel(
         ReplayReasoningModel(LAB_DIAGNOSIS_FIXTURE, substitutions=subs)
     )
 
-    loop_result, graph_result, loop_recorder, graph_recorder = run_both(
-        loop_model, graph_model, paths, monkeypatch
-    )
+    result, recorder = run_once(graph_model, paths, monkeypatch)
 
-    assert [request.stage for request in loop_model.requests] == [
-        request.stage for request in graph_model.requests
+    assert [request.stage.value for request in graph_model.requests] == [
+        "initial_plan",
+        "hypothesis_update",
+        "final_assessment",
     ]
-    assert loop_result.report.tools_executed == 2
-    assert_reports_agree(loop_result, graph_result)
-    assert_dispatch_events_agree(loop_recorder, graph_recorder)
-    assert [record.kind for record in loop_result.evidence] == [
-        record.kind for record in graph_result.evidence
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.DIAGNOSED,
+        root_cause=RootCauseCode.CONFIG_CHANGE,
+        tools_executed=2,
+        model_calls_used=3,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "44e5043842b3e3701b183c4b995d8d7e1935021daaba017c8321d0fff4fc802b"
+        ),
+        evidence_ids=(
+            SYMPTOM_EVIDENCE_ID,
+            "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+            "00000000000000000000000000000003",
+            "00000000000000000000000000000005",
+        ),
+        receipt_ids=(
+            "00000000000000000000000000000002",
+            "00000000000000000000000000000004",
+        ),
+    )
+    assert [receipt_shape(r) for r in result.receipts] == [
+        (ToolName.QUERY_LOGS, "ALLOWED", "SETTLED", "EXECUTED", None),
+        (ToolName.LIST_RECENT_CHANGES, "ALLOWED", "SETTLED", "EXECUTED", None),
     ]
-    assert [record.evidence_id for record in loop_result.evidence] == [
-        record.evidence_id for record in graph_result.evidence
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
+        ("proposal_received", {"tool": "list_recent_changes"}),
+        ("check_started", {"tool": "list_recent_changes"}),
+        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
     ]
-    assert EvidenceKind.CHANGE in [record.kind for record in graph_result.evidence]
+    assert [record.kind for record in result.evidence] == [
+        EvidenceKind.SYMPTOM,
+        EvidenceKind.TOPOLOGY,
+        EvidenceKind.LOG,
+        EvidenceKind.CHANGE,
+    ]

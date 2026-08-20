@@ -4,32 +4,46 @@ from pathlib import Path
 import pytest
 from fake_incident import (
     FIXTURE_DIR,
+    RecordingLogsBackend,
+    RecordingMetricBackend,
     StepClock,
     alert_packet,
-    check_runner,
     incident_scope,
     packet_evidence,
+    registry_with,
 )
 
-from causalops.domain import Budgets, ReasonCode
-from causalops.models import ReplayReasoningModel
+from causalops.domain import Budgets, InvestigationResult, ReasonCode
+from causalops.graph import run_graph_investigation
+from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import (
     RunRecorder,
     RunRecordError,
     finalize_investigation,
 )
-from causalops.workflow import InvestigationResult, run_investigation
 
 
 def finished_run() -> tuple[InvestigationResult, RunRecorder]:
+    """Driven through the graph orchestrator (Unit 1d-1): this file's subject
+    is artifact writing, never which orchestrator produced the run, so it
+    re-points at `run_graph_investigation` rather than staying tied to the
+    retiring loop. `valid_diagnosis.json` has no `{{...}}` placeholders --
+    it is orchestrator-independent, the same file `test_workflow.py` used --
+    so no substitution dance is needed to reuse it here."""
     clock = StepClock()
     recorder = RunRecorder(clock)
-    result = run_investigation(
+    model = ReplayToolCallingModel(
+        ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
+    )
+    registry = registry_with(
+        run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+    )
+    result = run_graph_investigation(
         incident_scope(),
         alert_packet(),
         packet_evidence(),
-        ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json"),
-        check_runner(),
+        model,
+        registry,
         recorder,
         Budgets(),
         clock,

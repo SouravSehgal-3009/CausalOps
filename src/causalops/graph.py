@@ -49,6 +49,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import JsonValue
 
 from causalops.domain import (
+    DEFAULT_BUDGETS,
     Budgets,
     Clock,
     Disposition,
@@ -60,6 +61,7 @@ from causalops.domain import (
     InitialAlertPacket,
     InitialPlan,
     InvestigationReport,
+    InvestigationResult,
     ModelDisposition,
     ModelUsage,
     PolicyResult,
@@ -69,6 +71,7 @@ from causalops.domain import (
     ToolProposal,
     ToolReceipt,
     Versions,
+    utc_now,
 )
 from causalops.evidence import EvidenceStore, digest_text, new_opaque_id
 from causalops.models import ModelRequest, ReplayToolCallingModel, Stage, parse_response
@@ -87,7 +90,6 @@ from causalops.tool_calls import (
 )
 from causalops.tool_wrappers import ReservationLedger, ToolWrapper
 from causalops.tools import TOOL_REGISTRY_VERSION, ToolName
-from causalops.workflow import DEFAULT_BUDGETS, InvestigationResult, utc_now
 
 # The library default is 10007 (`_internal/_config.py:32`), meant for graphs
 # whose shape isn't known ahead of time. This graph's longest real path is
@@ -641,29 +643,40 @@ def _make_dispatch_tool(
             # into the state update now is the only way it survives; letting
             # this exception propagate out of the node would lose it, the
             # exact gap `tool_wrappers.py`'s reservation exists to close.
-            # The `try` covers the full tail deliberately, but only the
-            # *receipt* is carried out through this handler -- the return
-            # below has no "evidence" key, so state's evidence list is left
-            # exactly as it was before this dispatch. Evidence built but not
-            # returned is simply unreferenced: its receipt stays `RESERVED`,
-            # which already marks the check as not completed. The one narrow
-            # exception is the settle-then-crash window -- a crash between
-            # `ledger.settle()` succeeding and `wrapper.dispatch()` returning
-            # its `DispatchResult` -- where a `SETTLED` receipt can carry a
-            # real `evidence_id`/`result_digest` for an `Evidence` record
-            # that never enters state. Nothing cross-checks that today;
-            # carrying evidence through this handler, the way the receipt
-            # already is, is deferred to Unit 1d.
+            # A crash before `ledger.settle()` ever ran leaves the receipt
+            # `RESERVED` and `ledger.evidence()` empty -- nothing to carry,
+            # matching this handler's pre-Unit-1d behaviour exactly. The one
+            # window that differs is settle-then-crash: a crash *inside*
+            # `wrapper.dispatch`, between `ledger.settle()` succeeding and
+            # `DispatchResult` being constructed and returned, where a
+            # `SETTLED` receipt carries a real `evidence_id`/`result_digest`
+            # for an `Evidence` record that would otherwise never enter
+            # state. `ledger.settle()` now durably stores that record in the
+            # ledger the instant it runs, keyed by `receipt_id` -- the same
+            # durability the receipt itself already had -- so
+            # `ledger.evidence()` recovers it here for exactly that window.
+            # This does not cover every crash after `wrapper.dispatch`
+            # returns: if this handler's own `recorder.event` call below
+            # raises, that exception propagates out of this node too, and
+            # the fallback in `run_graph_investigation` reads the last
+            # committed checkpoint -- losing this dispatch's receipt as well,
+            # not only its evidence. That gap is pre-existing and unrelated
+            # to the fix here; closing it would mean this handler catching
+            # its own `recorder.event` failure, which is not implemented.
             recorder.event(
                 GraphPhase.DISPATCH_TOOL.value,
                 "backend_crashed",
                 error=type(error).__name__,
             )
+            recovered_evidence = [
+                record.model_dump(mode="json") for record in ledger.evidence()
+            ]
             return {
                 "phase": GraphPhase.DISPATCH_TOOL.value,
                 "receipts": [r.model_dump(mode="json") for r in ledger.receipts()],
                 "seen_fingerprints": sorted(seen),
                 "pending_proposal": None,
+                "evidence": [*state["evidence"], *recovered_evidence],
                 "failure_reason": ReasonCode.INTERNAL_ERROR.value,
             }
 

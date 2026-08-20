@@ -6,7 +6,7 @@ Splitting them would spread one vocabulary across several files.
 """
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, Self
 
@@ -125,6 +125,9 @@ class Budgets(BaseModel):
     executed_tools: int = 2
     repairs: int = 1
     log_rows: int = 40
+
+
+DEFAULT_BUDGETS = Budgets()
 
 
 class Versions(BaseModel):
@@ -418,3 +421,21 @@ class InvestigationReport(BaseModel):
             if self.reason_code is None:
                 raise ValueError("FAILED_SAFE requires a reason code")
         return self
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class InvestigationResult(BaseModel):
+    """The report plus the artifacts that belong beside it when it is finalized.
+
+    Domain vocabulary, not orchestrator-specific: both `workflow.py`'s loop and
+    `graph.py`'s LangGraph orchestrator produce one of these from a finished run.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    report: InvestigationReport
+    evidence: tuple[Evidence, ...]
+    receipts: tuple[ToolReceipt, ...]

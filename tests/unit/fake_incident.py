@@ -262,11 +262,23 @@ def replay_model(
 
 
 class UsageReportingModel:
-    """Wraps a replay model so the workflow sees provider usage on every call."""
+    """Wraps a replay model so the workflow sees provider usage on every call.
+
+    `requests` delegates to the wrapped model, the same passthrough
+    `ReplayToolCallingModel.requests` already uses for its own `inner` --
+    that is what lets this class stand in as `ReplayToolCallingModel`'s
+    `inner` too (`ReplayToolCallingModel(UsageReportingModel(...))`), so a
+    graph-level test can see the same accumulated usage a loop-level one
+    does, through one more layer of wrapping.
+    """
 
     def __init__(self, inner: ReplayReasoningModel, usage: ModelUsage) -> None:
         self.inner = inner
         self.usage = usage
+
+    @property
+    def requests(self) -> list[ModelRequest]:
+        return self.inner.requests
 
     def respond(self, request: ModelRequest) -> ModelResponse:
         return self.inner.respond(request).model_copy(update={"usage": self.usage})
@@ -419,8 +431,20 @@ class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments]):
         )
 
 
-class UnexpectedBackendCall(AssertionError):
-    """A logs-only test's script proposed a tool its registry only stubs."""
+class UnexpectedBackendCall(BaseException):
+    """A logs-only test's script proposed a tool its registry only stubs.
+
+    `BaseException`, not `Exception`: a test-double guard must escape the
+    code under test, not be caught by it. `graph.py`'s `dispatch_tool` (and
+    `workflow.py`'s `run_investigation`, before it) both catch `Exception`
+    around a backend call -- an `Exception` subclass here would be swallowed
+    into a normal `FAILED_SAFE`/`INTERNAL_ERROR` report, which is exactly the
+    outcome a test asserting `_unexpected_call` was never reached is supposed
+    to be impossible to produce by accident. The seventh variant of this
+    project's containment defect: a signal meant to fail a test loudly,
+    silently absorbed by the same blanket handler that protects a real run
+    from a real backend crash.
+    """
 
 
 def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
@@ -438,6 +462,36 @@ def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
     raise UnexpectedBackendCall("this tool backend was not expected to be called")
 
 
+def registry_with(
+    *,
+    run_metric: Callable[
+        [QueryMetricArguments, IncidentScope], CheckOutcome
+    ] = _unexpected_call,
+    run_logs: Callable[
+        [QueryLogsArguments, IncidentScope], CheckOutcome
+    ] = _unexpected_call,
+    run_changes: Callable[
+        [ListRecentChangesArguments, IncidentScope], CheckOutcome
+    ] = _unexpected_call,
+    run_topology: Callable[
+        [GetTopologyArguments, IncidentScope], CheckOutcome
+    ] = _unexpected_call,
+) -> dict[ToolName, ToolWrapper]:
+    """The full four-tool registry `dispatch_registry` now requires, with
+    only the backends a test's script actually calls wired to a real or spy
+    callable -- every other slot defaults to `_unexpected_call`, so a script
+    that unexpectedly proposes one of them fails loudly instead of silently
+    returning a benign outcome. Generalises `logs_only_registry` below (kept
+    as a thin, still-named alias -- most existing tests only ever script
+    `query_logs`) to the two- and three-tool scripts newer tests need."""
+    return dispatch_registry(
+        run_metric=run_metric,
+        run_logs=run_logs,
+        run_changes=run_changes,
+        run_topology=run_topology,
+    )
+
+
 def logs_only_registry(
     run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome],
 ) -> dict[ToolName, ToolWrapper]:
@@ -446,12 +500,7 @@ def logs_only_registry(
     existing tests that only ever script a `query_logs` proposal. See
     `_unexpected_call` for what happens if that assumption ever stops
     holding for one of them."""
-    return dispatch_registry(
-        run_metric=_unexpected_call,
-        run_logs=run_logs,
-        run_changes=_unexpected_call,
-        run_topology=_unexpected_call,
-    )
+    return registry_with(run_logs=run_logs)
 
 
 class RecordingPrometheus(NamedTuple):

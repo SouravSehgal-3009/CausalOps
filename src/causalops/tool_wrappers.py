@@ -95,6 +95,7 @@ class ReservationLedger:
     def __init__(self, executed_tools_budget: int) -> None:
         self._budget = executed_tools_budget
         self._receipts: dict[str, ToolReceipt] = {}
+        self._evidence: dict[str, Evidence] = {}
 
     @classmethod
     def from_receipts(
@@ -160,11 +161,25 @@ class ReservationLedger:
         duration_ms: int,
         result_digest: str | None,
         evidence_id: str | None,
+        evidence: Evidence | None = None,
     ) -> ToolReceipt:
         """Replace a reserved receipt with its settled result. Refuses a
         second settle, and refuses settling a receipt that was never
         reserved -- constructing a new `ToolReceipt`, never
-        `model_copy(update=...)`, which would skip the lifecycle validator."""
+        `model_copy(update=...)`, which would skip the lifecycle validator.
+
+        `evidence`, when given, is stored here too, keyed by `receipt_id` --
+        symmetric with how the receipt itself is already durable in this
+        ledger the instant this call returns. Optional and defaulted to
+        `None` so every existing caller that only ever had a digest and an id
+        to give (never the `Evidence` object itself) is unaffected. This is
+        the fix for the settle-then-crash window `_make_wrapper.dispatch`
+        used to leave open: before this, only the receipt's `evidence_id`/
+        `result_digest` survived a crash between this call returning and the
+        `DispatchResult` it builds being handed back to the caller: the
+        `Evidence` record those fields point at died with the wrapper's frame.
+        See `evidence()` below and `graph.py`'s `dispatch_tool`, which reads it
+        in its own `except` handler."""
         current = self._receipts.get(receipt_id)
         if current is None or current.state is not ReceiptState.RESERVED:
             raise ReceiptAlreadySettled(receipt_id)
@@ -183,6 +198,8 @@ class ReservationLedger:
             evidence_id=evidence_id,
         )
         self._receipts[receipt_id] = settled
+        if evidence is not None:
+            self._evidence[receipt_id] = evidence
         return settled
 
     def record(self, receipt: ToolReceipt) -> None:
@@ -208,6 +225,16 @@ class ReservationLedger:
         """Every receipt this ledger has produced, in call order: denied,
         reserved, and settled alike."""
         return tuple(self._receipts.values())
+
+    def evidence(self) -> tuple[Evidence, ...]:
+        """Every `Evidence` record a `settle()` call durably recorded, in
+        call order. A ledger built by `from_receipts` never populates this --
+        prior evidence already lives in graph state's own `evidence` list, so
+        only the current dispatch's own settle (if it ran before a crash)
+        ever appears here. That is what makes it safe for a caller to append
+        this tuple onto state's evidence list without checking for
+        duplicates."""
+        return tuple(self._evidence.values())
 
 
 class DispatchResult(BaseModel):
@@ -389,6 +416,7 @@ def _make_wrapper[ArgsT: BaseModel](
             duration_ms=outcome.duration_ms,
             result_digest=evidence.content_hash if evidence else None,
             evidence_id=evidence.evidence_id if evidence else None,
+            evidence=evidence,
         )
         return DispatchResult(receipt=settled, evidence=evidence)
 
