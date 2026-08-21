@@ -18,9 +18,14 @@ from causalops.domain import (
     ReasonCode,
     ToolProposal,
 )
-from causalops.tools import GetTopologyArguments, QueryLogsArguments, fingerprint
+from causalops.tools import (
+    GetTopologyArguments,
+    QueryLogsArguments,
+    SearchRunbooksArguments,
+    fingerprint,
+)
 
-POLICY_VERSION = "1"
+POLICY_VERSION = "2"
 
 
 class PolicyDecision(BaseModel):
@@ -65,6 +70,23 @@ def authorize(
         if arguments.incident_id != scope.incident_id:
             return deny(
                 mark, ReasonCode.CROSS_INCIDENT_REQUEST, "that is another incident"
+            )
+        return PolicyDecision(result=PolicyResult.ALLOWED, fingerprint=mark)
+
+    if isinstance(arguments, SearchRunbooksArguments):
+        # Not incident-scoped: no service, no window, so this must return
+        # before the `arguments.service` read below -- `SearchRunbooksArguments`
+        # has no such field and would raise `AttributeError` there. The
+        # denial shape mirrors `QueryLogsArguments.row_limit` above rather
+        # than inventing a new reason code: an oversized `limit` is a
+        # resource-limit denial, the same category `RESULT_LIMIT_EXCEEDED`
+        # already names, not a scope-escape one -- guidance has no incident
+        # scope to escape.
+        if arguments.limit > budgets.runbook_passages:
+            return deny(
+                mark,
+                ReasonCode.RESULT_LIMIT_EXCEEDED,
+                "that passage limit is above the budget",
             )
         return PolicyDecision(result=PolicyResult.ALLOWED, fingerprint=mark)
 

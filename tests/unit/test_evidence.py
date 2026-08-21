@@ -16,6 +16,19 @@ from causalops.evidence import (
 )
 
 
+# Kept for defense in depth alongside `evidence.py`'s own module-level
+# `assert` -- that assertion runs once at import time and would be stripped
+# under `python -O`; this test runs every time `pytest` does and cannot be
+# silently skipped by an interpreter flag. Unit 3a made the gap this guards
+# real: a `RunbookCheckOutcome` has no `kind` field (so nothing motivates a
+# new `EvidenceKind.RUNBOOK` member any more), but nothing stops a future
+# `EvidenceKind` addition from landing without a matching quota, and
+# `context_evidence()`'s `CONTEXT_QUOTAS[record.kind]` lookup below is
+# unguarded -- confirmed the only such lookup in `src/` during review.
+def test_context_quotas_covers_every_evidence_kind() -> None:
+    assert set(CONTEXT_QUOTAS) == set(EvidenceKind)
+
+
 def log_evidence(minute: int, incident_id: str = INCIDENT_ID) -> Evidence:
     payload: dict[str, JsonValue] = {"rows": minute}
     return build_evidence(

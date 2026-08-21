@@ -11,6 +11,8 @@ from causalops.tools import (
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    RunbookTopic,
+    SearchRunbooksArguments,
     ToolArguments,
     ToolName,
     fingerprint,
@@ -38,6 +40,9 @@ def every_tool() -> dict[ToolName, ToolArguments]:
             service="orders", window_start=WINDOW_START, window_end=WINDOW_END
         ),
         ToolName.GET_TOPOLOGY: GetTopologyArguments(incident_id="inc-1"),
+        ToolName.SEARCH_RUNBOOKS: SearchRunbooksArguments(
+            topic=RunbookTopic.GATEWAY_ERRORS, limit=3
+        ),
     }
 
 

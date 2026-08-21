@@ -7,6 +7,7 @@ from fake_incident import (
     incident_scope,
     logs_proposal,
     metric_proposal,
+    runbooks_proposal,
 )
 from pydantic import ValidationError
 
@@ -122,6 +123,36 @@ def test_a_row_limit_above_the_budget_is_denied() -> None:
         ReasonCode.RESULT_LIMIT_EXCEEDED,
     )
     assert decide(logs_proposal(row_limit=BUDGETS.log_rows))[0] is PolicyResult.ALLOWED
+
+
+def test_a_passage_limit_above_the_budget_is_denied() -> None:
+    """`SearchRunbooksArguments`'s own branch, mirroring
+    `test_a_row_limit_above_the_budget_is_denied` above: allowed at exactly
+    `budgets.runbook_passages`, denied one above it -- the boundary case
+    that distinguishes `>` from `>=` in `policy.py`'s new branch, which a
+    denial proposal built only from `budget + 1` cannot distinguish on its
+    own (both operators deny `budget + 1`; only the exact-budget case tells
+    them apart)."""
+    assert decide(runbooks_proposal(limit=BUDGETS.runbook_passages + 1)) == (
+        PolicyResult.DENIED,
+        ReasonCode.RESULT_LIMIT_EXCEEDED,
+    )
+    assert (
+        decide(runbooks_proposal(limit=BUDGETS.runbook_passages))[0]
+        is PolicyResult.ALLOWED
+    )
+
+
+def test_a_search_runbooks_proposal_returns_before_the_service_fallthrough() -> None:
+    """`SearchRunbooksArguments` has no `service` field -- `policy.authorize`
+    falls through to `arguments.service` after its `GetTopologyArguments`
+    branch, so a `search_runbooks` proposal that reached that line would
+    raise `AttributeError` instead of returning a policy decision. This
+    proves the new branch returns first: a proposal within budget is
+    `ALLOWED` without ever raising, and the out-of-budget case above already
+    proves the denial path returns too, rather than falling through and
+    crashing on the way to a decision."""
+    assert decide(runbooks_proposal())[0] is PolicyResult.ALLOWED
 
 
 def test_the_same_proposal_twice_is_denied() -> None:

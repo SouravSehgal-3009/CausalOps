@@ -2,13 +2,17 @@
 
 `TECHNICAL_SPEC.md` §5 makes a direct backend binding a P0 trust-boundary
 violation: a dispatch node may reach a backend only through a policy wrapper,
-never a bare backend function. This module is that wrapper for all four
+never a bare backend function. This module is that wrapper for all five
 registered tools. Unit 1a proved the shape against `query_logs` and a real
 backend first; `_make_wrapper` below is that same dispatch body generalised
 over which tool, which argument type, and which backend seam -- proven under
 `mypy --strict` including the negative case (a backend typed for the wrong
 tool is a type error, not a runtime surprise) before it replaced the four
-near-identical copies four factories would have been.
+near-identical copies four factories would have been. Unit 3a added a fifth
+tool, `search_runbooks`, and one branch inside `_make_wrapper`'s own dispatch
+body (on the *type* of result its `run_check` seam returns) rather than a
+second factory -- the plan's own owner decision, "one wrapper factory, one
+dispatch path."
 
 Nothing here imports `causalops.telemetry` or `causalops.prometheus` -- see
 `tests/security/test_tool_boundary.py` for the AST test that checks that, plus
@@ -43,6 +47,9 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
+    RunbookCheckOutcome,
+    RunbookPassage,
     ToolOutcome,
     ToolProposal,
     ToolReceipt,
@@ -54,6 +61,7 @@ from causalops.tools import (
     ListRecentChangesArguments,
     QueryLogsArguments,
     QueryMetricArguments,
+    SearchRunbooksArguments,
     ToolName,
 )
 
@@ -245,12 +253,24 @@ class DispatchResult(BaseModel):
     changes shape -- it survives exactly long enough for the caller (today,
     `graph.py`'s `dispatch_tool`) to put it in a `proposal_denied` event.
     Defaulted so the seven other call sites that only ever look at `receipt`
-    or `evidence` are unaffected."""
+    or `evidence` are unaffected.
+
+    `passages`/`retrieval_mode` are Unit 3a's own additions, for exactly one
+    tool: `search_runbooks`. `_make_wrapper` below branches on the *type* of
+    result its `run_check` seam returns (`RunbookCheckOutcome` vs.
+    `CheckOutcome`) to decide which of `evidence` or `passages` to populate
+    -- never both -- so a `DispatchResult` for any of the other four tools
+    always carries `passages=()`. `retrieval_mode` is set from
+    `RunbookCheckOutcome.retrieval_mode` whenever that branch runs, even
+    when `passages` ends up empty -- see `RetrievalMode`'s own docstring for
+    why `graph.py` must not infer it from an empty passage list instead."""
 
     model_config = ConfigDict(frozen=True)
 
     receipt: ToolReceipt
     evidence: Evidence | None = None
+    passages: tuple[RunbookPassage, ...] = ()
+    retrieval_mode: RetrievalMode | None = None
     message: str = ""
 
 
@@ -314,7 +334,7 @@ def _denied_receipt(
 def _make_wrapper[ArgsT: BaseModel](
     tool: ToolName,
     arguments_type: type[ArgsT],
-    run_check: Callable[[ArgsT, IncidentScope], CheckOutcome],
+    run_check: Callable[[ArgsT, IncidentScope], CheckOutcome | RunbookCheckOutcome],
 ) -> ToolWrapper:
     """Builds the one path from a parsed proposal for `tool` to a backend.
 
@@ -323,12 +343,14 @@ def _make_wrapper[ArgsT: BaseModel](
     of `telemetry.py` or `prometheus.py` themselves, which is exactly what
     the AST import test checks.
 
-    The seam takes the `IncidentScope` for all four tools, even though only
+    The seam takes the `IncidentScope` for all five tools, even though only
     `query_metric`'s backend reads it (the PromQL `incident` label --
     `prometheus.py:177-179` -- is cross-incident isolation, and unlike
     `paths`/`base_url`/`timeout` it is per-dispatch, not something a caller
-    can close over). The other three ignore it. One seam shape beats three
-    identical ones plus a fourth that differs only in an unused parameter.
+    can close over). The other four ignore it -- `search_runbooks` included,
+    since guidance is not incident-scoped (`policy.py`'s own branch for it
+    never reads `scope` either). One seam shape beats one identical one per
+    tool plus a fifth that differs only in an unused parameter.
 
     `arguments_type` narrows `proposal.arguments` -- a `ToolArguments` union
     member -- down to `ArgsT` for the `isinstance` check below, and that
@@ -344,6 +366,25 @@ def _make_wrapper[ArgsT: BaseModel](
     names what this wrapper instance actually expects and actually got,
     never `tool`, so it stays informative even under that kind of
     construction-time mismatch.
+
+    Unit 3a widens `run_check`'s return type to `CheckOutcome |
+    RunbookCheckOutcome` -- this factory is shared by all five registered
+    tools, and `dispatch` below branches on which one of those two shapes
+    came back to decide whether the result is incident evidence or runbook
+    guidance. That widening is deliberately *not* repeated on the five named
+    alias functions below or on `dispatch_registry`'s own keyword
+    parameters: each keeps the narrow return type its own tool actually
+    produces (`CheckOutcome` for the first four, `RunbookCheckOutcome` for
+    `search_runbooks_wrapper` alone). Python's `Callable` return type is
+    covariant, so a narrowly-typed backend still satisfies this factory's
+    wider parameter with no cast -- but the reverse is not offered: nothing
+    here lets a caller wire a `RunbookCheckOutcome`-returning backend into
+    `query_logs_wrapper`'s `run_logs` parameter, because that parameter is
+    typed for `CheckOutcome` only. Those five narrow annotations, not this
+    factory's internal union, are what stops a retrieval backend from being
+    wired to `query_logs` and type-checking clean -- the same class of
+    mismatch this docstring already concedes `mypy` cannot catch through
+    `tool` alone, closed here instead through each alias's own signature.
     """
 
     def dispatch(
@@ -398,6 +439,32 @@ def _make_wrapper[ArgsT: BaseModel](
         outcome = run_check(  # not caught -- see module docstring
             proposal.arguments, scope
         )
+
+        if isinstance(outcome, RunbookCheckOutcome):
+            # The retrieval branch: a passage is guidance, never `Evidence`
+            # -- `TECHNICAL_SPEC.md` §6/§7 draw that line, `EvidenceKind`'s
+            # own docstring explains why nothing here can blur it.
+            # `result_digest`/`evidence_id` stay `None` regardless of
+            # outcome, matching `Evidence`-free settlement; `retrieval_mode`
+            # is carried onto `DispatchResult` from the outcome even when
+            # `passages` is empty (a failed or empty search still ran in a
+            # real mode) -- see `RetrievalMode`'s own docstring.
+            settled = ledger.settle(
+                receipt_id=reserved.receipt_id,
+                outcome=outcome.outcome,
+                reason_code=outcome.reason_code,
+                duration_ms=outcome.duration_ms,
+                result_digest=None,
+                evidence_id=None,
+            )
+            return DispatchResult(
+                receipt=settled,
+                passages=outcome.passages,
+                retrieval_mode=outcome.retrieval_mode,
+            )
+
+        # The unchanged four-tool path: every successful check still mints
+        # an incident-scoped `Evidence` record unconditionally on `EXECUTED`.
         evidence = None
         if outcome.outcome is ToolOutcome.EXECUTED:
             evidence = build_evidence(
@@ -459,19 +526,34 @@ def get_topology_wrapper(
     return _make_wrapper(ToolName.GET_TOPOLOGY, GetTopologyArguments, run_topology)
 
 
+def search_runbooks_wrapper(
+    run_search: Callable[[SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome],
+) -> ToolWrapper:
+    """Thin named alias over `_make_wrapper` -- see its docstring. The one
+    wrapper whose backend seam returns `RunbookCheckOutcome`, not
+    `CheckOutcome` -- narrowly typed here on purpose, see `_make_wrapper`'s
+    own docstring for why that narrowing, not this factory's internal
+    union, is what keeps a retrieval backend from being wired to the wrong
+    tool. `policy.authorize` gives `search_runbooks` its own branch too (a
+    passage limit above `budgets.runbook_passages` is the only way to deny
+    it), invisible here the same way `get_topology`'s is."""
+    return _make_wrapper(ToolName.SEARCH_RUNBOOKS, SearchRunbooksArguments, run_search)
+
+
 def dispatch_registry(
     *,
     run_metric: Callable[[QueryMetricArguments, IncidentScope], CheckOutcome],
     run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome],
     run_changes: Callable[[ListRecentChangesArguments, IncidentScope], CheckOutcome],
     run_topology: Callable[[GetTopologyArguments, IncidentScope], CheckOutcome],
+    run_search: Callable[[SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome],
 ) -> dict[ToolName, ToolWrapper]:
-    """Every value here is wrapper-produced, for all four registered tools.
+    """Every value here is wrapper-produced, for all five registered tools.
 
-    Keyword-only, and all four required: a call built for the old
-    single-argument signature fails immediately with a `TypeError`, not a
-    silently reordered or partially-defaulted backend, and there is no way to
-    build a partial registry through this function at all. A caller that
+    Keyword-only, and all five required: a call built for the old
+    signature fails immediately with a `TypeError`, not a silently
+    reordered or partially-defaulted backend, and there is no way to build
+    a partial registry through this function at all. A caller that
     genuinely needs a partial registry (see
     `test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached`)
     builds the `dict[ToolName, ToolWrapper]` directly -- it is exactly the
@@ -482,4 +564,5 @@ def dispatch_registry(
         ToolName.QUERY_LOGS: query_logs_wrapper(run_logs),
         ToolName.LIST_RECENT_CHANGES: list_recent_changes_wrapper(run_changes),
         ToolName.GET_TOPOLOGY: get_topology_wrapper(run_topology),
+        ToolName.SEARCH_RUNBOOKS: search_runbooks_wrapper(run_search),
     }

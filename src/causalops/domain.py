@@ -44,6 +44,34 @@ class EvidenceKind(StrEnum):
     LOG = "LOG"
     CHANGE = "CHANGE"
 
+    # Deliberately no RUNBOOK member. `TECHNICAL_SPEC.md` §6 draws the line
+    # in words -- "An Evidence record is an incident-scoped observation ...
+    # A RunbookPassage is guidance ... it can never prove an incident cause
+    # or satisfy an incident-evidence predicate" -- and `RunbookCheckOutcome`
+    # below draws it in types: it has no `kind` field at all, so nothing can
+    # construct a runbook result that would reach `evidence.py`'s
+    # `CONTEXT_QUOTAS[record.kind]` lookup. Adding a member here would give
+    # runbook text a `CheckOutcome.kind` to travel under, undoing that.
+
+
+class RetrievalMode(StrEnum):
+    """`TECHNICAL_SPEC.md` §7's three literal values. `DISABLED` is the
+    default and means retrieval was never dispatched this run -- no
+    `search_runbooks` proposal was ever allowed and settled. It does
+    *not* mean "found nothing": a proposal that ran in `FTS5_LEXICAL` mode
+    and retrieved zero passages is `FTS5_LEXICAL`, not `DISABLED` --
+    that case is `RETRIEVAL_COVERAGE_INSUFFICIENT` instead, a different
+    fact about the same run. §7's own text, "`disabled` means no runbook
+    passage was retrieved," reads ambiguously between these two cases;
+    `TECHNICAL_SPEC.md`'s Unit 3a amendment resolves it to "never
+    dispatched," which is the reading this codebase implements. See
+    `graph.py`'s `dispatch_tool` for where this is set, from the backend's
+    own configuration rather than from what it found."""
+
+    DISABLED = "disabled"
+    FTS5_LEXICAL = "fts5_lexical"
+    PINECONE_SEMANTIC = "pinecone_semantic"
+
 
 class GatewaySymptom(StrEnum):
     ELEVATED_ERRORS = "ELEVATED_ERRORS"
@@ -105,17 +133,19 @@ class GraphPhase(StrEnum):
 
 
 class EscalationReason(StrEnum):
-    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers.
+    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, all
+    four reachable as of Milestone 3's Unit 3a.
 
-    Only the first three are reachable from Unit 2b: `graph.py`'s
-    `_escalation_reason` checks a receipt outcome, the model's own
-    disposition, and its own contrary-citation list -- all already in state.
-    `RETRIEVAL_COVERAGE_INSUFFICIENT` needs `search_runbooks`, which does not
-    exist until Milestone 3's retrieval lands (`TECHNICAL_SPEC.md`'s Unit 0
-    amendment). It is named here anyway, the same precedent `GraphPhase`
-    itself sets above: naming a state before anything reaches it costs
-    nothing and means this enum doesn't need a second, breaking edit when
-    Milestone 3 arrives.
+    Unit 2b made the first three reachable: `graph.py`'s `_escalation_reason`
+    checks a receipt outcome, the model's own disposition, and its own
+    contrary-citation list -- all already in state at that point.
+    `RETRIEVAL_COVERAGE_INSUFFICIENT` needed `search_runbooks`, which did not
+    exist yet; it was named here anyway, the same precedent `GraphPhase`
+    itself sets above -- naming a state before anything reaches it costs
+    nothing and meant this enum did not need a second, breaking edit once
+    retrieval landed. `_escalation_reason` now fires it when an `ALLOWED`,
+    `SETTLED` `search_runbooks` receipt exists but this run retrieved zero
+    passages.
     """
 
     CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
@@ -142,6 +172,14 @@ class Budgets(BaseModel):
     tool_timeout_seconds: int = 10
     model_calls: int = 4
     executed_tools: int = 2
+    # `policy.py`'s new `SearchRunbooksArguments` branch checks
+    # `arguments.limit` against this, the same role `log_rows` plays for
+    # `QueryLogsArguments.row_limit`. A `search_runbooks` call still spends
+    # one of the two `executed_tools` slots above -- `TECHNICAL_SPEC.md` §5
+    # is explicit that runbook retrieval counts against that shared budget,
+    # not a separate one -- this only bounds how many passages one call may
+    # ask for.
+    runbook_passages: int = 5
     repairs: int = 1
     log_rows: int = 40
 
@@ -351,6 +389,15 @@ class FinalAssessment(BaseModel):
     root_cause: RootCauseCode
     supporting_evidence_ids: tuple[str, ...] = ()
     contrary_evidence_ids: tuple[str, ...] = ()
+    # `TECHNICAL_SPEC.md` §7: "The final assessment stores incident-evidence
+    # citations separately from runbook-guidance citations." Deliberately
+    # not merged into the two fields above -- `check_terminal_invariants`
+    # below is unchanged, so "a diagnosis must cite supporting evidence"
+    # still means incident evidence only, and `evaluation.py`'s
+    # `citations_are_valid`/`citations_sufficient` (which read only the two
+    # fields above) score exactly what they scored before this field
+    # existed.
+    runbook_citations: tuple[str, ...] = ()
     uncertainty: str = Field(max_length=300)
     next_step: str = Field(max_length=300)
 
@@ -379,6 +426,54 @@ class CheckOutcome(BaseModel):
     source: str
     summary: str
     payload: dict[str, JsonValue] = {}
+    reason_code: ReasonCode | None = None
+    duration_ms: int = 0
+
+
+class RunbookPassage(BaseModel):
+    """One retrieved passage of guidance. `TECHNICAL_SPEC.md` §6/§7's
+    contract, verbatim in shape: `passage_id, content, source_version,
+    content_hash, score, retrieval_mode`.
+
+    Deliberately not `Evidence`: no `incident_id` (guidance is not
+    incident-scoped) and no `EvidenceKind` (see `EvidenceKind`'s own
+    docstring for why). `content_hash` reuses `evidence.digest_text` over
+    `content`, the same hashing `evidence.content_hash` already uses for
+    tool-result payloads.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    passage_id: str
+    content: str = Field(max_length=800)
+    source_version: str
+    content_hash: str
+    score: float
+    retrieval_mode: RetrievalMode
+
+
+class RunbookCheckOutcome(BaseModel):
+    """What running an approved `search_runbooks` check produced --
+    `CheckOutcome`'s sibling for the one tool whose result is guidance, not
+    evidence.
+
+    Structurally, not just conventionally, distinct from `CheckOutcome`:
+    there is no `kind` field, so nothing here can reach
+    `evidence.CONTEXT_QUOTAS[record.kind]`'s lookup, and `tool_wrappers.py`'s
+    `_make_wrapper` uses `isinstance(outcome, RunbookCheckOutcome)` to route
+    a result to `DispatchResult.passages` instead of minting `Evidence` --
+    a type distinction a shared `CheckOutcome.kind` value could not have
+    given it. `retrieval_mode` is set here by the backend regardless of how
+    many passages it found (including on a failed or empty search) -- see
+    `RetrievalMode`'s own docstring for why the report must never infer
+    `disabled` from an empty `passages` tuple.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: ToolOutcome
+    passages: tuple[RunbookPassage, ...] = ()
+    retrieval_mode: RetrievalMode
     reason_code: ReasonCode | None = None
     duration_ms: int = 0
 
@@ -464,6 +559,17 @@ class InvestigationReport(BaseModel):
     final_context_digest: str
     evidence_ids: tuple[str, ...] = ()
     receipt_ids: tuple[str, ...] = ()
+    # Milestone 3, Unit 3a. `retrieval_mode` is `DISABLED` on every run that
+    # never dispatched an allowed `search_runbooks` check -- which is every
+    # run before this unit -- and is set from the backend's own
+    # configuration otherwise, never inferred from whether any passage came
+    # back (`RetrievalMode`'s docstring). `runbook_passage_ids` mirrors
+    # `evidence_ids`/`receipt_ids`'s own auditability: an owner can
+    # re-resolve every id the assessment's `runbook_citations` names against
+    # this list the same way `evidence_ids` lets them re-resolve
+    # `supporting_evidence_ids`.
+    retrieval_mode: RetrievalMode = RetrievalMode.DISABLED
+    runbook_passage_ids: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     # Unit 2b. `None` for every run that never escalated -- which is every
     # run before this unit and most runs after it. Deliberately not folded

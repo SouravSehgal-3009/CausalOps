@@ -9,6 +9,7 @@ from fake_incident import (
     RecordingLogsBackend,
     RecordingMetricBackend,
     RecordingPrometheus,
+    RecordingRunbooksBackend,
     RecordingTopologyBackend,
     StepClock,
     change_row,
@@ -17,6 +18,7 @@ from fake_incident import (
     log_row,
     logs_proposal,
     metric_proposal,
+    runbooks_proposal,
     topology_proposal,
     write_changes,
     write_log,
@@ -552,19 +554,63 @@ def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:
 
 
 def test_the_registry_holds_only_wrapper_produced_entries() -> None:
-    """All four tools now, not just `query_logs` -- `dispatch_registry` always
-    builds the full registry as of Unit 1c."""
+    """All five tools now, not just `query_logs` -- `dispatch_registry` always
+    builds the full registry as of Unit 3a."""
     registry = dispatch_registry(
         run_metric=RecordingMetricBackend(),
         run_logs=RecordingLogsBackend(),
         run_changes=RecordingChangesBackend(),
         run_topology=RecordingTopologyBackend(),
+        run_search=RecordingRunbooksBackend(),
     )
 
     assert set(registry) == set(ToolName)
     for tool in ToolName:
         assert isinstance(registry[tool], ToolWrapper)
         assert registry[tool].tool is tool
+
+
+def test_only_search_runbooks_ever_yields_passages_and_never_evidence() -> None:
+    """The registry-level proof that `_make_wrapper`'s branch is tied to
+    tool identity, not just result type in the abstract: dispatch one
+    allowed, executing proposal through every one of the five registered
+    wrappers and check `DispatchResult.passages`/`.evidence` per tool.
+    `_make_wrapper`'s own docstring already concedes `mypy` cannot bind
+    `tool` to `arguments_type` -- this is the runtime check that closes
+    that gap empirically, the same role the wrapper-identity test plays for
+    construction and the spy-backend test plays for denial."""
+    registry = dispatch_registry(
+        run_metric=RecordingMetricBackend(),
+        run_logs=RecordingLogsBackend(),
+        run_changes=RecordingChangesBackend(),
+        run_topology=RecordingTopologyBackend(),
+        run_search=RecordingRunbooksBackend(),
+    )
+    proposal_by_tool = {
+        ToolName.QUERY_METRIC: metric_proposal(),
+        ToolName.QUERY_LOGS: logs_proposal(),
+        ToolName.LIST_RECENT_CHANGES: changes_proposal(),
+        ToolName.GET_TOPOLOGY: topology_proposal(),
+        ToolName.SEARCH_RUNBOOKS: runbooks_proposal(),
+    }
+    assert set(registry) == set(proposal_by_tool)
+
+    for tool, wrapper in registry.items():
+        result = wrapper.dispatch(
+            proposal_by_tool[tool],
+            incident_scope(),
+            set(),
+            Budgets(),
+            ReservationLedger(executed_tools_budget=2),
+            StepClock(),
+        )
+        assert result.receipt.policy_result is PolicyResult.ALLOWED
+        if tool is ToolName.SEARCH_RUNBOOKS:
+            assert result.passages != ()
+            assert result.evidence is None
+        else:
+            assert result.passages == ()
+            assert result.evidence is not None
 
 
 def test_the_real_backend_executes_against_a_written_log_file(tmp_path: Path) -> None:

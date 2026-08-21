@@ -246,6 +246,19 @@ def registered_check_runner(
             return run_logs_check(arguments, paths)
         if isinstance(arguments, ListRecentChangesArguments):
             return run_changes_check(arguments, paths)
-        return run_topology_check(arguments, paths)
+        if isinstance(arguments, GetTopologyArguments):
+            return run_topology_check(arguments, paths)
+        # `RunCheck`'s own return type is `CheckOutcome` only -- it cannot
+        # express `RunbookCheckOutcome`, so this orphaned seam (superseded
+        # by `tool_wrappers.dispatch_registry`; nothing in `cli.py` calls
+        # this function) has no correct way to route a `search_runbooks`
+        # proposal at all. Raising loudly documents that gap instead of
+        # silently mis-dispatching it to `run_topology_check`, which the
+        # unconditional fallthrough this replaced would have done the
+        # moment a fifth argument type existed.
+        raise ValueError(
+            f"registered_check_runner cannot route {type(arguments).__name__} -- "
+            "this seam predates search_runbooks and returns CheckOutcome only"
+        )
 
     return run

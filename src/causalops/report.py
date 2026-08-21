@@ -30,6 +30,7 @@ def render_report(
         lines.append(f"- Stopped because: `{report.reason_code.value}`")
     lines.extend(["", *assessment_section(report)])
     lines.extend(["", *evidence_section(report, evidence)])
+    lines.extend(["", *guidance_section(report)])
     lines.extend(["", *checks_section(receipts)])
     lines.extend(["", *budget_section(report)])
     if report.escalation is not None:
@@ -74,6 +75,31 @@ def evidence_section(
     return lines
 
 
+def guidance_section(report: InvestigationReport) -> list[str]:
+    """§7's asymmetry, closed: incident evidence gets a full section above;
+    guidance was surfaced only as a `retrieval_mode` line in `budget_section`
+    until this section existed. `report.runbook_passage_ids` is every
+    passage this run retrieved (§6's "guidance ... can never prove an
+    incident cause" is why this reads ids, never the assessment's
+    `supporting_evidence_ids` -- guidance and evidence citations stay in
+    their own separate fields, the way `FinalAssessment`'s own docstring
+    already keeps them). `(cited)` marks a passage the model actually named
+    in `runbook_citations`; an unmarked one was retrieved but not used."""
+    lines = ["## Guidance it consulted", ""]
+    if not report.runbook_passage_ids:
+        lines.append("No runbook guidance was retrieved.")
+        return lines
+    cited = (
+        set(report.assessment.runbook_citations)
+        if report.assessment is not None
+        else set()
+    )
+    for passage_id in report.runbook_passage_ids:
+        marker = " (cited)" if passage_id in cited else ""
+        lines.append(f"- `{passage_id}`{marker}")
+    return lines
+
+
 def checks_section(receipts: Sequence[ToolReceipt]) -> list[str]:
     lines = ["## Checks it asked for", ""]
     if not receipts:
@@ -112,6 +138,12 @@ def budget_section(report: InvestigationReport) -> list[str]:
         f"{report.budgets.executed_tools}",
         f"- Invalid responses: {report.invalid_responses}",
         f"- Token usage: {usage_line(report)}",
+        # `TECHNICAL_SPEC.md` §7: "The CLI report ... must surface this
+        # value." Printed even when `disabled` -- an owner should be able to
+        # tell "retrieval never ran" from "retrieval ran but this section
+        # was silently dropped" by reading the report, not by knowing the
+        # default.
+        f"- Runbook retrieval mode: `{report.retrieval_mode.value}`",
         f"- Final context digest: `{report.final_context_digest[:16]}`",
     ]
 

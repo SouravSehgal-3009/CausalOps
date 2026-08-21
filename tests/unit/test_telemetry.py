@@ -43,6 +43,8 @@ from causalops.tools import (
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    RunbookTopic,
+    SearchRunbooksArguments,
 )
 
 
@@ -287,6 +289,29 @@ def test_the_runner_sends_each_tool_to_its_own_backend(tmp_path: Path) -> None:
     assert logs.kind is EvidenceKind.LOG
     assert topology.kind is EvidenceKind.TOPOLOGY
     assert metric.kind is EvidenceKind.METRIC
+
+
+def test_the_runner_raises_loudly_for_search_runbooks(tmp_path: Path) -> None:
+    """This seam predates `search_runbooks` and is superseded by
+    `tool_wrappers.dispatch_registry` -- nothing in `cli.py` calls it. Its
+    own `RunCheck` return type is `CheckOutcome` only, which cannot express
+    `RunbookCheckOutcome`, so a `search_runbooks` proposal must raise here
+    rather than silently falling through to `run_topology_check` the way an
+    unconditional last branch would have."""
+    paths = RunPaths(root=tmp_path)
+    run = registered_check_runner(paths, "http://127.0.0.1:1", 1)
+
+    with pytest.raises(ValueError, match="SearchRunbooksArguments"):
+        run(
+            ToolProposal(
+                arguments=SearchRunbooksArguments(
+                    topic=RunbookTopic.GATEWAY_ERRORS, limit=3
+                ),
+                evidence_gap="gap",
+                expected_observation="a passage",
+            ),
+            incident_scope(),
+        )
 
 
 # Cross-incident isolation
