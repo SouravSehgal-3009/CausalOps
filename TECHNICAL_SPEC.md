@@ -157,6 +157,14 @@ Every externally observable operation has a deterministic idempotency key:
   request record before sending it. A timeout, crash, or missing provider usage
   never reissues that key; it produces `FAILED_SAFE` with the reservation left
   visible for accounting.
+
+  *Amendment, Unit 2d:* the `PENDING` request record defers to the live Claude
+  adapter unit, not built here. Every condition it guards -- a provider
+  timeout, a crash mid-request, or a response that omits provider usage -- is
+  a live-provider condition the replay adapter cannot produce, so a test
+  written against it here would assert against a fake rather than the real
+  failure mode. What did not change: the key itself, or the requirement that
+  the live adapter persist this record before sending a request.
 - Tool call: normalized proposal fingerprint. Its `PENDING` receipt reserves
   budget before dispatch; the result updates that receipt exactly once.
 - Approval: `thread_id + proposal_fingerprint + checkpoint_id`. Store one
@@ -282,6 +290,21 @@ append-only approval record and remaining reservation, then routes to
 `DISPATCH_TOOL`. `reject` and acceptance route directly to `FINAL_REPORT`. A stale,
 changed, expired, or already-settled fingerprint is rejected and never resumes
 a tool. Approval/denial tests cover each route.
+
+*Amendment, Unit 2d:* the third owner option above -- approving one
+additional already-authorized check, and the `DISPATCH_TOOL` route it
+requires -- defers until a policy-approved next-check proposal exists to
+approve. Unit 2b already established that nothing in the codebase produces
+one at escalation time (the same structural gap `:174`'s Unit 2c amendment
+recorded for the approval idempotency key), so `causalops approve` accepts no
+`<proposal-fingerprint>` argument today: `causalops approve <thread-id>`
+either accepts the diagnosis/abstention or, on `reject`, stops the
+investigation, and `escalation_interrupt` routes both outcomes to
+`FINAL_REPORT` (`graph.py:1256`) -- there is no `DISPATCH_TOOL` edge out of
+it yet. This route returns once a proposal source exists to approve against,
+the same condition `:174`'s amendment names for the fingerprint itself. What
+did not change: an owner can still accept or reject, and each of those two
+routes is fully built and tested.
 
 v2 has **no remediation executor**. It may record an owner-approved suggested
 next step, but it must not claim to execute, verify recovery from, or remediate

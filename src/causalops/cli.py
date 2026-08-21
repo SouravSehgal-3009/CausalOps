@@ -15,8 +15,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import ValidationError
 
 from causalops.approvals import (
-    ApprovalError,
-    ApprovalReasonCode,
+    CheckpointStoreError,
+    CheckpointStoreReasonCode,
     OwnerDecision,
     ensure_decisions_table,
     read_decision_for_thread,
@@ -209,10 +209,32 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
     that file into code execution on the next read. `SqliteSaver.from_conn_string`
     doesn't expose a `serde` parameter, so the connection is opened directly,
     matching what that classmethod does internally.
+
+    Unit 2d: the `mkdir`/`connect` pair below is wrapped so a locked, full,
+    missing-parent, or permission-denied database surfaces as `FAIL
+    STORE_UNAVAILABLE <message>` (`main`'s contract) instead of a raw
+    traceback -- measured against a read-only `results/` directory, where
+    `sqlite3.connect` itself raises `OperationalError` because it has to
+    create the file. This does **not** cover every SQLite failure: a
+    *corrupt but already-openable* `checkpoints.db` passes `connect()`
+    (SQLite's own connect is lazy) and only raises once something actually
+    reads or writes it -- for `SqliteSaver`, that is deep inside
+    `compiled.invoke(...)`/`.get_state(...)`, far past this function, and
+    wrapping every such call site is out of scope here. `causalops doctor`'s
+    `check_checkpoint_database` is the real defense for that case: it opens
+    an *existing* file and runs a read before `investigate`/`approve` ever
+    reach it.
     """
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    serde = JsonPlusSerializer(allowed_msgpack_modules=None)
-    with closing(sqlite3.connect(str(db_path), check_same_thread=False)) as conn:
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        serde = JsonPlusSerializer(allowed_msgpack_modules=None)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    except (OSError, sqlite3.Error) as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"{db_path} could not be opened: {error}",
+        ) from error
+    with closing(conn):
         yield SqliteSaver(conn, serde=serde)
 
 
@@ -306,7 +328,7 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
     )
     budgets = Budgets()
     recorder = RunRecorder(utc_now)
-    db_path = root / "results" / "checkpoints.db"
+    db_path = ProjectPaths(root=root).checkpoints_db
     with _sqlite_checkpointer(db_path) as checkpointer:
         result = run_investigation(incident, paths, budgets, recorder, checkpointer)
     if isinstance(result, EscalatedInvestigation):
@@ -335,13 +357,14 @@ def _resolve_thread_incident_id(checkpointer: SqliteSaver, thread_id: str) -> st
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     checkpoint = checkpointer.get_tuple(config)
     if checkpoint is None:
-        raise ApprovalError(
-            ApprovalReasonCode.THREAD_NOT_FOUND, f"no checkpoint for thread {thread_id}"
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.THREAD_NOT_FOUND,
+            f"no checkpoint for thread {thread_id}",
         )
     incident_id = checkpoint.checkpoint["channel_values"].get("incident_id")
     if not isinstance(incident_id, str):
-        raise ApprovalError(
-            ApprovalReasonCode.THREAD_NOT_FOUND,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.THREAD_NOT_FOUND,
             f"thread {thread_id} has no recorded incident_id",
         )
     return incident_id
@@ -377,7 +400,7 @@ def run_decision_command(
        (`NO_PENDING_INTERRUPT`): this thread never paused through this
        mechanism, or was resumed outside it. A first decision with a
        pending interrupt is recorded -- before resume, per
-       `TECHNICAL_SPEC.md:162-164` -- against the checkpoint id the pending
+       `TECHNICAL_SPEC.md:170-172` -- against the checkpoint id the pending
        snapshot names. A matching-but-unfinished decision skips this write
        (it already exists) and goes straight to resume; whether the graph
        is still pending or already settled from a prior attempt,
@@ -386,24 +409,36 @@ def run_decision_command(
        a documented silent no-op, returning the finished state unchanged,
        on an already-settled one.
     """
-    db_path = root / "results" / "checkpoints.db"
+    db_path = ProjectPaths(root=root).checkpoints_db
     investigations_dir = root / "results" / "investigations" / thread_id
     # `_sqlite_checkpointer` below does the same `mkdir` for its own
     # connection; this one is opened first (guard #4's lookup needs no
     # graph, no incident, and ideally no checkpointer either), so it needs
     # its own -- otherwise a project that has never run `investigate` has
-    # no `results/` directory yet, and `sqlite3.connect` raises a bare
-    # `OperationalError` instead of the `THREAD_NOT_FOUND` this really is.
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    decisions_connection = sqlite3.connect(str(db_path), check_same_thread=False)
+    # no `results/` directory yet, and `sqlite3.connect` would raise before
+    # this function ever got the chance to report the `THREAD_NOT_FOUND`
+    # this really is.
+    #
+    # Unit 2d: wrapped for the same reason and the same scope as
+    # `_sqlite_checkpointer` above -- a locked, missing-parent, or
+    # permission-denied database is translated to `STORE_UNAVAILABLE`; a
+    # corrupt-but-openable existing file is not (see that function's
+    # docstring).
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        decisions_connection = sqlite3.connect(str(db_path), check_same_thread=False)
+    except (OSError, sqlite3.Error) as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"{db_path} could not be opened: {error}",
+        ) from error
     with closing(decisions_connection) as decisions_conn:
         ensure_decisions_table(decisions_conn)
         existing = read_decision_for_thread(decisions_conn, thread_id)
 
         if existing is not None and not existing.matches(owner_decision):
-            raise ApprovalError(
-                ApprovalReasonCode.CONFLICTING_DECISION,
+            raise CheckpointStoreError(
+                CheckpointStoreReasonCode.CONFLICTING_DECISION,
                 f"{thread_id} already recorded decision={existing.decision!r} "
                 f"rejection_note={existing.rejection_note!r}; this request "
                 f"asked for decision={owner_decision.decision!r} "
@@ -421,8 +456,8 @@ def run_decision_command(
                     (investigations_dir / "report.json").read_text(encoding="utf-8")
                 )
             except ValidationError as error:
-                raise ApprovalError(
-                    ApprovalReasonCode.STORE_UNAVAILABLE,
+                raise CheckpointStoreError(
+                    CheckpointStoreReasonCode.STORE_UNAVAILABLE,
                     f"{investigations_dir / 'report.json'} is unreadable: {error}",
                 ) from error
             return _report_exit(report, investigations_dir)
@@ -454,8 +489,8 @@ def run_decision_command(
 
             if existing is None:
                 if not snapshot.interrupts:
-                    raise ApprovalError(
-                        ApprovalReasonCode.NO_PENDING_INTERRUPT,
+                    raise CheckpointStoreError(
+                        CheckpointStoreReasonCode.NO_PENDING_INTERRUPT,
                         f"{thread_id} has no pending approval to decide",
                     )
                 checkpoint_id = str(snapshot.config["configurable"]["checkpoint_id"])
@@ -510,8 +545,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     decision="reject", rejection_note=arguments.reason
                 )
             except ValidationError as error:
-                raise ApprovalError(
-                    ApprovalReasonCode.INVALID_REJECTION_NOTE, str(error)
+                raise CheckpointStoreError(
+                    CheckpointStoreReasonCode.INVALID_REJECTION_NOTE, str(error)
                 ) from error
             return run_decision_command(root, arguments.thread_id, owner_decision)
         # `argparse`'s `required=True` on `subcommands` (see `build_parser`)
@@ -520,6 +555,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         # flags: leaving the old implicit fall-through here would have made
         # `approve`/`reject` silently run `run_investigate_command` instead.
         raise AssertionError(f"unhandled command {arguments.command!r}")
-    except (LabError, RunRecordError, ApprovalError) as refusal:
+    except (LabError, RunRecordError, CheckpointStoreError) as refusal:
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         return 1

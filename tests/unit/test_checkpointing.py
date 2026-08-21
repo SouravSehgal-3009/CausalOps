@@ -58,6 +58,7 @@ from causalops.domain import (
     Disposition,
     EscalatedInvestigation,
     EscalationReason,
+    ReceiptState,
     StoredIncident,
 )
 from causalops.graph import build_graph, run_graph_investigation
@@ -178,6 +179,64 @@ def test_a_second_connection_reads_back_the_finished_run(tmp_path: Path) -> None
 
     assert checkpoint is not None
     assert checkpoint.checkpoint["channel_values"]["report"] is not None
+
+
+def test_a_raising_backend_leaves_a_durable_reserved_receipt(tmp_path: Path) -> None:
+    """The durable half of `test_graph.py`'s
+    `test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report`,
+    which only ever drives `InMemorySaver()` and so would pass identically
+    whether or not a `RESERVED` receipt actually survives a real
+    `SqliteSaver` file -- `tool_wrappers.py:24-28`'s own promise that a
+    crash between reserving and settling stays visible "after the fact
+    too, not just to a caller still holding the ledger."
+
+    The window between the pure `authorize()` decision and
+    `ReservationLedger.reserve()` recording it is not separately testable:
+    both happen inside one synchronous call, inside one node invocation
+    (`tool_wrappers.py:130-153`), with no I/O in between -- the only
+    durable boundary is the node's return, which this test is already on
+    the far side of. There is no narrower crash window to aim at.
+    """
+    db_path = tmp_path / "checkpoints.db"
+    backend = RecordingLogsBackend(raises=RuntimeError("lab unreachable"))
+    registry = logs_only_registry(backend)
+
+    with cli._sqlite_checkpointer(db_path) as checkpointer:
+        result = run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            _model(),
+            registry,
+            RunRecorder(StepClock()),
+            Budgets(),
+            StepClock(),
+            investigation_id="durable-reserved-receipt",
+            checkpointer=checkpointer,
+        )
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    (only_receipt,) = result.receipts
+    assert only_receipt.state is ReceiptState.RESERVED
+
+    # A fresh connection, opened only against the file path -- the run's own
+    # `checkpointer` is out of scope by now, closed at the end of the `with`
+    # block above. This is the actual claim: not that the in-process ledger
+    # held the receipt (already proven above and in `test_graph.py`), but
+    # that it is still there after the process that wrote it is gone.
+    with closing(sqlite3.connect(str(db_path), check_same_thread=False)) as conn:
+        reopened = SqliteSaver(
+            conn, serde=JsonPlusSerializer(allowed_msgpack_modules=None)
+        )
+        config: RunnableConfig = {
+            "configurable": {"thread_id": "durable-reserved-receipt"}
+        }
+        checkpoint = reopened.get_tuple(config)
+
+    assert checkpoint is not None
+    receipts = checkpoint.checkpoint["channel_values"]["receipts"]
+    assert len(receipts) == 1
+    assert receipts[0]["state"] == "RESERVED"
+    assert receipts[0]["outcome"] is None
 
 
 def test_a_two_process_pause_and_resume_settles_over_a_real_sqlite_file(

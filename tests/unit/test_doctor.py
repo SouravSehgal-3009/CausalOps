@@ -1,3 +1,6 @@
+import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from fake_machine import FAKE_API_KEY, HEALTHY_ENVIRONMENT, FakeProbe
@@ -30,6 +33,7 @@ def test_healthy_machine_passes_every_check(tmp_path: Path) -> None:
         "available_memory",
         "free_disk",
         "writable_directories",
+        "checkpoint_database",
         "docker",
         "api_key",
     ]
@@ -104,13 +108,13 @@ def test_linux_on_another_architecture_fails(tmp_path: Path) -> None:
     assert "aarch64" in check.message
 
 
-def test_the_same_seven_checks_run_on_linux(tmp_path: Path) -> None:
+def test_the_same_checks_run_on_linux(tmp_path: Path) -> None:
     """Nothing is skipped for want of a platform equivalent."""
     probe = FakeProbe(system="Linux", release="6.8.0", machine="x86_64", build=None)
 
     report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
 
-    assert len(report.checks) == 7
+    assert len(report.checks) == 8
     assert all(check.status is CheckStatus.PASS for check in report.checks)
 
 
@@ -296,6 +300,87 @@ def test_unwritable_run_directory_fails(tmp_path: Path) -> None:
     assert check.reason_code is DoctorReasonCode.RUN_DIRECTORY_NOT_WRITABLE
 
 
+def test_a_missing_checkpoint_database_passes_without_creating_one(
+    tmp_path: Path,
+) -> None:
+    """A project that has never run `investigate` has no `checkpoints.db`
+    yet -- that is healthy, not a failure, and the check must not create the
+    file itself while confirming that (`test_scratch_file_leaves_nothing_
+    behind` already pins the sibling guarantee for `writable_directories`;
+    this is the same guarantee for the new check)."""
+    paths = ProjectPaths(root=tmp_path)
+
+    report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "checkpoint_database")
+    assert check.status is CheckStatus.PASS
+    assert not paths.checkpoints_db.exists()
+
+
+def test_a_valid_checkpoint_database_passes(tmp_path: Path) -> None:
+    paths = ProjectPaths(root=tmp_path)
+    paths.results.mkdir(parents=True)
+    with closing(sqlite3.connect(str(paths.checkpoints_db))) as conn:
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT)")
+        conn.commit()
+
+    report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
+
+    assert check_named(report, "checkpoint_database").status is CheckStatus.PASS
+
+
+def test_a_corrupt_checkpoint_database_fails_with_a_stable_code(
+    tmp_path: Path,
+) -> None:
+    """`sqlite3.connect` itself is lazy and succeeds even against a file
+    that is not a real database -- the failure only surfaces on first use,
+    which is exactly why this check has to run one, not just open the
+    file."""
+    paths = ProjectPaths(root=tmp_path)
+    paths.results.mkdir(parents=True)
+    paths.checkpoints_db.write_text("not a real sqlite database", encoding="utf-8")
+
+    report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "checkpoint_database")
+    assert check.status is CheckStatus.FAIL
+    assert check.reason_code is DoctorReasonCode.CHECKPOINT_DATABASE_UNREADABLE
+
+
+def test_an_unreadable_results_directory_fails_cleanly_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    """`Path.is_file()` itself can raise `OSError` (`PermissionError`) against
+    a directory this process cannot even stat -- a root-owned `results/` from
+    the Docker lab reaches this. `run_doctor_command` runs outside `main`'s
+    own `try`/`except`, so a check that lets that escape crashes the exact
+    command whose purpose is reporting a broken machine without crashing,
+    and would discard the whole report -- including `writable_directories`'s
+    own correct `RUN_DIRECTORY_NOT_WRITABLE` for the same directory, produced
+    one check earlier. Both must survive together."""
+    paths = ProjectPaths(root=tmp_path)
+    paths.results.mkdir(parents=True)
+    os.chmod(paths.results, 0o000)
+    assert not os.access(paths.results, os.R_OK | os.X_OK), (
+        "chmod did not make results/ unreadable on this filesystem -- "
+        "this test cannot prove anything here"
+    )
+
+    try:
+        report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
+    finally:
+        os.chmod(paths.results, 0o700)
+
+    directories_check = check_named(report, "writable_directories")
+    assert directories_check.status is CheckStatus.FAIL
+    assert directories_check.reason_code is DoctorReasonCode.RUN_DIRECTORY_NOT_WRITABLE
+    database_check = check_named(report, "checkpoint_database")
+    assert database_check.status is CheckStatus.FAIL
+    assert database_check.reason_code is (
+        DoctorReasonCode.CHECKPOINT_DATABASE_UNREADABLE
+    )
+
+
 def test_every_failure_is_reported_together(tmp_path: Path) -> None:
     probe = FakeProbe(build=19045, total_memory=1, free_disk=1, docker=False)
 
@@ -335,3 +420,17 @@ def test_project_paths_keep_windows_drive_and_separators(tmp_path: Path) -> None
     assert paths.runs.anchor == tmp_path.anchor
     assert paths.runs.name == "runs"
     assert paths.runs.parent == tmp_path
+
+
+def test_checkpoints_db_names_the_file_cli_py_actually_opens(tmp_path: Path) -> None:
+    """Pinned against the literal path, independently of `checkpoints_db`
+    itself -- every other test in this module builds its fixture file
+    *through* the same accessor it then checks, so a typo in the property
+    would rename both sides together and pass unnoticed. `cli.py`'s
+    `_sqlite_checkpointer`/`run_decision_command` both call this accessor
+    now instead of spelling `root / "results" / "checkpoints.db"`
+    independently; this is the one place that literal is still spelled out,
+    on purpose, so a drift between the two is visible here."""
+    paths = ProjectPaths(root=tmp_path)
+
+    assert paths.checkpoints_db == tmp_path / "results" / "checkpoints.db"

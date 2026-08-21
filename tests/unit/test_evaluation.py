@@ -11,6 +11,8 @@ from pydantic import JsonValue
 from causalops.domain import (
     Budgets,
     Disposition,
+    EscalationReason,
+    EscalationRecord,
     Evidence,
     EvidenceKind,
     FinalAssessment,
@@ -19,6 +21,7 @@ from causalops.domain import (
     ModelUsage,
     PolicyResult,
     ReasonCode,
+    ReceiptState,
     RootCauseCode,
     ToolOutcome,
     ToolReceipt,
@@ -87,7 +90,25 @@ def receipt(
     )
 
 
-def diagnosed_report(cited: tuple[str, ...]) -> InvestigationReport:
+def reserved_receipt() -> ToolReceipt:
+    """A check that spent budget and never got a result -- the same
+    lifecycle `tool_wrappers.py`'s `ReservationLedger.reserve()` leaves
+    behind when a crash lands between reserving and settling."""
+    return ToolReceipt(
+        receipt_id="receipt-reserved",
+        incident_id=INCIDENT_ID,
+        tool=ToolName.QUERY_METRIC,
+        fingerprint="fingerprint-reserved",
+        policy_result=PolicyResult.ALLOWED,
+        state=ReceiptState.RESERVED,
+        requested_at=WINDOW_START,
+        duration_ms=0,
+    )
+
+
+def diagnosed_report(
+    cited: tuple[str, ...], escalation: EscalationRecord | None = None
+) -> InvestigationReport:
     return InvestigationReport(
         investigation_id="inv-1",
         incident_id=INCIDENT_ID,
@@ -113,6 +134,7 @@ def diagnosed_report(cited: tuple[str, ...]) -> InvestigationReport:
         invalid_responses=1,
         usage=ModelUsage(input_tokens=900, output_tokens=300),
         final_context_digest="digest",
+        escalation=escalation,
     )
 
 
@@ -243,6 +265,74 @@ def test_control_behaviour_counts_denials_by_kind() -> None:
     assert control.duplicate == 1
     assert control.out_of_scope == 1
     assert control.invalid_responses == 1
+
+
+def test_control_counts_a_reserved_receipt_as_unsettled() -> None:
+    """A check that spent budget and crashed before settling must be
+    visible to the scorer -- before this unit, `ControlCounts` had no field
+    that could hold it at all."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    receipts = [receipt(), reserved_receipt()]
+
+    control = score_run(report, [evidence], receipts, expected_diagnosis()).control
+
+    assert control.unsettled == 1
+    # Not a denial and not the settled receipt's own budget line -- the
+    # reserved receipt is invisible to every other counter.
+    assert control.denied == 0
+    assert control.duplicate == 0
+    assert control.out_of_scope == 0
+
+
+def test_a_run_with_no_reserved_receipts_counts_zero_unsettled() -> None:
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+
+    control = score_run(report, [evidence], [receipt()], expected_diagnosis()).control
+
+    assert control.unsettled == 0
+
+
+def test_an_owner_rejected_diagnosis_does_not_score_as_correct_disposition() -> None:
+    """`report.disposition` stays `DIAGNOSED` on a reject -- rejection
+    deliberately preserves the assessment, since `graph.py:301-309`'s
+    `_build_report` computes `disposition` from `assessment` alone and never
+    consults `escalation` -- so `disposition_correct` must read
+    `report.escalation` directly, not just `report.disposition`, or an
+    owner-rejected diagnosis would score as correct."""
+    evidence = timeout_evidence()
+    report = diagnosed_report(
+        (evidence.evidence_id,),
+        escalation=EscalationRecord(
+            reason=EscalationReason.CONFLICTING_EVIDENCE,
+            decision="reject",
+            rejection_note="the citation looks wrong",
+        ),
+    )
+
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+
+    assert not scores.disposition_correct
+    # `diagnosis_correct` answers a different question -- whether the root
+    # cause the model proposed matches ground truth -- and stays true
+    # regardless of what the owner decided to do with it.
+    assert scores.diagnosis_correct
+
+
+def test_an_owner_accepted_diagnosis_still_scores_as_correct() -> None:
+    evidence = timeout_evidence()
+    report = diagnosed_report(
+        (evidence.evidence_id,),
+        escalation=EscalationRecord(
+            reason=EscalationReason.CONFLICTING_EVIDENCE, decision="accept"
+        ),
+    )
+
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+
+    assert scores.disposition_correct
+    assert scores.diagnosis_correct
 
 
 def test_efficiency_reports_what_the_run_actually_spent() -> None:
