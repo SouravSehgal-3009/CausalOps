@@ -1972,6 +1972,127 @@ earlier one that your own earlier edit already moved.
   `DISPATCH_TOOL`) remains deferred by this unit's own §8 amendment, not
   built — recorded above under Milestone 2's status, not repeated here.
 
+### Post-Milestone-2 fix — `test_graph_frozen_reports.py`'s `duration_ms` was never a literal
+
+`master` was green at `d6f06cd` by luck, not correctness. Reading the Windows
+CI logs for the portability fix above turned up a second, unrelated defect
+in the same file: the branch run for `e6eb574` **failed on Windows**
+(`('check_finished', {'outcome': 'EXECUTED', 'duration_ms': 15}) !=
+('check_finished', {'outcome': 'EXECUTED', 'duration_ms': 0})`) while the
+merge run for `d6f06cd` — an **identical tree**, `git diff e6eb574 d6f06cd`
+is empty — passed on Linux. `evidence.py:92`'s `executed_check` computes
+`duration_ms=int((time.monotonic() - started) * 1000)`: a real measurement
+of the backend call. A fast Linux JSONL read truncates to `0`; the same call
+took 15 ms on Windows. Six of this file's frozen tuples pinned `duration_ms`
+to an exact `0`. That was never a fact about the graph; it was an assertion
+that the test machine is fast.
+
+**Why this is a legitimate reason to touch a file byte-identical since
+Milestone 1.** The project's rule — "if a literal ever moves, that is a
+finding about the design, not a literal to update" — exists to stop an
+inconvenient literal from being quietly edited away. This is the opposite
+case, and the file's own text proves it: its module docstring already
+stated, before this fix, *"Wall-clock fields (`latency_ms`, `started_at`,
+`finished_at`) are excluded, as they always were."* `duration_ms` is a
+wall-clock field by that same definition — timed with real `time.monotonic()`
+around the real backend call, not the injected `StepClock` that
+`latency_ms`/`started_at`/`finished_at` use — and six literals a few hundred
+lines below that sentence pinned it anyway. The file documented a contract
+and then broke it in its own literals. Fixing that is closing a gap between
+the file's stated design and its actual content, not updating an
+inconvenient number.
+
+**The fix: exclude the value, assert the shape.** `dispatch_events` now
+strips `duration_ms` from `check_finished`'s fields before comparison (a new
+`_drop_duration` helper), the same way `latency_ms`/`started_at`/
+`finished_at` were already excluded. A new
+`assert_check_finished_durations_are_measured` asserts, separately, that
+every `check_finished` event still carries a `duration_ms` that is present,
+an `int`, and non-negative — the same invariant `ToolReceipt.duration_ms`
+already enforces via `Field(ge=0)` (`domain.py:293`), asserted again at the
+event-fields layer because `RunEvent.fields` is a plain, unvalidated
+`dict[str, JsonValue]`, not a validated model. The six literals lost only
+their `"duration_ms": 0` entry (e.g. `("check_finished", {"outcome":
+"EXECUTED", "duration_ms": 0})` → `("check_finished", {"outcome":
+"EXECUTED"})`); nothing else about them moved.
+
+**A permanent regression test, not just a mutation check.**
+`test_a_simulated_slow_machine_still_matches_the_frozen_report` monkeypatches
+`time.monotonic` to advance 15 ms on every read — reproducing Windows'
+exact measurement — and reruns the two-executed-check scenario. The frozen
+comparison passes, and the test additionally asserts the two `check_finished`
+events measured `[15, 15]`, not `0`, proving the fix does not depend on the
+backend being fast rather than merely having not yet been unlucky. Nothing
+in the suite forced a slow measurement before this test, which is why the
+flake stayed latent through every unit since 1c.
+
+**What is unaffected.** `git diff d6f06cd -- tests/unit/test_graph_frozen_reports.py`
+touches only: the module docstring's "what each test pins" paragraph,
+`dispatch_events`, the two new helpers, the six `duration_ms` removals, five
+new one-line calls to `assert_check_finished_durations_are_measured`, and
+the new test appended at the end. Every id, digest, disposition, receipt
+shape and evidence kind in every one of the five original tests is
+byte-identical to `d6f06cd`.
+
+**Sibling search.** `executed_check` — the only function in the codebase
+that measures `duration_ms` with real `time.monotonic()` — is called
+exclusively from `telemetry.py` (×3) and `prometheus.py` (×1), the real
+backends `run_once`'s registry wires; it is never called directly from a
+test. `time.monotonic` appears nowhere in test code before this fix.
+Every other `duration_ms`/`latency_ms` literal in the suite
+(`test_report.py`, `test_domain.py`, `test_evaluation.py`,
+`fake_incident.py`, `test_tool_wrappers.py`) is a value a test passes
+*into* a `ToolReceipt`/`CheckOutcome`/`EfficiencyMetrics` constructor by
+hand, never one measured by the code under test. `graph.py:356`'s
+`latency_ms` and the report's `started_at`/`finished_at` are computed from
+`domain_clock`, which in every test is the fake, deterministic `StepClock`
+— not a Windows/Linux hazard, and already excluded from frozen comparison
+for an unrelated design reason. These six `duration_ms` literals were the
+whole exposure.
+
+**Empirical confirmation, not just the grep above.** Correctness reviewed
+`test_a_simulated_slow_machine_still_matches_the_frozen_report`'s frozen
+`final_context_digest` (`44e5043842b3e3701b183c4b995d8d7e1935021daaba017c8321d0fff4fc802b`)
+against `test_the_graph_reproduces_the_frozen_report_for_two_executed_checks`'s
+— the same scenario under a real 15 ms measurement and a real 0 ms one.
+They are identical. That is empirical proof `duration_ms` never fed the
+context digest, not just an inference from reading `graph.py`'s digest
+construction — the sibling search above established the claim by grep; this
+test proves it by running two different clock speeds through the same
+scenario and getting the same digest.
+
+**What the helper's three assertions actually cover.** Of
+`assert_check_finished_durations_are_measured`'s three checks — presence,
+`isinstance(int)`, `>= 0` — only the last overlaps `ToolReceipt.duration_ms`'s
+existing `Field(ge=0)` (`domain.py:293`). Presence and type are covered by
+no validation anywhere else, because `RunEvent.fields` is an unvalidated
+`dict[str, JsonValue]`: nothing stops a future edit to `graph.py`'s event
+emission from dropping the key or changing its type, and nothing but this
+helper would notice. The mutation table's row 3 below exercises exactly that
+gap.
+
+**The monkeypatch target is process-global, deliberately.** The new test
+patches `evidence_module.time.monotonic`, not an attribute scoped to
+`causalops.evidence` alone — `evidence_module.time is time`, the same
+module object `telemetry.py:106/161/205` reads `started = time.monotonic()`
+from before handing it to `executed_check`. A narrower patch would leave
+`started` on the real clock while `executed_check`'s own read used the
+patched one, producing a negative delta instead of 15 ms. The test file
+carries this as an inline comment at the patch site so a future edit that
+"tightens" the target does not silently break it.
+
+**Mutation table** (each row: mutation applied to a clean tree at `d6f06cd`
+plus this fix, one at a time, reverted before the next):
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | Full reproduction, not a partial revert: `tests/unit/test_graph_frozen_reports.py` restored verbatim to `git show d6f06cd:...` (all six `"duration_ms": 0` literals present, no helpers), with only the 15 ms `time.monotonic` monkeypatch injected into the two-executed-check test | Failed with the CI log's exact line, character-for-character: `AssertionError: assert [('proposal_r...ion_ms': 15})] == [('proposal_r...tion_ms': 0})]` / `At index 2 diff: ('check_finished', {'outcome': 'EXECUTED', 'duration_ms': 15}) != ('check_finished', {'outcome': 'EXECUTED', 'duration_ms': 0})` — this is the original bug, reproduced on demand from the untouched pre-fix file rather than only observed once in a Windows CI log |
+| 2 | `graph.py`'s `check_finished` event forced to emit `duration_ms=-7` instead of the real receipt value, `assert_check_finished_durations_are_measured` left intact | All six tests failed on `assert duration >= 0` — exercises only the one assertion that already overlaps `Field(ge=0)` upstream |
+| 2 (continued) | Same `-7` injection, the helper's body replaced with a no-op | The five original tests **passed** — the corrupted value slipped through silently once the shape assertion was disabled |
+| 3 | The realistic regression: the `duration_ms=` kwarg deleted entirely at `graph.py:737` (someone drops the field, rather than corrupting its value), helper intact | All six tests failed on `assert "duration_ms" in event.fields` — the presence assertion, which nothing else in the suite covers |
+| 3 (continued) | Same deletion, helper neutralized | The five original tests **passed silently** — `dispatch_events` no longer carries the key at all, so nothing in the frozen comparison can observe it missing. Only the sixth test (the new regression test) failed, and only on its own separate literal indexing (`event.fields["duration_ms"]` → `KeyError`), not the shared helper — itself confirming the helper was the sole guard for the other five |
+| 4 | `_drop_duration` widened to strip each surviving key in turn, one at a time: `outcome`, `tool`, `reason`, `message` | `outcome` → 6 tests failed. `tool` → 6 failed. `reason` → 2 failed (the two tests with a `proposal_denied` event). `message` → 2 failed (same two). Every remaining key in the dispatch-vocabulary field dicts is still pinned by at least one test — the fix does not over-strip |
+
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
 **Status:** not started. Adds curated FTS5 runbooks, retrieval provenance,

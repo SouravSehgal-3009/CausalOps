@@ -44,10 +44,28 @@ What each test pins, and what it does not:
   too, in order.
 - The dispatch-vocabulary event field dicts (`proposal_received`,
   `proposal_denied`, `check_started`, `check_finished`) the graph's own
-  `RunRecorder` produced, as ordered `(name, fields)` pairs.
+  `RunRecorder` produced, as ordered `(name, fields)` pairs -- except
+  `check_finished`'s `duration_ms`, dropped for the reason below.
 - Wall-clock fields (`latency_ms`, `started_at`, `finished_at`) are excluded,
   as they always were: nothing about a frozen literal makes `StepClock`
-  readings meaningful to pin.
+  readings meaningful to pin. `check_finished`'s `duration_ms` joined that
+  exclusion after this docstring already claimed it, not before: this
+  paragraph said "wall-clock fields ... are excluded" while six literals a
+  few hundred lines below pinned `duration_ms` to an exact `0`, which is a
+  wall-clock field by the same definition -- `executed_check`
+  (`evidence.py:92`) measures it with `time.monotonic()` around the real
+  backend call, not with the injected `StepClock`. CI caught the gap: the
+  branch run for `e6eb574` measured 15 ms on Windows and failed, the merge
+  run for `d6f06cd`, an identical tree, measured 0 ms on Linux and passed.
+  `0` was never a frozen fact about the graph; it was an assertion that the
+  test machine is fast. This file's own stated contract is why fixing it
+  here is legitimate rather than a quiet literal update -- see
+  `TECHNICAL_OVERVIEW.md`'s Milestone 2 section for the full record. No
+  other literal in this file moved: ids, digests, disposition, receipt
+  shapes and evidence kinds are unaffected, and
+  `test_a_simulated_slow_machine_still_matches_the_frozen_report` below
+  reproduces the Windows measurement directly so the fix is provable on any
+  machine, not just a slow one.
 """
 
 from pathlib import Path
@@ -225,12 +243,36 @@ DISPATCH_EVENT_NAMES = {
 
 
 def dispatch_events(recorder: RunRecorder) -> list[tuple[str, dict[str, object]]]:
-    """The dispatch-vocabulary events, as ordered `(name, fields)` pairs."""
+    """The dispatch-vocabulary events, as ordered `(name, fields)` pairs --
+    except `check_finished`'s `duration_ms`, dropped before comparison. See
+    the module docstring above for why.
+    `assert_check_finished_durations_are_measured` below checks the field's
+    shape instead of pinning its value."""
     return [
-        (event.name, dict(event.fields))
+        (event.name, _drop_duration(dict(event.fields)))
         for event in recorder.events
         if event.name in DISPATCH_EVENT_NAMES
     ]
+
+
+def _drop_duration(fields: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in fields.items() if key != "duration_ms"}
+
+
+def assert_check_finished_durations_are_measured(recorder: RunRecorder) -> None:
+    """`dispatch_events` drops `check_finished`'s `duration_ms` before
+    comparison (see its own docstring). This checks separately that every
+    `check_finished` event still carries one: present, an `int`, and
+    non-negative -- the same invariant `ToolReceipt.duration_ms` already
+    enforces (`domain.py:293`), asserted again here because the event's
+    `fields` dict is a plain, unvalidated `dict[str, JsonValue]`."""
+    for event in recorder.events:
+        if event.name != "check_finished":
+            continue
+        assert "duration_ms" in event.fields
+        duration = event.fields["duration_ms"]
+        assert isinstance(duration, int)
+        assert duration >= 0
 
 
 def run_once(
@@ -382,8 +424,9 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
+        ("check_finished", {"outcome": "EXECUTED"}),
     ]
+    assert_check_finished_durations_are_measured(recorder)
     assert [record.kind for record in result.evidence] == [
         EvidenceKind.SYMPTOM,
         EvidenceKind.TOPOLOGY,
@@ -442,8 +485,9 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         ),
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+        ("check_finished", {"outcome": "UNAVAILABLE"}),
     ]
+    assert_check_finished_durations_are_measured(recorder)
 
 
 def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
@@ -499,7 +543,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+        ("check_finished", {"outcome": "UNAVAILABLE"}),
         ("proposal_received", {"tool": "query_logs"}),
         (
             "proposal_denied",
@@ -509,6 +553,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
             },
         ),
     ]
+    assert_check_finished_durations_are_measured(recorder)
 
 
 def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
@@ -549,8 +594,9 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE", "duration_ms": 0}),
+        ("check_finished", {"outcome": "UNAVAILABLE"}),
     ]
+    assert_check_finished_durations_are_measured(recorder)
 
 
 def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
@@ -607,14 +653,98 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
+        ("check_finished", {"outcome": "EXECUTED"}),
         ("proposal_received", {"tool": "list_recent_changes"}),
         ("check_started", {"tool": "list_recent_changes"}),
-        ("check_finished", {"outcome": "EXECUTED", "duration_ms": 0}),
+        ("check_finished", {"outcome": "EXECUTED"}),
     ]
+    assert_check_finished_durations_are_measured(recorder)
     assert [record.kind for record in result.evidence] == [
         EvidenceKind.SYMPTOM,
         EvidenceKind.TOPOLOGY,
         EvidenceKind.LOG,
         EvidenceKind.CHANGE,
     ]
+
+
+def test_a_simulated_slow_machine_still_matches_the_frozen_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows CI measured 15 ms for the same backend call that reads back
+    0 ms on a fast Linux disk (`e6eb574`'s branch run vs `d6f06cd`'s merge
+    run, an identical tree). Nothing in this file forced a slow measurement
+    before this test, which is why the flake stayed latent through every
+    unit since 1c: every run happened to be fast enough to truncate to `0`.
+
+    This monkeypatches `time.monotonic` to advance 15 ms on every read --
+    reproducing Windows' exact measurement on whatever machine runs this
+    suite -- and reruns the two-executed-check scenario. The frozen
+    comparison must still pass, and each `check_finished` event must still
+    carry a real (non-zero, here) duration: proof the fix does not depend on
+    the backend being fast, not just an observation that it happened to be
+    fast so far."""
+    paths = RunPaths(root=tmp_path)
+    write_orders_error_row(paths)
+    write_changes(paths, [change_row(1)])
+    scope = incident_scope()
+    packet = alert_packet()
+    subs = substitutions(scope, packet)
+    graph_model = ReplayToolCallingModel(
+        ReplayReasoningModel(LAB_DIAGNOSIS_FIXTURE, substitutions=subs)
+    )
+
+    reading = 0.0
+
+    def slow_machine_monotonic() -> float:
+        nonlocal reading
+        reading += 0.015
+        return reading
+
+    # Patched on the `time` module itself, not on a `causalops.evidence`-only
+    # binding: `evidence_module.time is time`, the same module object
+    # `telemetry.py:106/161/205` reads `started = time.monotonic()` from
+    # before handing it to `executed_check` here. Patching a narrower target
+    # (e.g. an attribute on `evidence_module` alone) would leave those
+    # `started` reads on the real clock while `executed_check`'s own call
+    # used the patched one, producing a negative delta instead of 15 ms.
+    monkeypatch.setattr(evidence_module.time, "monotonic", slow_machine_monotonic)
+
+    result, recorder = run_once(graph_model, paths, monkeypatch)
+
+    assert_report_matches_frozen(
+        result.report,
+        disposition=Disposition.DIAGNOSED,
+        root_cause=RootCauseCode.CONFIG_CHANGE,
+        tools_executed=2,
+        model_calls_used=3,
+        repairs_used=0,
+        invalid_responses=0,
+        final_context_digest=(
+            "44e5043842b3e3701b183c4b995d8d7e1935021daaba017c8321d0fff4fc802b"
+        ),
+        evidence_ids=(
+            SYMPTOM_EVIDENCE_ID,
+            "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+            "00000000000000000000000000000003",
+            "00000000000000000000000000000005",
+        ),
+        receipt_ids=(
+            "00000000000000000000000000000002",
+            "00000000000000000000000000000004",
+        ),
+    )
+    assert dispatch_events(recorder) == [
+        ("proposal_received", {"tool": "query_logs"}),
+        ("check_started", {"tool": "query_logs"}),
+        ("check_finished", {"outcome": "EXECUTED"}),
+        ("proposal_received", {"tool": "list_recent_changes"}),
+        ("check_started", {"tool": "list_recent_changes"}),
+        ("check_finished", {"outcome": "EXECUTED"}),
+    ]
+    assert_check_finished_durations_are_measured(recorder)
+    measured = [
+        event.fields["duration_ms"]
+        for event in recorder.events
+        if event.name == "check_finished"
+    ]
+    assert measured == [15, 15]
