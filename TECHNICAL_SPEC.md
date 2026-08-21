@@ -163,6 +163,17 @@ Every externally observable operation has a deterministic idempotency key:
   append-only owner decision before graph resume; an identical retry returns the
   existing decision and a conflicting retry is rejected.
 
+  *Amendment, Unit 2c:* the key is `thread_id + checkpoint_id` while no
+  policy-approved next-check proposal exists to fingerprint -- Unit 2b already
+  established that nothing in the codebase can produce one at escalation time,
+  and Unit 2c's owner decisions are limited to accepting or rejecting the
+  diagnosis, never approving an additional check. The fingerprint returns to
+  the key once that proposal source exists. What did not change: append-only
+  storage, record-before-resume ordering, and the retry rules -- an identical
+  retry (decision *and* rejection note both matching) still returns the
+  existing decision without a second resume, and a conflicting retry is still
+  rejected.
+
 An interrupt node must be side-effect-free before calling `interrupt()`. Any
 write occurs in the idempotent approval-record path after resumption. Tests must
 cover process termination before and after each pending/settled transition.

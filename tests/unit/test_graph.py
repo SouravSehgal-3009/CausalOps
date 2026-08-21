@@ -1350,6 +1350,111 @@ def test_an_unrecognised_resume_decision_re_pauses_instead_of_bricking_the_run(
     assert settled.report.escalation.decision == "accept"
 
 
+def test_a_bare_accept_string_re_pauses_under_the_unit_2c_resume_contract(
+    tmp_path: Path,
+) -> None:
+    """Unit 2c changes what a *valid* resume value looks like: a mapping
+    with `decision`/`rejection_note` keys, not a bare string. A plain
+    `Command(resume="accept")` -- exactly what settled every escalation
+    test before this unit -- must now re-pause instead of settling, the
+    same way a typo does. `resume_graph_run` (this file's own helper)
+    already sends the compound shape; this test proves the *old* shape is
+    rejected, which nothing else in this suite checks directly."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    bare_string = compiled.invoke(Command(resume="accept"), config)
+
+    assert "__interrupt__" in bare_string
+    assert bare_string["__interrupt__"][0].value["retry"] is True
+
+    settled = resume_graph_run(compiled, config, "accept")
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+
+
+def test_an_accept_carrying_a_rejection_note_re_pauses(tmp_path: Path) -> None:
+    """`_parse_resume_decision`'s accept-side pairing check, exercised
+    directly through `Command(resume=...)` -- a mis-paired mapping
+    (`decision="accept"` with a non-`None` `rejection_note`) must re-pause
+    the same way a malformed value does, never settle with a note attached
+    to an acceptance. A mutation dropping this check would let such a
+    mapping reach `EscalationRecord`'s own validator instead of the node's,
+    turning a recoverable re-pause into `_build_report` raising and
+    `_settle_invocation` converting that into `FAILED_SAFE` -- the real
+    diagnosis destroyed rather than the run pausing again."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    mispaired = compiled.invoke(
+        Command(resume={"decision": "accept", "rejection_note": "should not be here"}),
+        config,
+    )
+
+    assert "__interrupt__" in mispaired
+    assert mispaired["__interrupt__"][0].value["retry"] is True
+
+    settled = resume_graph_run(compiled, config, "accept")
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+
+
+def test_a_whitespace_only_rejection_note_re_pauses(tmp_path: Path) -> None:
+    """The exact reproduction a reviewer measured: `{"decision": "reject",
+    "rejection_note": "   "}` must not settle with a whitespace-only note
+    -- `_parse_resume_decision` strips before the emptiness check, the same
+    normalization `causalops.approvals.OwnerDecision` already applies at
+    the CLI boundary, so a caller that bypasses the CLI entirely still
+    cannot land a blank-looking `- Owner's note:` line in the report."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    mispaired = compiled.invoke(
+        Command(resume={"decision": "reject", "rejection_note": "   "}), config
+    )
+
+    assert "__interrupt__" in mispaired
+    assert mispaired["__interrupt__"][0].value["retry"] is True
+
+    settled = resume_graph_run(compiled, config, "accept")
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+
+
+def test_a_reject_with_no_note_re_pauses(tmp_path: Path) -> None:
+    """`_parse_resume_decision`'s reject-side pairing check: a mis-paired
+    mapping (`decision="reject"` with `rejection_note=None`) must re-pause
+    rather than reach `EscalationRecord`'s constructor with an invalid
+    pairing -- the same destroyed-diagnosis failure mode
+    `test_an_accept_carrying_a_rejection_note_re_pauses` guards on the
+    other side of the pairing."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    mispaired = compiled.invoke(
+        Command(resume={"decision": "reject", "rejection_note": None}), config
+    )
+
+    assert "__interrupt__" in mispaired
+    assert mispaired["__interrupt__"][0].value["retry"] is True
+
+    settled = resume_graph_run(compiled, config, "accept")
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+
+
 def test_an_abstention_with_the_check_budget_spent_does_not_escalate(
     tmp_path: Path,
 ) -> None:
@@ -1401,7 +1506,9 @@ def test_the_escalation_interrupt_node_advances_the_phase_before_final_report(
     phases = [
         chunk["phase"]
         for chunk in compiled.stream(
-            Command(resume="accept"), config, stream_mode="values"
+            Command(resume={"decision": "accept", "rejection_note": None}),
+            config,
+            stream_mode="values",
         )
     ]
 

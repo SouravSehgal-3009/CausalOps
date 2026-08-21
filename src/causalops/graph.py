@@ -61,7 +61,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 from pydantic import JsonValue
 
 from causalops.domain import (
@@ -160,15 +160,20 @@ class GraphState(TypedDict):
     assessment: dict[str, JsonValue] | None
     usage: dict[str, JsonValue] | None
     failure_reason: str | None
-    # Unit 2b. Both `None` on every run that never reached
-    # `escalation_interrupt`, and both set together once the node returns.
-    # A node's return value only lands in state when the node returns --
-    # never on the interrupted attempt, which raises instead of returning --
-    # so these cannot go through state as "reason known, decision pending":
-    # by the time either is visible here, the run has already resumed and
-    # settled. `_build_report` reads them together for that reason.
+    # Unit 2b, extended in 2c. All three are `None` together on every run
+    # that never reached `escalation_interrupt`, and all three are set
+    # together once the node returns -- `rejection_note` only actually
+    # holds text when `escalation_decision == "reject"`; it is `None`
+    # alongside the other two on every accept, matching
+    # `EscalationRecord.check_rejection_note_pairing`. A node's return
+    # value only lands in state when the node returns -- never on the
+    # interrupted attempt, which raises instead of returning -- so these
+    # cannot go through state as "reason known, decision pending": by the
+    # time any of the three is visible here, the run has already resumed
+    # and settled. `_build_report` reads them together for that reason.
     escalation_reason: str | None
     escalation_decision: str | None
+    rejection_note: str | None
     report: dict[str, JsonValue] | None
 
 
@@ -334,6 +339,7 @@ def _build_report(
         escalation = EscalationRecord(
             reason=EscalationReason(escalation_reason_value),
             decision=cast(Literal["accept", "reject"], decision_value),
+            rejection_note=state["rejection_note"],
         )
 
     return InvestigationReport(
@@ -969,6 +975,42 @@ def _escalation_reason(
     return None
 
 
+def _parse_resume_decision(
+    value: object,
+) -> tuple[Literal["accept", "reject"], str | None] | None:
+    """Unit 2c's resume-value contract: `Command(resume=...)` must carry a
+    mapping with a `decision` key and a `rejection_note` key, the same
+    shape `causalops.approvals.OwnerDecision.resume_value()` produces.
+    Returns `None` for anything else -- wrong type, missing/unknown
+    `decision`, or a `rejection_note` that does not match `decision`
+    (present on an accept, missing, or whitespace-only on a reject) -- so
+    the caller's retry loop treats a malformed resume exactly like an
+    unrecognized one.
+
+    This is the same pairing check `OwnerDecision` already enforces at the
+    CLI boundary, repeated here because the CLI is not the only caller of
+    `Command(resume=...)` -- tests call it directly, and nothing stops a
+    future caller from doing the same -- so this node cannot assume its
+    input was ever validated upstream. A reject's note is stripped before
+    the emptiness check and the stripped text is what is returned, so a
+    caller that bypasses `OwnerDecision` entirely still lands a normalized
+    note in `GraphState` and the finalized report, not a whitespace-only
+    one `EscalationRecord`'s own check would then have to catch instead.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    decision = value.get("decision")
+    note = value.get("rejection_note")
+    if decision == "accept":
+        return ("accept", None) if note is None else None
+    if decision == "reject":
+        if not isinstance(note, str):
+            return None
+        stripped = note.strip()
+        return ("reject", stripped) if stripped else None
+    return None
+
+
 def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNode:
     def escalation_interrupt(state: GraphState) -> dict[str, Any]:
         receipts = _rebuild_receipts(state)
@@ -1000,7 +1042,8 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
             "evidence_ids": [record.evidence_id for record in store.ordered()],
             "remaining_check_count": _tools_left(receipts, budgets),
         }
-        decision = interrupt(payload)
+        raw_decision = interrupt(payload)
+        resolved = _parse_resume_decision(raw_decision)
         # A bad resume value must not raise here. LangGraph persists a
         # resume value against the interrupt id and replays it on every
         # later resume of the same interrupt -- reproduced against a real
@@ -1013,9 +1056,16 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         # milestone; it exists so a caller re-reading the pending
         # interrupt's payload after a bad attempt can tell a first ask from
         # a retry apart, the same way `payload` already tells them why the
-        # run paused at all.
-        while decision not in ("accept", "reject"):
-            decision = interrupt({**payload, "retry": True})
+        # run paused at all. Unit 2c: a bare string (still sent by every
+        # test that resumes a plain accept/reject through
+        # `resume_graph_run`'s pre-2c call sites) is exactly as invalid as
+        # a typo now -- `_parse_resume_decision` requires the mapping
+        # shape `causalops.approvals.OwnerDecision.resume_value()`
+        # produces, so `Command(resume="accept")` re-interrupts too.
+        while resolved is None:
+            raw_decision = interrupt({**payload, "retry": True})
+            resolved = _parse_resume_decision(raw_decision)
+        decision, rejection_note = resolved
 
         # Nothing above this line ever executes a second time without also
         # being discarded -- an interrupted attempt raises instead of
@@ -1028,6 +1078,13 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         # `final_report` already return without a `try`/`except` of their
         # own -- so there is nothing this node holds that a crash here
         # would lose beyond what a crash in either of those already loses.
+        #
+        # `rejection_note`'s prose stays out of `events.jsonl` on purpose --
+        # the event's own `decision` field is the plain accept/reject
+        # string, matching every other event this node has always
+        # recorded. The note has two durable homes already (the
+        # `owner_decisions` row and `EscalationRecord.rejection_note`); a
+        # third with no reader is not needed.
         recorder = _rebuild_recorder(state, event_clock)
         recorder.event(
             GraphPhase.ESCALATION_INTERRUPT.value,
@@ -1039,6 +1096,7 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
             "phase": GraphPhase.ESCALATION_INTERRUPT.value,
             "escalation_reason": reason.value,
             "escalation_decision": decision,
+            "rejection_note": rejection_note,
             "events": _dump_events(recorder),
         }
 
@@ -1201,6 +1259,161 @@ def build_graph(
     return graph.compile(checkpointer=checkpointer)
 
 
+def _settle_invocation(
+    compiled: CompiledStateGraph[GraphState, None, GraphState, GraphState],
+    config: RunnableConfig,
+    invoke: Callable[[], dict[str, Any]],
+    budgets: Budgets,
+    clock: Clock,
+    event_clock: Clock,
+    recorder: RunRecorder,
+    fallback_state: GraphState,
+) -> InvestigationResult | EscalatedInvestigation:
+    """The tail every caller of `.invoke()` against this graph needs,
+    regardless of what started the turn: crash containment, syncing the
+    caller's `recorder`, and the terminal-vs-paused split. Unit 2c factored
+    this out of `run_graph_investigation` so `resume_graph_investigation`
+    (below) shares it rather than duplicating roughly eighty lines of
+    crash-recovery and result-assembly logic with a chance to drift between
+    the two copies.
+
+    `invoke` is a zero-argument closure so this function does not care
+    whether the caller is calling `compiled.invoke(initial_state, config)`
+    (a fresh start) or `compiled.invoke(Command(resume=...), config)` (a
+    resume) -- everything below this point treats both identically, which
+    is exactly the claim being made by sharing this code at all.
+    `fallback_state` stands in for what `run_graph_investigation` used to
+    call `initial_state` in its own crash-containment branches: the state
+    to fall back to if `compiled.get_state(config).values` is somehow
+    empty. A resume always has a real checkpoint to read by the time it
+    reaches here -- `resume_graph_investigation`'s own pending-interrupt
+    assertion has already confirmed that -- so it passes the state it read
+    while confirming that, never a manufactured empty one.
+    """
+    try:
+        raw_state = invoke()
+    except GraphBubbleUp:
+        # A control-flow signal (interrupt, drain, parent command), not a
+        # failure -- Milestone 2 adds `interrupt()`, and this must keep
+        # propagating rather than being turned into a safe report.
+        #
+        # It must still not lose every event recorded before the signal
+        # fired. The caller's `recorder` is empty at this exact point on a
+        # fresh start: the seed event went to a separate seed recorder, not
+        # this one, and every node event since then lives only in state --
+        # synced onto `recorder` at this function's normal return below,
+        # which a `raise` never reaches. Reading the last checkpoint here
+        # and syncing from it is a data-recovery step, the same one the
+        # `except Exception` branch below already performs to build a
+        # report; it is not a write, so it does not conflict with an
+        # interrupt node needing to be side-effect-free before
+        # `interrupt()`.
+        #
+        # This read is I/O against the same database `checkpointer` uses,
+        # so it can itself fail -- a locked, full, or corrupt database
+        # raises `sqlite3.OperationalError`, not `GraphBubbleUp`. The
+        # control-flow signal must survive a checkpoint-read failure and
+        # keep propagating either way: losing a best-effort event-recovery
+        # step is acceptable, but replacing the signal with an unhandled
+        # database error that `main` cannot format into `FAIL <CODE>
+        # <message>` is not. This is the one place in this file that reads
+        # a checkpoint outside a context already prepared to build a report
+        # from what it finds, so it is the one place that read needs its
+        # own guard.
+        try:
+            checkpoint = compiled.get_state(config).values or fallback_state
+            state = cast(GraphState, checkpoint)
+            recorder.recorded = [
+                RunEvent.model_validate(dump) for dump in state["events"]
+            ]
+        except Exception:
+            pass
+        raise
+    except Exception as error:
+        # Unmodeled failure: a node bug, or GraphRecursionError (subclasses
+        # RecursionError -> RuntimeError -> Exception, so it lands here too).
+        # This is not the tool-crash or model-call-crash path -- `dispatch_tool`,
+        # `investigate`, and `final_assessment` above already turn their own
+        # crashes into a normal state update -- so there is no node-local
+        # object to rescue here, only the last checkpoint LangGraph itself
+        # wrote. That checkpoint carries its own `events` list, so the
+        # `internal_error` event is folded into a recorder rebuilt from it,
+        # the same way every node above records into state rather than onto
+        # this function's own `recorder` parameter directly.
+        #
+        # This fold is not itself a durable write: `state` here is a local
+        # dict, never passed back through `checkpointer.put(...)`, so the
+        # `internal_error` event reaches this run's report and the caller's
+        # `recorder` mirror below, but not the checkpoint store itself. A
+        # second process reopening this thread's checkpoint after this crash
+        # would not see it -- there is nothing to resume into anyway, since
+        # this path is a terminal `FAILED_SAFE`, not a pause.
+        checkpoint = compiled.get_state(config).values or fallback_state
+        state = cast(GraphState, checkpoint)
+        crash_recorder = _rebuild_recorder(state, event_clock)
+        crash_recorder.event(
+            GraphPhase.FINAL_REPORT.value, "internal_error", error=type(error).__name__
+        )
+        state = cast(GraphState, {**state, "events": _dump_events(crash_recorder)})
+        report = _build_report(
+            state, budgets, clock, force_failure_reason=ReasonCode.INTERNAL_ERROR
+        )
+        raw_state = {**state, "report": report.model_dump(mode="json")}
+
+    final_state = cast(GraphState, raw_state)
+    # The caller's `recorder` never runs live inside a node -- every event
+    # above was recorded into a state-rebuilt local recorder instead. This
+    # assignment REPLACES `recorder.recorded` wholesale with the complete
+    # event list from state; it does not append to whatever the caller's
+    # object already held. That is safe today because every caller
+    # constructs a fresh, empty `RunRecorder` immediately before calling
+    # this function, so replace and extend are indistinguishable in
+    # practice -- but a future caller that reuses a `RunRecorder` across
+    # calls would lose whatever it held before this one. Every existing
+    # caller that reads `recorder.events` after this call still sees
+    # exactly what it saw before this unit.
+    recorder.recorded = [
+        RunEvent.model_validate(dump) for dump in final_state["events"]
+    ]
+
+    # Unit 2b. `.invoke()` returns normally on a real pause -- it does not
+    # raise, so this is not an `except GraphBubbleUp:` case (a probe against
+    # the installed LangGraph confirmed this before any of this file was
+    # written) -- with `"__interrupt__"` present alongside whatever state the
+    # graph had committed before `escalation_interrupt` ran. Checked on
+    # `raw_state`, not `final_state`: `"__interrupt__"` is not a `GraphState`
+    # key, so reading it off the `GraphState`-typed name would not type-check.
+    # This must run before the `InvestigationReport.model_validate` call
+    # below -- on a pause, `final_state["report"]` is still `None`, and that
+    # call would raise a `ValidationError` instead of returning a paused
+    # result.
+    interrupts = raw_state.get("__interrupt__")
+    if interrupts:
+        payload = interrupts[0].value
+        checkpoint_id = str(
+            compiled.get_state(config).config["configurable"]["checkpoint_id"]
+        )
+        store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
+        receipts = tuple(_rebuild_receipts(final_state))
+        return EscalatedInvestigation(
+            thread_id=final_state["investigation_id"],
+            run_id=final_state["run_id"],
+            checkpoint_id=checkpoint_id,
+            reason=EscalationReason(payload["reason"]),
+            evidence=store.ordered(),
+            receipts=receipts,
+            remaining_check_count=payload["remaining_check_count"],
+            proposal_fingerprint=None,
+        )
+
+    report = InvestigationReport.model_validate(final_state["report"])
+    store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
+    receipts = tuple(_rebuild_receipts(final_state))
+    return InvestigationResult(
+        report=report, evidence=store.ordered(), receipts=receipts
+    )
+
+
 def run_graph_investigation(
     scope: IncidentScope,
     packet: InitialAlertPacket,
@@ -1222,17 +1435,11 @@ def run_graph_investigation(
     becomes a real input once Milestone 2's resume path needs to reopen a
     specific thread rather than start a new one.
 
-    Unit 2b: this function takes no `resume` argument on purpose. It always
-    starts a fresh run from `initial_state` below; resuming a paused thread
-    means building a graph directly (`build_graph`, with the same
-    `checkpointer`/`investigation_id`) and calling `compiled.invoke(
-    Command(resume=...), config)` -- the "tests drive `Command(resume=...)`
-    directly" boundary this unit was scoped to, deliberately left as raw
-    graph-level resume rather than a second production entry point. A
-    resumed run therefore gets none of this function's own safety net
-    (the crash containment below, or the `EscalatedInvestigation` assembly)
-    -- 2c decides how `causalops approve`/`reject` validates a decision and
-    handles a crash before it ever calls `Command(resume=...)`.
+    This function takes no `resume` argument. It always starts a fresh run
+    from `initial_state` below; resuming a paused thread is
+    `resume_graph_investigation`, below, Unit 2c's real resumable entry
+    point -- the two share `_settle_invocation`'s crash containment and
+    result assembly rather than each carrying its own copy.
 
     `checkpointer` defaults to a fresh, process-local `InMemorySaver()` so
     every existing caller (tests included) keeps today's behaviour exactly:
@@ -1291,6 +1498,7 @@ def run_graph_investigation(
         "failure_reason": None,
         "escalation_reason": None,
         "escalation_decision": None,
+        "rejection_note": None,
         "report": None,
     }
 
@@ -1309,124 +1517,92 @@ def run_graph_investigation(
         "configurable": {"thread_id": investigation_id},
     }
 
-    try:
-        raw_state = cast(dict[str, Any], compiled.invoke(initial_state, config))
-    except GraphBubbleUp:
-        # A control-flow signal (interrupt, drain, parent command), not a
-        # failure -- Milestone 2 adds `interrupt()`, and this must keep
-        # propagating rather than being turned into a safe report.
-        #
-        # It must still not lose every event recorded before the signal
-        # fired. The caller's `recorder` is empty at this exact point: the
-        # seed event went to `seed_recorder`, not `recorder`, and every node
-        # event since then lives only in state -- synced onto `recorder` at
-        # this function's normal return below, which a `raise` never
-        # reaches. Reading the last checkpoint here and syncing from it is a
-        # data-recovery step, the same one the `except Exception` branch
-        # below already performs to build a report; it is not a write, so it
-        # does not conflict with an interrupt node needing to be
-        # side-effect-free before `interrupt()`.
-        #
-        # This read is I/O against the same database `checkpointer` uses,
-        # so it can itself fail -- a locked, full, or corrupt database
-        # raises `sqlite3.OperationalError`, not `GraphBubbleUp`. The
-        # control-flow signal must survive a checkpoint-read failure and
-        # keep propagating either way: losing a best-effort event-recovery
-        # step is acceptable, but replacing the signal with an unhandled
-        # database error that `main` cannot format into `FAIL <CODE>
-        # <message>` is not. This is the one place in this file that reads
-        # a checkpoint outside a context already prepared to build a report
-        # from what it finds, so it is the one place that read needs its
-        # own guard.
-        try:
-            checkpoint = compiled.get_state(config).values or initial_state
-            state = cast(GraphState, checkpoint)
-            recorder.recorded = [
-                RunEvent.model_validate(dump) for dump in state["events"]
-            ]
-        except Exception:
-            pass
-        raise
-    except Exception as error:
-        # Unmodeled failure: a node bug, or GraphRecursionError (subclasses
-        # RecursionError -> RuntimeError -> Exception, so it lands here too).
-        # This is not the tool-crash or model-call-crash path -- `dispatch_tool`,
-        # `investigate`, and `final_assessment` above already turn their own
-        # crashes into a normal state update -- so there is no node-local
-        # object to rescue here, only the last checkpoint LangGraph itself
-        # wrote. That checkpoint carries its own `events` list, so the
-        # `internal_error` event is folded into a recorder rebuilt from it,
-        # the same way every node above records into state rather than onto
-        # this function's own `recorder` parameter directly.
-        #
-        # This fold is not itself a durable write: `state` here is a local
-        # dict, never passed back through `checkpointer.put(...)`, so the
-        # `internal_error` event reaches this run's report and the caller's
-        # `recorder` mirror below, but not the checkpoint store itself. A
-        # second process reopening this thread's checkpoint after this crash
-        # would not see it -- there is nothing to resume into anyway, since
-        # this path is a terminal `FAILED_SAFE`, not a pause.
-        checkpoint = compiled.get_state(config).values or initial_state
-        state = cast(GraphState, checkpoint)
-        crash_recorder = _rebuild_recorder(state, event_clock)
-        crash_recorder.event(
-            GraphPhase.FINAL_REPORT.value, "internal_error", error=type(error).__name__
-        )
-        state = cast(GraphState, {**state, "events": _dump_events(crash_recorder)})
-        report = _build_report(
-            state, budgets, clock, force_failure_reason=ReasonCode.INTERNAL_ERROR
-        )
-        raw_state = {**state, "report": report.model_dump(mode="json")}
+    def invoke() -> dict[str, Any]:
+        return cast(dict[str, Any], compiled.invoke(initial_state, config))
 
-    final_state = cast(GraphState, raw_state)
-    # The caller's `recorder` never runs live inside a node -- every event
-    # above was recorded into a state-rebuilt local recorder instead. This
-    # assignment REPLACES `recorder.recorded` wholesale with the complete
-    # event list from state; it does not append to whatever the caller's
-    # object already held. That is safe today because every caller
-    # constructs a fresh, empty `RunRecorder` immediately before calling
-    # this function, so replace and extend are indistinguishable in
-    # practice -- but a future caller that reuses a `RunRecorder` across
-    # calls would lose whatever it held before this one. Every existing
-    # caller that reads `recorder.events` after this call still sees
-    # exactly what it saw before this unit.
-    recorder.recorded = [
-        RunEvent.model_validate(dump) for dump in final_state["events"]
-    ]
-
-    # Unit 2b. `.invoke()` returns normally on a real pause -- it does not
-    # raise, so this is not an `except GraphBubbleUp:` case (a probe against
-    # the installed LangGraph confirmed this before any of this file was
-    # written) -- with `"__interrupt__"` present alongside whatever state the
-    # graph had committed before `escalation_interrupt` ran. Checked on
-    # `raw_state`, not `final_state`: `"__interrupt__"` is not a `GraphState`
-    # key, so reading it off the `GraphState`-typed name would not type-check.
-    # This must run before the `InvestigationReport.model_validate` call
-    # below -- on a pause, `final_state["report"]` is still `None`, and that
-    # call would raise a `ValidationError` instead of returning a paused
-    # result.
-    interrupts = raw_state.get("__interrupt__")
-    if interrupts:
-        payload = interrupts[0].value
-        checkpoint_id = str(
-            compiled.get_state(config).config["configurable"]["checkpoint_id"]
-        )
-        store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
-        receipts = tuple(_rebuild_receipts(final_state))
-        return EscalatedInvestigation(
-            thread_id=investigation_id,
-            run_id=run_id,
-            checkpoint_id=checkpoint_id,
-            reason=EscalationReason(payload["reason"]),
-            evidence=store.ordered(),
-            receipts=receipts,
-            remaining_check_count=payload["remaining_check_count"],
-            proposal_fingerprint=None,
-        )
-
-    report = InvestigationReport.model_validate(final_state["report"])
-    store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
-    receipts = tuple(_rebuild_receipts(final_state))
-    return InvestigationResult(
-        report=report, evidence=store.ordered(), receipts=receipts
+    return _settle_invocation(
+        compiled, config, invoke, budgets, clock, event_clock, recorder, initial_state
     )
+
+
+def resume_graph_investigation(
+    thread_id: str,
+    checkpointer: BaseCheckpointSaver[str],
+    scope: IncidentScope,
+    packet: InitialAlertPacket,
+    model: ReplayToolCallingModel,
+    dispatch_registry: Mapping[ToolName, ToolWrapper],
+    recorder: RunRecorder,
+    decision: Literal["accept", "reject"],
+    rejection_note: str | None,
+    budgets: Budgets = DEFAULT_BUDGETS,
+    clock: Clock = utc_now,
+) -> InvestigationResult:
+    """Unit 2c's real resumable entry point -- the one `run_graph_investigation`
+    used to say a resume path still owed. Resumes `thread_id` with one
+    already-validated owner decision and settles it to a terminal
+    `InvestigationResult`.
+
+    Always returns `InvestigationResult`, never `EscalatedInvestigation`:
+    `decision`/`rejection_note` have already passed
+    `causalops.approvals.OwnerDecision`'s validation before this function is
+    ever called, so `escalation_interrupt`'s own resume-parsing loop
+    (`_parse_resume_decision`) exits on the first pass and the run falls
+    straight through to `final_report` -- there is no path back to a second
+    pause in Unit 2c's graph (the spec's "approve one additional check"
+    route to `DISPATCH_TOOL` does not exist yet; see this module's
+    docstring and the `TECHNICAL_SPEC.md` Unit 2c amendment).
+
+    `cli.py` owns every guard this function assumes has already passed:
+    that `thread_id` names a real, pending interrupt, that `decision`/
+    `rejection_note` are a validated pair, and that the owner's decision is
+    already durably recorded in `owner_decisions` before this function is
+    ever called (`TECHNICAL_SPEC.md:162-164`'s record-before-resume rule).
+    This function's only job is the graph turn itself -- the assertion
+    below is a "recompute, don't trust the caller" check of the one
+    precondition (a real checkpoint exists) that would otherwise fail
+    silently rather than loudly.
+    """
+    event_clock = recorder.clock
+    compiled = build_graph(
+        scope,
+        packet,
+        budgets,
+        clock,
+        model,
+        dispatch_registry,
+        checkpointer,
+        event_clock=event_clock,
+    )
+    config: RunnableConfig = {
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "configurable": {"thread_id": thread_id},
+    }
+    pre_resume_state = compiled.get_state(config).values
+    assert pre_resume_state, (
+        f"resume_graph_investigation called for thread {thread_id!r} with "
+        "no checkpoint -- the caller's pending-interrupt guard should have "
+        "refused before this function was ever called"
+    )
+    resume_value: dict[str, JsonValue] = {
+        "decision": decision,
+        "rejection_note": rejection_note,
+    }
+
+    def invoke() -> dict[str, Any]:
+        return cast(
+            dict[str, Any], compiled.invoke(Command(resume=resume_value), config)
+        )
+
+    result = _settle_invocation(
+        compiled,
+        config,
+        invoke,
+        budgets,
+        clock,
+        event_clock,
+        recorder,
+        cast(GraphState, pre_resume_state),
+    )
+    assert isinstance(result, InvestigationResult)
+    return result
