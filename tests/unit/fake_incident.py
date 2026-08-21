@@ -275,19 +275,33 @@ def resume_graph_run(
     decision: str,
 ) -> InvestigationResult:
     """Resumes a paused compiled graph with an owner decision and reconstructs
-    the terminal `InvestigationResult`, for tests proving Unit 2b's
+    the terminal `InvestigationResult`, for tests proving Unit 2b's/2c's
     graph-level resume.
 
-    `graph.py`'s `run_graph_investigation` deliberately has no resume
-    parameter of its own (2b's approved boundary: tests drive
-    `Command(resume=...)` directly, 2c owns a real resumable entry point),
-    so a test resuming a pause has nothing but the raw LangGraph API to call
-    -- this is that call, plus the same result assembly
-    `run_graph_investigation`'s own tail does, written against only public
-    domain types (`EvidenceStore`, `InvestigationReport.model_validate`)
-    rather than reaching into that module's private helpers.
+    `graph.py`'s `run_graph_investigation` has no resume parameter of its
+    own; production resume goes through `graph.resume_graph_investigation`
+    (Unit 2c), which this helper deliberately does not call -- it is
+    written against only public domain types (`EvidenceStore`,
+    `InvestigationReport.model_validate`), the same reduced surface it
+    always exercised, so a graph-level test can drive `Command(resume=...)`
+    directly without also depending on `cli.py`'s incident-loading and
+    guard machinery.
+
+    Unit 2c: `Command(resume=...)` now carries a compound value -- a
+    mapping with `decision` and `rejection_note` keys, the shape
+    `causalops.approvals.OwnerDecision.resume_value()` produces -- not the
+    bare string this helper's own two-argument signature still takes. This
+    helper's seven call sites all pass a plain `"accept"`/`"reject"`
+    string; none of them assert on rejection-note text, so `"reject"` gets
+    a fixed synthetic note here rather than widening every call site to
+    supply one.
     """
-    raw_state = compiled.invoke(Command(resume=decision), config)
+    rejection_note = "test helper synthetic rejection" if decision == "reject" else None
+    resume_value: dict[str, JsonValue] = {
+        "decision": decision,
+        "rejection_note": rejection_note,
+    }
+    raw_state = compiled.invoke(Command(resume=resume_value), config)
     report = InvestigationReport.model_validate(raw_state["report"])
     store = EvidenceStore(raw_state["incident_id"])
     for dump in raw_state["evidence"]:

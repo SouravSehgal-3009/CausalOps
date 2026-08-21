@@ -125,14 +125,20 @@ def usage_line(report: InvestigationReport) -> str:
 def escalation_section(report: InvestigationReport) -> list[str]:
     """Only called when `report.escalation` is set -- the caller checks, not
     this function, the same pattern every other optional section in this
-    file leaves to `render_report`."""
+    file leaves to `render_report`. `rejection_note` only ever holds text on
+    a reject (`EscalationRecord.check_rejection_note_pairing` enforces the
+    pairing), so the line is omitted entirely on an accept rather than
+    printed empty."""
     assert report.escalation is not None
-    return [
+    lines = [
         "## Owner escalation",
         "",
         f"- Reason: `{report.escalation.reason.value}`",
         f"- Decision: **{report.escalation.decision}**",
     ]
+    if report.escalation.rejection_note is not None:
+        lines.append(f"- Owner's note: {report.escalation.rejection_note}")
+    return lines
 
 
 def limitations_section(report: InvestigationReport, model_name: str) -> list[str]:

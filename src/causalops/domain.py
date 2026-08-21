@@ -397,15 +397,46 @@ class EscalationRecord(BaseModel):
     `decision` would leave a reader unable to tell a still-open escalation
     from a resolved one, and `graph.py`'s `_build_report` only ever
     constructs this once both are known. `decision` matches the literal
-    resume values `escalation_interrupt` accepts (`"accept"`/`"reject"`),
-    not a past-tense rewording, so there is one vocabulary for the same
-    concept across the node, the graph state, and the report.
+    resume values `escalation_interrupt` accepts, not a past-tense
+    rewording, so there is one vocabulary for the same concept across the
+    node, the graph state, and the report.
+
+    `rejection_note` is Unit 2c's own field: the owner's reason for
+    `causalops reject <thread-id> <reason>`. Named `rejection_note`, not
+    `owner_reason` (which would collide with `reason` above -- the enum
+    trigger, a different concept) or `decision_note` (which would wrongly
+    imply an accept can carry one). `check_rejection_note_pairing` mirrors
+    `InvestigationReport.check_terminal_invariants`'s own idiom and is the
+    same pairing rule `causalops.approvals.OwnerDecision` enforces at the
+    CLI boundary and `graph.py`'s `_parse_resume_decision` enforces on the
+    resume value -- checked three times, at the three points a caller
+    could reach this model from, not three independent proof techniques
+    the way the trust boundary's AST scan / wrapper-identity / spy-backend
+    controls are. `OwnerDecision` is the only one of the three a
+    `causalops reject` argument is guaranteed to pass through; the other
+    two exist because `Command(resume=...)` and this model's own
+    constructor are both reachable directly (tests already do it), so each
+    repeats the identical whitespace-aware check -- `not
+    rejection_note.strip()` treats a whitespace-only note as missing,
+    matching `OwnerDecision`'s own normalization -- rather than trusting
+    that every value reaching it already passed through the CLI.
     """
 
     model_config = ConfigDict(frozen=True)
 
     reason: EscalationReason
     decision: Literal["accept", "reject"]
+    rejection_note: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def check_rejection_note_pairing(self) -> Self:
+        if self.decision == "reject" and not (
+            self.rejection_note and self.rejection_note.strip()
+        ):
+            raise ValueError("a rejection must carry a non-empty rejection note")
+        if self.decision == "accept" and self.rejection_note is not None:
+            raise ValueError("an acceptance must not carry a rejection note")
+        return self
 
 
 class InvestigationReport(BaseModel):

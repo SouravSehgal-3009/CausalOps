@@ -157,7 +157,9 @@ def test_an_escalated_report_names_the_reason_and_the_decision() -> None:
     escalated = diagnosed_report(("evidence-1",)).model_copy(
         update={
             "escalation": EscalationRecord(
-                reason=EscalationReason.CONFLICTING_EVIDENCE, decision="reject"
+                reason=EscalationReason.CONFLICTING_EVIDENCE,
+                decision="reject",
+                rejection_note="the two remaining causes were never separated",
             )
         }
     )
@@ -167,6 +169,24 @@ def test_an_escalated_report_names_the_reason_and_the_decision() -> None:
     assert "## Owner escalation" in text
     assert "CONFLICTING_EVIDENCE" in text
     assert "reject" in text
+    assert "the two remaining causes were never separated" in text
+
+
+def test_an_accepted_escalation_renders_no_rejection_note_line() -> None:
+    """`rejection_note` is `None` on every accept -- the markdown must not
+    render an owner's-note line with nothing in it."""
+    escalated = diagnosed_report(("evidence-1",)).model_copy(
+        update={
+            "escalation": EscalationRecord(
+                reason=EscalationReason.TOOL_UNAVAILABLE, decision="accept"
+            )
+        }
+    )
+
+    text = render_report(escalated, [], [], "replay")
+
+    assert "## Owner escalation" in text
+    assert "Owner's note" not in text
 
 
 def test_an_unsettled_check_reads_as_unsettled_not_a_blank_outcome() -> None:

@@ -244,7 +244,9 @@ def test_an_escalation_record_survives_on_a_report_without_disturbing_it() -> No
         RootCauseCode.CONFIG_CHANGE,
         assessment(),
         escalation=EscalationRecord(
-            reason=EscalationReason.CONFLICTING_EVIDENCE, decision="reject"
+            reason=EscalationReason.CONFLICTING_EVIDENCE,
+            decision="reject",
+            rejection_note="the two remaining causes were never separated",
         ),
     )
 
@@ -252,6 +254,10 @@ def test_an_escalation_record_survives_on_a_report_without_disturbing_it() -> No
     assert decided.escalation is not None
     assert decided.escalation.reason is EscalationReason.CONFLICTING_EVIDENCE
     assert decided.escalation.decision == "reject"
+    assert (
+        decided.escalation.rejection_note
+        == "the two remaining causes were never separated"
+    )
 
 
 def test_an_escalation_record_only_accepts_the_two_named_decisions() -> None:
@@ -259,6 +265,41 @@ def test_an_escalation_record_only_accepts_the_two_named_decisions() -> None:
         EscalationRecord(
             reason=EscalationReason.TOOL_UNAVAILABLE,
             decision="approve",  # type: ignore[arg-type]
+        )
+
+
+def test_a_rejection_without_a_note_is_refused() -> None:
+    """`check_rejection_note_pairing`'s own reject-side check, exercised
+    directly on `EscalationRecord` -- the same pairing rule
+    `causalops.approvals.OwnerDecision` and `graph.py`'s
+    `_parse_resume_decision` also enforce, at the two other points a
+    caller could reach this model from."""
+    with pytest.raises(ValidationError):
+        EscalationRecord(reason=EscalationReason.TOOL_UNAVAILABLE, decision="reject")
+
+
+def test_a_whitespace_only_rejection_note_is_refused() -> None:
+    """A caller that reaches `EscalationRecord` directly, bypassing both
+    `OwnerDecision`'s and `_parse_resume_decision`'s own whitespace
+    stripping, must still be refused here -- a whitespace-only note is not
+    content, and this model's own validator must not be the weak link that
+    lets `report.py` render a blank-looking "- Owner's note:" line."""
+    with pytest.raises(ValidationError):
+        EscalationRecord(
+            reason=EscalationReason.TOOL_UNAVAILABLE,
+            decision="reject",
+            rejection_note="   ",
+        )
+
+
+def test_an_acceptance_with_a_rejection_note_is_refused() -> None:
+    """`check_rejection_note_pairing`'s accept-side check: a note has no
+    meaning on a decision that was never rejected."""
+    with pytest.raises(ValidationError):
+        EscalationRecord(
+            reason=EscalationReason.TOOL_UNAVAILABLE,
+            decision="accept",
+            rejection_note="should not be allowed here",
         )
 
 

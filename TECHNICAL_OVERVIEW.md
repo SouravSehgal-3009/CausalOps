@@ -1134,10 +1134,11 @@ new fix landed in this unit; the evidence-carry fix above is 1d-1's, not
 
 ## Milestone 2 — Durable escalation and owner approval
 
-**Status:** Units 2a and 2b complete, frozen for review. Unit 2c (approval
-routing and the append-only decision record — this milestone's dual-review
-completion snapshot) and 2d (crash/idempotency tests, the `ControlCounts`
-gap) have not started. Curated FTS5 runbooks, retrieval provenance, and
+**Status:** Units 2a and 2b landed. Unit 2c (approval routing and the
+append-only decision record — this milestone's dual-review completion
+snapshot) is implemented below and frozen for review; not yet committed. 2d
+(crash/idempotency tests, the `ControlCounts` gap) has not started. Curated
+FTS5 runbooks, retrieval provenance, and
 injection/no-ground-truth-leakage tests defer to Milestone 3
 (`TECHNICAL_SPEC.md` §12, *Amendment, Milestone 2*); Pinecone remains a
 post-milestone optional experiment.
@@ -1416,7 +1417,7 @@ is not.
 
 - The `interrupt()` payload itself carries `reason`, `evidence_ids`, and
   `remaining_check_count`, but not `thread_id`/`run_id`/`checkpoint_id` —
-  all three `TECHNICAL_SPEC.md:253-254` names as part of the payload. All
+  all three `TECHNICAL_SPEC.md:264-265` names as part of the payload. All
   three are recoverable by any second process that already knows the
   thread id (which it must, to call `compiled.get_state(config)` at all)
   and are attached by `run_graph_investigation` when assembling
@@ -1457,6 +1458,294 @@ is not.
     Unit 2c must detect a pending approval by checking `.interrupts`,
     never `.next` — `.next` alone would misreport a re-paused thread as
     settled.
+
+### Unit 2c — approval routing and the append-only decision record
+
+Adds `causalops approve <thread-id>` and `causalops reject <thread-id>
+<reason>`, resuming a paused investigation from a **second process** behind
+one append-only decision, and the four-guard sequence that makes that
+resume safe to retry. This is the first code in the project that takes an
+authorization instruction from outside the process — `TECHNICAL_SPEC.md`
+§12's mandatory dual-review trigger.
+
+**A pre-edit-report finding overturned the plan's own design for the
+rejection reason, before implementation began.** The plan proposed
+splicing the owner's reason into a copy of the already-settled report via
+`model_copy(update=...)`. Measured directly: `model_copy` bypasses both
+field constraints and model validators — a 500-character note attached to
+an **accepted** `EscalationRecord`, serialized clean, where the constructor
+raised. Both reviewers, consulted independently on the alternative, each
+found a real defect in their own first recommendation before converging:
+the note now travels **inside the resume value itself** —
+`Command(resume={"decision": ..., "rejection_note": ...})`, a mapping, not
+the bare string every escalation test used through Unit 2b —
+`escalation_interrupt` destructures it into two new flat `GraphState` keys
+in the one return that already carries `escalation_reason`/
+`escalation_decision`, and `_build_report` reads all three from the same
+state together. A post-return splice would have left the *checkpointed*
+report permanently missing the note while the *finalized artifact* had
+it — two durable stores disagreeing about one field, and exactly what Unit
+2d's deferred settled-but-not-finalized recovery would read back wrong.
+
+**The resume contract changed for every caller, not just the CLI.**
+`_parse_resume_decision` (new) requires a mapping with `decision` and
+`rejection_note` keys; a bare `"accept"`/`"reject"` string — what every
+escalation test sent through Unit 2b, and what a stray `Command(resume=...)`
+outside this CLI would still send — is now exactly as invalid as a typo and
+re-pauses the same way. Cost, measured rather than estimated up front: four
+real `Command(resume=...)` call sites existed. Two (`test_graph.py`'s
+deliberately-bad-string cases) needed no change, since a bad string stays
+bad either way. `tests/unit/fake_incident.py::resume_graph_run` — the
+helper seven other call sites go through — had its body changed to wrap the
+plain string it still accepts into the compound shape before calling
+`Command`; none of its seven callers' own signatures changed.
+`test_the_escalation_interrupt_node_advances_the_phase_before_final_report`'s
+bare `compiled.stream(Command(resume="accept"), ...)` is the one site that
+had to change directly. A new test,
+`test_a_bare_accept_string_re_pauses_under_the_unit_2c_resume_contract`,
+pins the new rejection itself — nothing else in the suite would have caught
+a mutation reverting `_parse_resume_decision` to accept the old shape.
+
+**`EscalationRecord` gained `rejection_note: str | None`, bounded and
+paired.** Named `rejection_note`, not `owner_reason` (`EscalationRecord`
+already has `reason`, the enum trigger — a different concept) or
+`decision_note` (would wrongly imply an accept can carry one, reviewer
+consensus). `check_rejection_note_pairing` (new `model_validator`, the same
+idiom `InvestigationReport.check_terminal_invariants` already uses) refuses
+a reject with no note and an accept with one — the same pairing rule
+`causalops.approvals.OwnerDecision` enforces at the CLI boundary and
+`_parse_resume_decision` enforces on the resume value, checked a third time
+here because this model's own constructor is directly reachable too (tests
+already do it) — three points a caller could reach the same invariant
+from, not three independent proof techniques the way the trust boundary's
+AST scan / wrapper-identity / spy-backend controls are. `report.py`'s
+`escalation_section` renders the note only when present, so an accept's
+markdown carries no empty "owner's note" line.
+
+*Correction, from this unit's review round:* a first version of this
+paragraph claimed whitespace-stripping was `OwnerDecision`-only, something
+"neither `EscalationRecord` nor the graph-side check need." Measured false
+during review — `{"decision": "reject", "rejection_note": "   "}` fed
+directly to `_parse_resume_decision` settled the run with a blank-looking
+note, and `EscalationRecord(..., rejection_note="   ")` constructed clean.
+All three now strip before the emptiness check (`domain.py`'s
+`check_rejection_note_pairing`, `graph.py`'s `_parse_resume_decision`,
+`approvals.py`'s `OwnerDecision`), plus a fourth point that did not exist
+in the original design at all: `DecisionRow` (`approvals.py`) got the
+identical check added, since a hand-corrupted database row can carry a
+whitespace-only note too and this store must refuse it rather than pass it
+through as if a real note. Mutation-tested in both directions at each of
+the three checking points that gate a live resume (`DecisionRow`'s failure
+mode is a corrupted row, covered separately below).
+
+**`OwnerDecision` (new, `approvals.py`) is where a decision becomes
+durable-safe before either store sees it.** Frozen, `model_validator`-paired
+the same way `EscalationRecord` is. Two properties are genuinely its own,
+not shared with the other checking points: whitespace is stripped *and the
+stripped text becomes the value itself* — `_parse_resume_decision` and
+`EscalationRecord` both strip only to test emptiness, so a directly
+constructed `EscalationRecord(rejection_note="  padded  ")` keeps the
+padding (Simplicity's own P3 finding on this round, confirmed unreachable
+in production since `_build_report` only ever reads an already-stripped
+note out of state) — and overflow is **refused, never truncated** — a
+silent truncation loses whatever the owner wrote past the 300-character
+bound (matching this project's other bounded free-text fields) with no
+later assertion able to
+see it. Normalizing once here, ahead of both the `owner_decisions` row and
+the resume value, is what guarantees the two hold identical bytes.
+
+**The four guards, and a plan correction found while implementing them.**
+The plan specified pending-interrupt-check, decision-validation,
+record-before-resume, and retry-semantics as one ordered list. Working
+through what a *second* `approve` call actually does exposed two problems
+with that flat ordering, both fixed before the coding subagent's frozen
+report and confirmed independently by the primary agent:
+
+1. After a *first* successful `approve`, the thread is settled —
+   `.interrupts` is empty. A pending-interrupt guard checked first would
+   refuse every retry, including the identical one the spec requires to
+   succeed. The fix checks `owner_decisions` for an existing row **first**,
+   by `thread_id` alone.
+2. `checkpoint_id` advances across a resume — `escalation_interrupt` and
+   `final_report` each commit a checkpoint after `Command(resume=...)`
+   runs. A settled thread's *current* checkpoint id is therefore never the
+   one its decision was recorded against, so the retry lookup cannot use
+   the same composite `(thread_id, checkpoint_id)` key the write uses; it
+   queries by thread alone (2c's reachable state has at most one decision
+   per thread — there is no "approve one more check" route to
+   `DISPATCH_TOOL` yet, so this is unambiguous today).
+
+The resulting order `run_decision_command` actually implements: look up any
+existing decision by thread id; a mismatch refuses immediately
+(`CONFLICTING_DECISION`), before the checkpoint database or the incident
+file is even opened; a match with the artifact already on disk is an
+identical retry, reported straight from the finalized `report.json` with
+the graph never touched; anything else (a first decision, or a matching
+decision whose resume never finished — a crash between the record write and
+`finalize_investigation`) resolves the incident, builds the graph, and
+checks `.interrupts` only for a genuinely first decision — a decision that
+already has a matching row skips the `.interrupts` check entirely and goes
+straight to `resume_graph_investigation`, since `Command(resume=...)`
+resumes a still-pending interrupt normally and is a genuinely inert no-op
+on an already-*settled* thread either way, so both sub-cases of
+"unfinished" converge on the same call.
+
+*Correction to the record measured during this unit's review, since an
+earlier note stated this more loosely:* "no pending interrupt" covers two
+different thread states, and `Command(resume=...)` does not treat them the
+same. On a **settled** thread it is a true no-op -- `checkpoint_id`,
+`events`, and `model_calls_used` all measured unchanged across the call --
+which is exactly what makes the retry branch above safe to call
+unconditionally. On a thread that **never paused at all**, the same call
+instead starts a fresh run from `START`, a materially different and much
+more dangerous outcome this unit's guard #1 (`.interrupts` on a *first*
+decision) exists specifically to keep `run_decision_command` from ever
+reaching.
+
+**`graph.py`'s crash-containment tail is now shared, not duplicated.**
+`_settle_invocation` (new, private) holds the roughly eighty lines of
+`GraphBubbleUp`/`Exception` handling, the caller's-`recorder` sync, and the
+terminal-vs-paused split that `run_graph_investigation` used to own alone;
+it takes a zero-argument `invoke` closure so it does not care whether the
+caller is starting fresh (`compiled.invoke(initial_state, config)`) or
+resuming (`compiled.invoke(Command(resume=...), config)`).
+`resume_graph_investigation` (new, `graph.py`) is Unit 2c's real resumable
+entry point — the one `run_graph_investigation`'s own docstring had named as
+still owed since Unit 2b. It always returns `InvestigationResult`, never
+`EscalatedInvestigation`: a decision that already passed `OwnerDecision`'s
+validation exits `_parse_resume_decision`'s retry loop on the first pass, so
+there is no path back to a second pause in this milestone's graph.
+
+**`finalize_investigation`'s call site is shared, not duplicated, closing
+the pre-edit report's second open question.** `_write_investigation_artifacts`
+and `_report_exit` (both new, `cli.py`) are the one place a settled
+`InvestigationResult` becomes a written artifact and an exit code, called by
+both `run_investigate_command` (a fresh settle) and `run_decision_command`
+(an approve/reject settle). Neither lives in `graph.py`: that module still
+does no artifact I/O of its own, only checkpointer I/O.
+
+**`main`'s dispatch is now an explicit branch, not a fall-through.** Before
+this unit, `main`'s `try` block ended with an unconditional
+`return run_investigate_command(...)` — correct only because `investigate`
+was the sole command that could reach it. Adding `approve`/`reject` without
+converting that into an explicit `if arguments.command == "investigate":`
+branch would have made either command silently run an investigation instead
+of resuming one; `argparse`'s `required=True` on subcommands makes every
+other value structurally unreachable, so the final `else` is
+`raise AssertionError`, not another guard.
+`test_approve_and_reject_never_fall_through_to_investigate` monkeypatches
+`run_investigate_command` to raise and proves neither command reaches it.
+
+**The interrupt payload's missing identifiers, closed by explanation, not
+by a code change.** Unit 2b's own recorded gap asked whether the node's
+raw `interrupt()` payload should gain `thread_id`/`run_id`/`checkpoint_id`.
+It does not: `EscalatedInvestigation` — the object `run_investigate_command`
+actually prints from — already carries all three, attached by
+`run_graph_investigation` once `.invoke()` returns, because the node itself
+has no way to know its own checkpoint id before one exists. Nothing in 2c
+reads the raw payload directly; `run_decision_command` recovers
+`incident_id`/`run_id`/`checkpoint_id` from the checkpointer with no graph
+built, the same pattern `test_a_second_connection_reads_back_the_finished_run`
+established in Unit 2a.
+
+**The store error type, closed for `owner_decisions` only.** `approvals.py`
+defines `ApprovalReasonCode`/`ApprovalError` (`THREAD_NOT_FOUND`,
+`NO_PENDING_INTERRUPT`, `CONFLICTING_DECISION`, `INVALID_REJECTION_NOTE`,
+`STORE_UNAVAILABLE`), added to `main`'s `except (LabError, RunRecordError,
+ApprovalError)` tuple. `cli._sqlite_checkpointer`'s own bare
+`sqlite3.connect(...)` — the half of Unit 2a's gap this unit does *not*
+close — still raises an unhandled `sqlite3.OperationalError` on a locked or
+corrupt `checkpoints.db`; that translation, and the crash/idempotency
+stress tests for both stores, remain Unit 2d's, exactly as recorded when
+Unit 2a shipped.
+
+**Mutation-tested, against the real tree** (`PYTHONPATH=src`, `__pycache__`
+purged before each run, each mutation reverted immediately after its
+failure was observed): `_parse_resume_decision`'s rejection of the old bare-
+string shape; guard #1 reading `.interrupts` rather than `.next` (confirmed
+against a genuinely re-paused thread, not merely a never-paused one — the
+distinction Unit 2b's own measured table exists to make); the
+`CONFLICTING_DECISION` refusal (removing it did not merely fail to refuse —
+it silently returned the *original* decision's report as if the conflicting
+request had succeeded); the identical-retry short-circuit (removing it
+surfaced `RESULT_ALREADY_FINALIZED` on the second call, confirming
+`finalize_investigation`'s own guard is what the short-circuit exists to
+avoid triggering); `record_decision_before_resume`'s
+`IntegrityError`-to-`ApprovalError` translation; `DecisionRow.matches`'s
+note comparison; `EscalationRecord.check_rejection_note_pairing`'s both
+directions; `OwnerDecision`'s whitespace-normalization and overflow bound;
+and `main`'s explicit dispatch branch. Every mutation failed a test before
+being reverted; `grep -rn MUTATION src tests` is clean in the frozen
+snapshot.
+
+**A second, fix-round pass added 9 tests and 7 more mutations, closing
+three P2s correctness found in the first frozen snapshot** (none P0/P1 —
+"the shipped code path is correct and every failure path it constructed is
+fail-safe" was correctness's own framing even at NO-GO): record-before-
+resume had no test proving the ordering the function's own name promises
+(`test_the_decision_is_recorded_before_the_graph_is_resumed`, behavioural —
+`resume_graph_investigation` monkeypatched to crash, decision row confirmed
+already committed); the three-layer pairing check was one working layer
+plus two that a whitespace-only note walked straight through (mutated
+independently at the graph node, at `EscalationRecord`, and at `DecisionRow`
+— all three now strip and all three are mutation-tested in both directions,
+`test_a_whitespace_only_rejection_note_re_pauses` pinning the exact
+reproduction a reviewer measured); and a corrupted `owner_decisions` row or
+a corrupted `report.json` on the identical-retry read both used to answer
+with an uncaught `pydantic.ValidationError` instead of `FAIL <CODE>
+<message>` -- five tests in `test_approvals.py` cover the store-corruption
+and end-to-end `cli.main` cases together. Every one of the 7 new mutations
+failed its test before being reverted, on the real tree with `__pycache__`
+purged; `grep -rn MUTATION src tests` stayed clean throughout.
+
+**Known gaps, deliberately not this unit's to close:**
+
+- `cli._sqlite_checkpointer`'s bare `sqlite3.connect(...)` still has no
+  error translation — Unit 2d's, as recorded when Unit 2a shipped. This
+  unit's own new connection (`approvals.py`'s `owner_decisions` access) does
+  translate both `sqlite3.Error` and `pydantic.ValidationError` (a
+  corrupted row) into `ApprovalError(STORE_UNAVAILABLE)`, but only for that
+  connection.
+- A crash between `record_decision_before_resume` committing and
+  `Command(resume=...)` ever being called is handled (the retry path
+  resumes again using the already-recorded decision), but a crash between a
+  successful resume and `finalize_investigation` writing artifacts is only
+  exercised by reasoning, not a test that actually interrupts the process
+  mid-write — Unit 2d's crash/idempotency suite is where that belongs.
+- `cli.py`'s identical-retry read of `report.json` catches `ValidationError`
+  (a corrupted or truncated file) but not `OSError` (a hand-deleted
+  `report.json` inside an `investigations_dir` that still exists) — a
+  narrow gap, since `finalize_investigation`'s own staging-then-atomic-
+  replace write is what makes that combination unlikely outside deliberate
+  tampering. Correctness's own P3, recorded rather than fixed speculatively.
+- The composite-primary-key race two identical concurrent `approve` calls
+  can lose is fail-safe (the loser's `INSERT` hits `IntegrityError`, refused
+  rather than double-resumed) but misdescribed: it surfaces as
+  `CONFLICTING_DECISION` even though nothing about the two requests
+  actually conflicts, only their timing did. Correctness's P3; the fix
+  (re-reading the row after a caught `IntegrityError` and treating a match
+  as success) is a real design question, not a one-line change, so it is
+  recorded rather than built speculatively.
+- `resume_graph_investigation` takes `decision`/`rejection_note` as two
+  loose parameters rather than the validated `OwnerDecision` object `cli.py`
+  already has in hand — correctness flagged this as *less* pressing after
+  this round, since layer 2 (`_parse_resume_decision`) is now stripped and
+  mutation-tested in both directions independently of what `cli.py` passes
+  in, closing the specific gap a looser signature would otherwise leave
+  open.
+- `run_decision_command`'s `investigations_dir` is keyed by `thread_id`
+  while `finalize_investigation` writes under `report.investigation_id` --
+  equal today by construction (`investigation_id` doubles as `thread_id`
+  throughout this milestone), but two names for one value with no assertion
+  tying them together. Drift-safe today; worth a named invariant if a
+  future unit ever lets them diverge.
+- `evaluation.py:195`'s blindness to `escalation.decision`, recorded when
+  Unit 2b shipped, is unchanged: an owner-rejected diagnosis still scores as
+  correct. Still open, still outside this unit's scope.
+- `doctor.py`'s `ProjectPaths` still has no accessor or write-probe for
+  `checkpoints.db`, and now implicitly covers `owner_decisions` too, since
+  both live in the same file. Deferred alongside the error-translation gap
+  above for the same reason.
 
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
