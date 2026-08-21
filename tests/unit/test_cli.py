@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -276,12 +275,22 @@ def test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Unit 2d: before this unit, `cli._sqlite_checkpointer`'s bare
-    `sqlite3.connect(...)` let a locked/missing-parent database escape as a
-    raw traceback -- measured against exactly this scenario (a read-only
-    `results/` directory with no `checkpoints.db` in it yet, so
-    `sqlite3.connect` itself has to create the file and raises
-    `OperationalError` immediately, rather than the lazier corrupt-existing
-    -file case a connect-time wrap cannot catch)."""
+    `sqlite3.connect(...)` let a locked/unopenable database escape as a raw
+    traceback -- measured against exactly this scenario (the database path
+    itself occupied by a directory, so `sqlite3.connect` raises
+    `OperationalError: unable to open database file` immediately at
+    connect time, rather than the lazier corrupt-existing-file case a
+    connect-time wrap cannot catch).
+
+    A read-only `results/` directory (via `os.chmod`) proved the same
+    connect-time wrap in an earlier version of this test, but only on
+    POSIX -- Windows ignores `os.chmod` for directories entirely, which is
+    why that version passed CI on Ubuntu and went uncaught on Windows.
+    Occupying `checkpoints.db`'s own path with a directory reaches the
+    identical `sqlite3.connect()` call inside the identical
+    `try`/`except (OSError, sqlite3.Error)` on every platform, since it is
+    SQLite's own file-open logic refusing a directory, not an OS
+    permission bit."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     scope = incident_scope()
@@ -294,19 +303,13 @@ def test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback(
 
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    os.chmod(results_dir, 0o500)
-    # A permission bit that silently failed to take would make this test
-    # pass for the wrong reason -- the same defect class this project keeps
-    # finding (see `CLAUDE.md`'s "Current state" log). Fail loudly instead.
-    assert not os.access(results_dir, os.W_OK), (
-        "chmod did not make results/ read-only on this filesystem -- "
+    (results_dir / "checkpoints.db").mkdir()
+    assert (results_dir / "checkpoints.db").is_dir(), (
+        "setup did not leave a directory at checkpoints.db's path -- "
         "this test cannot prove anything here"
     )
 
-    try:
-        exit_status = cli.main(["investigate", scope.incident_id, "--model", "replay"])
-    finally:
-        os.chmod(results_dir, 0o700)
+    exit_status = cli.main(["investigate", scope.incident_id, "--model", "replay"])
 
     assert exit_status == 1
     assert "FAIL STORE_UNAVAILABLE" in capsys.readouterr().out

@@ -1,8 +1,8 @@
-import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+import pytest
 from fake_machine import FAKE_API_KEY, HEALTHY_ENVIRONMENT, FakeProbe
 
 from causalops.cli import render_report
@@ -347,29 +347,62 @@ def test_a_corrupt_checkpoint_database_fails_with_a_stable_code(
     assert check.reason_code is DoctorReasonCode.CHECKPOINT_DATABASE_UNREADABLE
 
 
-def test_an_unreadable_results_directory_fails_cleanly_instead_of_raising(
-    tmp_path: Path,
+def test_an_os_error_from_is_file_fails_cleanly_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`Path.is_file()` itself can raise `OSError` (`PermissionError`) against
     a directory this process cannot even stat -- a root-owned `results/` from
-    the Docker lab reaches this. `run_doctor_command` runs outside `main`'s
-    own `try`/`except`, so a check that lets that escape crashes the exact
+    the Docker lab reaches this in practice, and is exactly why `is_file()`
+    sits *inside* `check_checkpoint_database`'s own `try` rather than as a
+    guard before it: `run_doctor_command` runs outside `main`'s own
+    `try`/`except`, so a check that lets that escape crashes the exact
     command whose purpose is reporting a broken machine without crashing,
     and would discard the whole report -- including `writable_directories`'s
-    own correct `RUN_DIRECTORY_NOT_WRITABLE` for the same directory, produced
-    one check earlier. Both must survive together."""
+    own correct `RUN_DIRECTORY_NOT_WRITABLE`, found one check earlier. Both
+    must survive together, even though the setup below gives each its own
+    unrelated cause rather than one shared directory.
+
+    `os.chmod` cannot reproduce that root-owned-directory condition
+    portably: on Windows it only toggles the read-only bit and never blocks
+    directory traversal, so a chmod-based version of this test silently
+    passed hollow there (root cause of the Windows CI break this test
+    replaces -- a precondition asserting the setup actually took effect,
+    like the one below, is exactly what would have caught it). The
+    `PermissionError` is induced directly instead:
+    `Path.is_file` is patched to raise only for `checkpoints_db`'s own
+    path, real for every other path, so the induced fault is the one line
+    `check_checkpoint_database`'s `try` protects, on every platform --
+    proving the `try` placement rather than reproducing the real trigger.
+
+    The two failures below now come from two *independent* mechanisms --
+    `writable_directories` fails because `paths.runs` occupies a plain file
+    (portable: `Path.mkdir(exist_ok=True)` re-raises whenever the existing
+    path is not a directory, which is Python-level logic in `pathlib`
+    itself, not an OS permission check), `checkpoint_database` fails from
+    the monkeypatch above. Neither mechanism can accidentally mask the
+    other's failure, which is a stronger proof than the single shared
+    `chmod` this replaces."""
     paths = ProjectPaths(root=tmp_path)
-    paths.results.mkdir(parents=True)
-    os.chmod(paths.results, 0o000)
-    assert not os.access(paths.results, os.R_OK | os.X_OK), (
-        "chmod did not make results/ unreadable on this filesystem -- "
+    paths.runs.write_text("not a directory", encoding="utf-8")
+    assert paths.runs.is_file(), (
+        "setup did not leave a plain file at runs/'s own path -- "
         "this test cannot prove anything here"
     )
 
-    try:
-        report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
-    finally:
-        os.chmod(paths.results, 0o700)
+    real_is_file = Path.is_file
+
+    def is_file_that_raises_for_the_checkpoint_database(
+        self: Path, *args: object, **kwargs: object
+    ) -> bool:
+        if self == paths.checkpoints_db:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        Path, "is_file", is_file_that_raises_for_the_checkpoint_database
+    )
+
+    report = run_doctor(paths, FakeProbe(), HEALTHY_ENVIRONMENT)
 
     directories_check = check_named(report, "writable_directories")
     assert directories_check.status is CheckStatus.FAIL
