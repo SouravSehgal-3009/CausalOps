@@ -2106,6 +2106,61 @@ evaluation under the USD 2 cap, saves raw records and limitations, produces
 architecture and threat-model documents, verifies the clean source commit,
 and records a short diagnosis plus abstention/escalation demo.
 
+### Open gaps recorded during Unit 3b-1's review — for Unit 3b-2
+
+Unit 3b-1 (the `ToolCallingModel` protocol, routing a malformed/ambiguous
+tool call through the ordinary repair-then-fail-safe path instead of a
+crash, `py.typed`, and a loopback-only network guard for the test suite) is
+in review, not yet landed at the time this was written. These facts
+surfaced during that review and matter specifically to whichever unit adds
+the live model adapter (3b-2); recorded here so they are not lost to a
+review thread once the unit lands and this document's as-built record for
+it is written.
+
+- **`mypy tests` (the whole directory, not a single file) aborts with a
+  duplicate-module error** once `tests/conftest.py` exists alongside
+  `tests/unit/conftest.py` — mypy assigns bare module names by filename when
+  no `__init__.py` exists anywhere under `tests/`, and two files are both
+  named `conftest.py`. The working invocation, re-measured against the
+  frozen 3b-1 tree: `uv run mypy tests --exclude 'tests/unit/conftest\.py'`
+  → 161 errors in 13 files, 37 source files checked. `--explicit-package-bases`
+  does *not* fix this the way it looks like it should: it avoids the crash,
+  but changes module-resolution semantics enough to introduce an error that
+  is not otherwise there (`import-not-found` for `fake_incident`, 4 → 31
+  occurrences) — it trades the crash for a differently-broken check, not a
+  restored one. It reports fewer errors overall despite that (153 vs. 161):
+  each newly-unresolvable import stops mypy from checking whatever in that
+  file depended on it, so the 27 extra `import-not-found` errors suppress
+  more downstream errors than they add. Only `mypy src lab` is gated, so
+  this has no CI impact; it only affects an
+  ad-hoc whole-`tests` sweep — the same kind of check that caught this
+  unit's own `py.typed`/`import-untyped` gap (see Unit 3b-1's own review
+  record once it lands) — worth knowing it still runs, just not as one
+  invocation across the whole directory.
+- **The network guard is in-process only.** `tests/conftest.py`'s
+  loopback-only guard patches `socket.socket` in the current process; a
+  subprocess this suite spawns
+  (`tests/security/test_ground_truth_isolation.py:133` does, for an
+  unrelated reason) starts with an unpatched `socket` module and is not
+  covered. Imports only today, no exposure — an inherent limit of an
+  in-process guard, not something the guard itself can close.
+- **Windows: the `asyncio` proactor event loop can reach the network
+  without going through `socket.socket.connect`/`connect_ex`**, the two
+  methods the guard patches. Irrelevant today (nothing in this project is
+  async); relevant the moment 3b-2's adapter uses an async client on
+  Windows CI.
+- **The guard blocks `connect()`, not DNS resolution.** A `getaddrinfo()`
+  call that never reaches `.connect()` could still leak a hostname to a
+  resolver. Harmless while nothing in the suite resolves a real hostname;
+  becomes live the moment `api.anthropic.com` appears.
+- **A live model can contradict itself across channels** — a native tool
+  call alongside structured content that also carries `stop_reason`, a
+  combination replay cannot produce by construction. Unit 3b-1 treats
+  `turn.tool_call`'s non-emptiness as authoritative for "was a check
+  proposed," identical to today's behaviour (the node never reads
+  `parsed.proposal` directly) — not a new gap, but 3b-2's adapter design
+  must resolve it for a live provider.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"
