@@ -43,7 +43,11 @@ from causalops.graph import (
     resume_graph_investigation,
     run_graph_investigation,
 )
-from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
+from causalops.models import (
+    ReplayReasoningModel,
+    ReplayToolCallingModel,
+    ToolCallingModel,
+)
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
@@ -241,7 +245,7 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
 
 def _build_model_and_registry(
     incident: StoredIncident, paths: RunPaths, budgets: Budgets
-) -> tuple[ReplayToolCallingModel, Mapping[ToolName, ToolWrapper]]:
+) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper]]:
     """The model and tool registry one incident needs, built the same way
     for a fresh `investigate` and for Unit 2c's `approve`/`reject` resume --
     both need the exact same wiring `build_graph` requires, even though a

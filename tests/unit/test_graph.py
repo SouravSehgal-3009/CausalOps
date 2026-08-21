@@ -1,5 +1,6 @@
+import dataclasses
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from fake_incident import (
@@ -60,12 +61,18 @@ from causalops.domain import (
 from causalops.evaluation import count_control
 from causalops.evidence import build_evidence
 from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_investigation
-from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
+from causalops.models import (
+    ReplayReasoningModel,
+    ReplayToolCallingModel,
+    ToolCallingModel,
+)
 from causalops.report import render_report
 from causalops.run_records import RunRecorder
 from causalops.runbooks import RunbookIndex, run_runbook_search
+from causalops.tool_calls import NativeToolCall
 from causalops.tool_wrappers import ToolWrapper, query_logs_wrapper
 from causalops.tools import LogFilter, QueryLogsArguments, ToolName
+from network_guard import NetworkAccessRefused
 
 GRAPH_FIXTURE = FIXTURE_DIR / "graph_single_check.json"
 OTHER_INCIDENT_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
@@ -97,7 +104,7 @@ def graph_replay_model(fixture: Path = GRAPH_FIXTURE) -> ReplayToolCallingModel:
 
 
 def investigate_via_graph(
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
     registry: dict[ToolName, ToolWrapper] | None = None,
     budgets: Budgets | None = None,
     clock: StepClock | None = None,
@@ -431,16 +438,19 @@ def test_the_graph_does_not_ask_a_third_investigate_turn_after_a_denial(
 class _RaisingModel:
     """Raises on every `propose`/`respond` call -- the model-side analogue of
     `RecordingLogsBackend(raises=...)`, used to prove a spent model call
-    survives the crash that immediately follows it."""
+    survives the crash that immediately follows it. Typed to accept any
+    `BaseException`, not just `Exception`, so the same double also drives
+    `test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash`
+    below with a `NetworkAccessRefused`."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: BaseException) -> None:
         self.error = error
         self.requests: list[object] = []
 
-    def propose(self, request: object, schema: object) -> object:
+    def propose(self, request: object, schema: object) -> NoReturn:
         raise self.error
 
-    def respond(self, request: object) -> object:
+    def respond(self, request: object) -> NoReturn:
         raise self.error
 
 
@@ -454,7 +464,7 @@ def test_a_crashing_model_still_reports_the_spent_call() -> None:
     (`0`) instead."""
     model = _RaisingModel(RuntimeError("provider timeout"))
 
-    result, recorder = investigate_via_graph(model)  # type: ignore[arg-type]
+    result, recorder = investigate_via_graph(model)
 
     assert result.report.disposition is Disposition.FAILED_SAFE
     assert result.report.reason_code is ReasonCode.INTERNAL_ERROR
@@ -469,6 +479,126 @@ def test_a_crashing_model_still_reports_the_spent_call() -> None:
     assert "RuntimeError" in recorded
     assert "provider timeout" not in recorded
     assert "provider timeout" not in result.report.model_dump_json()
+
+
+def test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash() -> None:
+    """P2-2's regression test. `NetworkAccessRefused` (`network_guard.py`)
+    subclasses `BaseException`, not `Exception`, precisely so a guard
+    violation raised from inside `model.propose()` is NOT caught by
+    `investigate`'s blanket `except Exception:` -- unlike an ordinary crash
+    from the same call site, which must still fail safe. Both halves are
+    asserted with the same `_RaisingModel` double, so this pins the
+    distinction between the two exception types rather than merely proving
+    one of them escapes: a future accidental widening of `graph.py`'s
+    `except Exception:` to `except BaseException:` would defeat the guard's
+    whole purpose (a blocked connection reclassified as an ordinary
+    `INTERNAL_ERROR`, nothing failing loudly) and would only be caught by
+    the first assertion below, not the second."""
+    with pytest.raises(NetworkAccessRefused):
+        investigate_via_graph(
+            _RaisingModel(NetworkAccessRefused("refused a connection"))
+        )
+
+    result, _ = investigate_via_graph(_RaisingModel(RuntimeError("provider timeout")))
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.INTERNAL_ERROR
+
+
+class _TwoToolCallsModel:
+    """Wraps a `ReplayToolCallingModel` and doubles every non-empty
+    `tool_call`, so a turn that would otherwise decode cleanly instead
+    exercises `select_single_tool_call`'s multi-call refusal --
+    unreachable through `ReplayToolCallingModel` alone, which only ever
+    encodes zero or one call per turn."""
+
+    def __init__(self, inner: ReplayToolCallingModel) -> None:
+        self.inner = inner
+
+    def propose(self, request: Any, schema: Any) -> Any:
+        turn = self.inner.propose(request, schema)
+        if not turn.tool_call:
+            return turn
+        return dataclasses.replace(turn, tool_call=tuple(turn.tool_call) * 2)
+
+    def respond(self, request: Any) -> Any:
+        return self.inner.respond(request)
+
+
+def test_two_tool_calls_in_one_turn_consume_a_repair_then_fail_safe(
+    tmp_path: Path,
+) -> None:
+    """A live provider's native tool-call channel can return more than one
+    call in a single turn -- unreachable through `ReplayToolCallingModel`
+    alone, which only ever encodes zero or one. `select_single_tool_call`
+    already refuses `len != 1`; this proves the refusal is wired all the
+    way from `ask_once` through `_ask_with_repair`: it costs exactly one
+    repair, the same as any other invalid turn, rather than crashing the
+    run or silently picking one of the two calls."""
+    scripted = plan_json(proposal=logs_proposal())
+    inner = ReplayToolCallingModel(
+        replay_model(tmp_path, {"initial_plan": [scripted, scripted]})
+    )
+
+    result, _ = investigate_via_graph(_TwoToolCallsModel(inner))
+
+    report = result.report
+    assert report.disposition is Disposition.FAILED_SAFE
+    assert report.reason_code is ReasonCode.MODEL_OUTPUT_INVALID
+    assert report.repairs_used == 1
+    assert report.invalid_responses == 2
+    assert report.tools_executed == 0
+
+
+class _MalformedToolCallModel:
+    """Wraps a `ReplayToolCallingModel` and corrupts the single call's
+    `evidence_gap` past `ToolProposal`'s `Field(max_length=300)` bound, so a
+    turn that would otherwise decode cleanly instead exercises
+    `parse_tool_call`'s final `ValidationError` branch -- the malformed
+    counterpart to `_TwoToolCallsModel`'s ambiguous one. `select_single_tool_call`
+    accepts a single call fine; `parse_tool_call` is what refuses it."""
+
+    def __init__(self, inner: ReplayToolCallingModel) -> None:
+        self.inner = inner
+
+    def propose(self, request: Any, schema: Any) -> Any:
+        turn = self.inner.propose(request, schema)
+        if not turn.tool_call:
+            return turn
+        (call,) = turn.tool_call
+        corrupted_args = dict(call.args)
+        corrupted_args["evidence_gap"] = "x" * 301
+        corrupted = NativeToolCall(name=call.name, args=corrupted_args, id=call.id)
+        return dataclasses.replace(turn, tool_call=(corrupted,))
+
+    def respond(self, request: Any) -> Any:
+        return self.inner.respond(request)
+
+
+def test_a_malformed_single_tool_call_consumes_a_repair_then_fail_safe(
+    tmp_path: Path,
+) -> None:
+    """The malformed counterpart to the ambiguous-call test above: a single
+    call that decodes to `select_single_tool_call` fine but fails
+    `parse_tool_call`'s own validation, the same way a live model's bad
+    enum value or over-length rationale field would. Proves `ask_once`
+    routes that failure through the ordinary repair-then-fail-safe path
+    instead of crashing -- reverting `graph.py`'s `if proposal is None:
+    return None, reason` back to `raise AssertionError(reason)` (the
+    pre-3b-1 behaviour) must fail this test, since that reversion is
+    exactly what it exists to catch."""
+    scripted = plan_json(proposal=logs_proposal())
+    inner = ReplayToolCallingModel(
+        replay_model(tmp_path, {"initial_plan": [scripted, scripted]})
+    )
+
+    result, _ = investigate_via_graph(_MalformedToolCallModel(inner))
+
+    report = result.report
+    assert report.disposition is Disposition.FAILED_SAFE
+    assert report.reason_code is ReasonCode.MODEL_OUTPUT_INVALID
+    assert report.repairs_used == 1
+    assert report.invalid_responses == 2
+    assert report.tools_executed == 0
 
 
 def test_a_graphbubbleup_escape_still_syncs_the_callers_recorder() -> None:

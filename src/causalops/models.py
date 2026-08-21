@@ -6,7 +6,7 @@ behind the same protocol.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from causalops.domain import ModelUsage, ToolProposal
-from causalops.tool_calls import NativeToolCall, to_tool_call
+from causalops.tool_calls import NativeToolCall, summarize_errors, to_tool_call
 
 
 class Stage(StrEnum):
@@ -46,13 +46,17 @@ class ReasoningModel(Protocol):
     def respond(self, request: ModelRequest) -> ModelResponse: ...
 
 
-def summarize_errors(error: ValidationError) -> str:
-    """A short, non-secret account of why a response did not fit its schema."""
-    parts = [
-        f"{'.'.join(str(step) for step in item['loc'])}: {item['msg']}"
-        for item in error.errors()[:5]
-    ]
-    return "; ".join(parts)
+class ToolCallingModel(Protocol):
+    """The `propose`/`respond` shape the graph orchestrator's INVESTIGATE and
+    FINAL_ASSESSMENT nodes need. `ReplayToolCallingModel` below is its first
+    implementation; a live Claude adapter is the second, which is what
+    finally makes this a protocol worth naming rather than a one-off type.
+    """
+
+    def propose[StageModel: BaseModel](
+        self, request: ModelRequest, schema: type[StageModel]
+    ) -> "ProposedTurn[StageModel]": ...
+    def respond(self, request: ModelRequest) -> ModelResponse: ...
 
 
 def parse_response[StageModel: BaseModel](
@@ -150,8 +154,12 @@ class ReplayReasoningModel:
 class ProposedTurn[StageModel: BaseModel]:
     """One INVESTIGATE-stage model turn.
 
-    `tool_call` is the encoded form of `parsed.proposal`, present only when
-    the model proposed a check. Decoding it back into a `ToolProposal` is the
+    `tool_call` is the encoded form of `parsed.proposal`, non-empty only
+    when the model proposed a check -- a sequence, not a single optional
+    value, so the graph can tell "the model proposed nothing" (empty) apart
+    from "the model proposed more than one call in a turn" (`len >= 2`),
+    which a live provider's native tool-call channel can produce but this
+    replay adapter never does. Decoding it back into a `ToolProposal` is the
     graph's job, not this adapter's -- `select_single_tool_call` and
     `parse_tool_call` are the same functions a live provider's tool-call
     message would have to pass through, and the graph's INVESTIGATE node
@@ -161,7 +169,7 @@ class ProposedTurn[StageModel: BaseModel]:
 
     parsed: StageModel | None
     errors: str
-    tool_call: NativeToolCall | None
+    tool_call: Sequence[NativeToolCall]
     usage: ModelUsage | None
 
 
@@ -215,15 +223,15 @@ class ReplayToolCallingModel:
         parsed, errors = parse_response(schema, response.content)
         if parsed is None:
             return ProposedTurn(
-                parsed=None, errors=errors, tool_call=None, usage=response.usage
+                parsed=None, errors=errors, tool_call=(), usage=response.usage
             )
         proposal = getattr(parsed, "proposal", None)
         if not isinstance(proposal, ToolProposal):
             return ProposedTurn(
-                parsed=parsed, errors="", tool_call=None, usage=response.usage
+                parsed=parsed, errors="", tool_call=(), usage=response.usage
             )
         self._next_call_id += 1
         encoded = to_tool_call(proposal, f"call-{self._next_call_id}")
         return ProposedTurn(
-            parsed=parsed, errors="", tool_call=encoded, usage=response.usage
+            parsed=parsed, errors="", tool_call=(encoded,), usage=response.usage
         )

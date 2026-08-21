@@ -34,8 +34,9 @@ class NativeToolCall(BaseModel):
 
 
 def select_single_tool_call(calls: Sequence[NativeToolCall]) -> NativeToolCall | None:
-    """A model turn proposes exactly one check. Zero or two-or-more calls in
-    one turn is refused here, before any policy wrapper sees either of them."""
+    """A model turn proposes exactly one check when invoked: zero or
+    two-or-more calls in one turn is refused here, before any policy wrapper
+    sees either of them."""
     if len(calls) != 1:
         return None
     return calls[0]
@@ -51,9 +52,29 @@ def select_single_tool_call(calls: Sequence[NativeToolCall]) -> NativeToolCall |
 arguments_adapter: TypeAdapter[ToolArguments] = TypeAdapter(ToolArguments)
 
 
-def parse_tool_call(call: NativeToolCall) -> ToolProposal | None:
+def summarize_errors(error: ValidationError) -> str:
+    """A short, non-secret account of why a value did not fit its schema.
+
+    Moved here from `models.py` -- `parse_tool_call` below needs the same
+    formatter `parse_response` uses, and `models.py` already imports from
+    this module (`NativeToolCall`, `to_tool_call`), so this is the lower
+    module in that one existing import edge. `models.py` now imports this
+    name instead of defining it, rather than each module keeping its own
+    copy of the same pydantic-error-summary logic.
+    """
+    parts = [
+        f"{'.'.join(str(step) for step in item['loc'])}: {item['msg']}"
+        for item in error.errors()[:5]
+    ]
+    return "; ".join(parts)
+
+
+def parse_tool_call(call: NativeToolCall) -> tuple[ToolProposal | None, str]:
     """Validate `call.args` into a whole `ToolProposal`, refusing anything
-    ambiguous or malformed rather than guessing at what the model meant.
+    ambiguous or malformed rather than guessing at what the model meant, and
+    saying why -- a live model's repair budget is one shot, so "topic:
+    Input should be 'gateway_errors', ..." is fixable where "your arguments
+    were invalid" would waste it.
 
     The confused-deputy rule: `call.name` (the provider-controlled tool
     selection) and `arguments.tool` (the discriminator inside the
@@ -64,20 +85,29 @@ def parse_tool_call(call: NativeToolCall) -> ToolProposal | None:
     """
     try:
         arguments = arguments_adapter.validate_python(call.args)
-    except ValidationError:
-        return None
+    except ValidationError as error:
+        return None, summarize_errors(error)
     if call.name != arguments.tool.value:
-        return None
+        return None, (
+            f"the tool call's name {call.name!r} does not match its "
+            f"arguments' declared tool {arguments.tool.value!r}"
+        )
     gap = call.args.get("evidence_gap")
     observation = call.args.get("expected_observation")
     if not isinstance(gap, str) or not isinstance(observation, str):
-        return None
-    try:
-        return ToolProposal(
-            arguments=arguments, evidence_gap=gap, expected_observation=observation
+        return (
+            None,
+            "evidence_gap and expected_observation must both be present strings",
         )
-    except ValidationError:
-        return None
+    try:
+        return (
+            ToolProposal(
+                arguments=arguments, evidence_gap=gap, expected_observation=observation
+            ),
+            "",
+        )
+    except ValidationError as error:
+        return None, summarize_errors(error)
 
 
 def to_tool_call(proposal: ToolProposal, call_id: str) -> NativeToolCall:

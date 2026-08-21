@@ -43,11 +43,11 @@ budget, via `_StageCounters`/`_ask_with_repair` below. `GraphBubbleUp` is
 re-raised first in all three, since it is a control-flow signal (interrupt,
 drain, parent command), not a failure -- Milestone 2 adds `interrupt()`.
 
-`ReplayToolCallingModel` is the only model type this file binds -- not the
-plain `ReasoningModel` protocol `workflow.py` used. That is a known,
-deliberate gap: a `propose()`-shaped protocol for the tool-calling adapter
-would be speculative with only one implementation to validate its shape
-against. It closes when the live Claude adapter unit adds a second one.
+This file binds `ToolCallingModel` -- the `propose()`/`respond()` protocol in
+`models.py` -- not the plain `ReasoningModel` protocol `workflow.py` used.
+`ReplayToolCallingModel` is its first implementation; a live Claude adapter is
+the second, which is what makes this a protocol worth naming rather than a
+concrete type these nodes bind directly.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -96,7 +96,7 @@ from causalops.domain import (
     utc_now,
 )
 from causalops.evidence import EvidenceStore, digest_text, new_opaque_id
-from causalops.models import ModelRequest, ReplayToolCallingModel, Stage, parse_response
+from causalops.models import ModelRequest, Stage, ToolCallingModel, parse_response
 from causalops.policy import POLICY_VERSION
 from causalops.prompts import (
     PROMPT_VERSION,
@@ -106,7 +106,6 @@ from causalops.prompts import (
 )
 from causalops.run_records import RunEvent, RunRecorder
 from causalops.tool_calls import (
-    NativeToolCall,
     parse_tool_call,
     select_single_tool_call,
 )
@@ -527,7 +526,7 @@ def _ask_with_repair[T](
     started_at: str,
     ask_once: Callable[[str | None], tuple[T | None, str]],
     on_stop: Callable[[ReasonCode], None],
-    on_invalid: Callable[[], None],
+    on_invalid: Callable[[str], None],
 ) -> T | None:
     """Ask once, repair once on invalid output, stop with a reason
     otherwise -- the control flow `investigate` and `final_assessment` both
@@ -539,6 +538,12 @@ def _ask_with_repair[T](
     a spent call to an exception; the caller's `try`/`except` around the
     whole call to this function is what makes that guarantee end to end.
     Returns the parsed value, or `None` with `counters.stop_reason` set.
+
+    `on_invalid(reason)` carries `ask_once`'s own account of what was wrong
+    -- a schema-validation summary, or (`investigate` only) why a proposed
+    tool call was refused -- into the durable event log, so `events.jsonl`
+    can distinguish "the provider returned junk" from "the model proposed
+    two checks in one turn" instead of recording only that a turn failed.
     """
     if _expired(started_at, budgets, clock):
         counters.stop_reason = ReasonCode.WALL_CLOCK_EXPIRED
@@ -553,16 +558,16 @@ def _ask_with_repair[T](
     if parsed is not None:
         return parsed
     counters.invalid_responses += 1
-    on_invalid()
+    on_invalid(errors)
     if not counters.may_repair(budgets):
         counters.stop_reason = ReasonCode.REPAIR_EXHAUSTED
         on_stop(counters.stop_reason)
         return None
     counters.repairs_used += 1
-    parsed, _ = ask_once(errors)
+    parsed, second_errors = ask_once(errors)
     if parsed is None:
         counters.invalid_responses += 1
-        on_invalid()
+        on_invalid(second_errors)
         counters.stop_reason = ReasonCode.MODEL_OUTPUT_INVALID
         on_stop(counters.stop_reason)
         return None
@@ -578,7 +583,7 @@ def _make_investigate(
     # Deliberately not `clock`: see `build_graph`'s docstring for why event
     # timestamps and domain-timing reads must not share ticks.
     event_clock: Clock,
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
 ) -> GraphNode:
     def investigate(state: GraphState) -> dict[str, Any]:
         turn_index = state["model_turn"]
@@ -597,10 +602,10 @@ def _make_investigate(
             state["usage"],
             state["context_digest"],
         )
-        last_tool_call: NativeToolCall | None = None
+        last_proposal: ToolProposal | None = None
 
         def ask_once(repair_errors: str | None) -> tuple[Any, str]:
-            nonlocal last_tool_call
+            nonlocal last_proposal
             request, digest = _render_stage_request(
                 packet,
                 scope,
@@ -615,12 +620,30 @@ def _make_investigate(
             counters.record_call(digest)
             turn = model.propose(request, schema)
             counters.record_usage(turn.usage)
-            last_tool_call = turn.tool_call
-            return turn.parsed, turn.errors
+            if turn.parsed is None:
+                return None, turn.errors
+            calls = turn.tool_call
+            if not calls:
+                last_proposal = None
+                return turn.parsed, ""
+            selected = select_single_tool_call(calls)
+            if selected is None:
+                return None, (
+                    f"the model proposed {len(calls)} checks in one turn; "
+                    "exactly one is allowed"
+                )
+            proposal, reason = parse_tool_call(selected)
+            if proposal is None:
+                return None, reason
+            last_proposal = proposal
+            return turn.parsed, ""
 
-        def log_invalid() -> None:
+        def log_invalid(reason: str) -> None:
             recorder.event(
-                GraphPhase.INVESTIGATE.value, "invalid_response", stage=stage.value
+                GraphPhase.INVESTIGATE.value,
+                "invalid_response",
+                stage=stage.value,
+                reason=reason,
             )
 
         def log_stop(reason: ReasonCode) -> None:
@@ -660,27 +683,7 @@ def _make_investigate(
             )
             if parsed is None:
                 return stopped_state(counters.stop_reason)
-
-            proposal: ToolProposal | None = None
-            if last_tool_call is not None:
-                # The round trip through the same encode/decode functions a
-                # live Claude adapter's message would have to pass through --
-                # not a shortcut through the parsed stage's own `.proposal`
-                # field directly. Both functions are proven lossless for any
-                # `ToolProposal` the domain layer can construct
-                # (`test_tool_calls.py`), so a `None` here is this file's
-                # bug, not the model's.
-                selected = select_single_tool_call([last_tool_call])
-                if selected is None:
-                    raise AssertionError(
-                        "a single-element tool call list failed self-selection"
-                    )
-                proposal = parse_tool_call(selected)
-                if proposal is None:
-                    raise AssertionError(
-                        "a just-encoded tool call failed to parse back -- "
-                        "to_tool_call/parse_tool_call round trip is broken"
-                    )
+            proposal = last_proposal
 
             recorder.event(
                 GraphPhase.INVESTIGATE.value,
@@ -921,7 +924,7 @@ def _make_final_assessment(
     # Deliberately not `clock`: see `build_graph`'s docstring for why event
     # timestamps and domain-timing reads must not share ticks.
     event_clock: Clock,
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
 ) -> GraphNode:
     def final_assessment(state: GraphState) -> dict[str, Any]:
         recorder = _rebuild_recorder(state, event_clock)
@@ -958,11 +961,12 @@ def _make_final_assessment(
             counters.record_usage(response.usage)
             return parse_response(FinalAssessment, response.content)
 
-        def log_invalid() -> None:
+        def log_invalid(reason: str) -> None:
             recorder.event(
                 GraphPhase.FINAL_ASSESSMENT.value,
                 "invalid_response",
                 stage=Stage.FINAL_ASSESSMENT.value,
+                reason=reason,
             )
 
         def log_stop(reason: ReasonCode) -> None:
@@ -1331,7 +1335,7 @@ def build_graph(
     packet: InitialAlertPacket,
     budgets: Budgets,
     clock: Clock,
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
     dispatch_registry: Mapping[ToolName, ToolWrapper],
     checkpointer: BaseCheckpointSaver[str],
     *,
@@ -1573,7 +1577,7 @@ def run_graph_investigation(
     scope: IncidentScope,
     packet: InitialAlertPacket,
     initial_evidence: Sequence[Evidence],
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
     dispatch_registry: Mapping[ToolName, ToolWrapper],
     recorder: RunRecorder,
     budgets: Budgets = DEFAULT_BUDGETS,
@@ -1687,7 +1691,7 @@ def resume_graph_investigation(
     checkpointer: BaseCheckpointSaver[str],
     scope: IncidentScope,
     packet: InitialAlertPacket,
-    model: ReplayToolCallingModel,
+    model: ToolCallingModel,
     dispatch_registry: Mapping[ToolName, ToolWrapper],
     recorder: RunRecorder,
     decision: Literal["accept", "reject"],
