@@ -38,10 +38,14 @@ from fake_incident import (
     RecordingLogsBackend,
     StepClock,
     alert_packet,
+    assessment_json,
     change_row,
     incident_scope,
     logs_only_registry,
     packet_evidence,
+    plan_json,
+    replay_model,
+    resume_graph_run,
     write_changes,
 )
 from langchain_core.runnables import RunnableConfig
@@ -49,8 +53,14 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from causalops import cli
-from causalops.domain import Budgets, Disposition, StoredIncident
-from causalops.graph import run_graph_investigation
+from causalops.domain import (
+    Budgets,
+    Disposition,
+    EscalatedInvestigation,
+    EscalationReason,
+    StoredIncident,
+)
+from causalops.graph import build_graph, run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunRecorder
 from causalops.telemetry import RunPaths
@@ -168,6 +178,75 @@ def test_a_second_connection_reads_back_the_finished_run(tmp_path: Path) -> None
 
     assert checkpoint is not None
     assert checkpoint.checkpoint["channel_values"]["report"] is not None
+
+
+def test_a_two_process_pause_and_resume_settles_over_a_real_sqlite_file(
+    tmp_path: Path,
+) -> None:
+    """Unit 2b's own named proof, not the in-process convenience every other
+    escalation-interrupt test in this project uses: every one of them drives
+    `InMemorySaver()`, which would pass identically whether or not this
+    unit's real target -- resuming through the hardened `SqliteSaver` this
+    project actually runs, `cli._sqlite_checkpointer` -- works at all. This
+    test closes the connection between pause and resume and reopens the
+    checkpoint file fresh, standing in for the second process
+    `causalops approve`/`reject` will be in 2c: it never touches the
+    `checkpointer` the pause used, only the database path and the thread id
+    a real second process would actually have."""
+    db_path = tmp_path / "cp.db"
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = logs_only_registry(RecordingLogsBackend())
+    clock = StepClock()
+
+    with cli._sqlite_checkpointer(db_path) as checkpointer:
+        paused = run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,
+            registry,
+            RunRecorder(StepClock()),
+            Budgets(),
+            clock,
+            investigation_id="two-process-probe",
+            checkpointer=checkpointer,
+        )
+    assert isinstance(paused, EscalatedInvestigation)
+    assert paused.reason is EscalationReason.CONFLICTING_EVIDENCE
+    calls_before_resume = len(model.requests)
+
+    # A fresh connection and a fresh `SqliteSaver`, opened only against the
+    # file path -- the pause's own `checkpointer` object is out of scope by
+    # now, closed at the end of the `with` block above.
+    with cli._sqlite_checkpointer(db_path) as reopened:
+        compiled = build_graph(
+            incident_scope(),
+            alert_packet(),
+            Budgets(),
+            clock,
+            model,
+            registry,
+            reopened,
+            event_clock=StepClock(),
+        )
+        config: RunnableConfig = {"configurable": {"thread_id": "two-process-probe"}}
+        snapshot = compiled.get_state(config)
+        assert snapshot.interrupts
+        assert snapshot.interrupts[0].value["reason"] == "CONFLICTING_EVIDENCE"
+
+        settled = resume_graph_run(compiled, config, "accept")
+
+    assert settled.report.disposition is Disposition.DIAGNOSED
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+    # Stronger than the in-process purity proxy elsewhere: zero additional
+    # model calls after reopening the checkpoint from a fresh connection,
+    # not just within one process's live object graph.
+    assert len(model.requests) == calls_before_resume
 
 
 def test_an_explicit_investigation_id_becomes_the_report_id_and_the_thread_id(

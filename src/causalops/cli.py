@@ -22,6 +22,7 @@ from causalops.doctor import (
 from causalops.domain import (
     Budgets,
     Disposition,
+    EscalatedInvestigation,
     InvestigationResult,
     StoredIncident,
     utc_now,
@@ -63,6 +64,13 @@ REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # tools -- exactly as the retired loop orchestrator did; parity between the
 # two was established in Unit 1d-1 before the loop was retired.
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
+
+# Unit 2b. `0` already means success and `1` already means `FAILED_SAFE`/a
+# `LabError`/`RunRecordError` refusal (see `main`'s `except` clause below);
+# `argparse` itself exits `2` on a usage error before `main`'s own body ever
+# runs. An escalated, paused investigation is none of those three, so it
+# gets its own code rather than overloading one of them.
+EXIT_ESCALATED = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -178,7 +186,7 @@ def run_investigation(
     budgets: Budgets,
     recorder: RunRecorder,
     checkpointer: BaseCheckpointSaver[str],
-) -> InvestigationResult:
+) -> InvestigationResult | EscalatedInvestigation:
     model = ReplayToolCallingModel(
         ReplayReasoningModel(
             REPLAY_FIXTURE,
@@ -227,6 +235,19 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
     db_path = root / "results" / "checkpoints.db"
     with _sqlite_checkpointer(db_path) as checkpointer:
         result = run_investigation(incident, paths, budgets, recorder, checkpointer)
+    if isinstance(result, EscalatedInvestigation):
+        # Unit 2b: no `causalops approve`/`reject` yet (2c), so this is
+        # where the CLI's own job ends for a paused run -- print what the
+        # owner needs to resume it by hand later and stop, without ever
+        # calling `finalize_investigation`. That call refuses a second write
+        # for an already-finalized investigation id
+        # (`RESULT_ALREADY_FINALIZED`); calling it now, on a run that has not
+        # produced a report yet, would instead poison the real terminal
+        # write this thread gets once it is actually resumed and accepted
+        # or rejected.
+        print(f"ESCALATED {result.reason.value} {result.thread_id}")
+        print(f"remaining checks: {result.remaining_check_count}")
+        return EXIT_ESCALATED
     written = finalize_investigation(
         root / "results",
         result.report,

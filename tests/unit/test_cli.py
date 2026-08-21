@@ -269,3 +269,60 @@ def test_investigate_runs_an_investigation_end_to_end(
         ToolOutcome.EXECUTED,
         ToolOutcome.EXECUTED,
     ]
+
+
+def test_investigate_pauses_and_reports_escalation_without_finalizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unit 2b: `lab_diagnosis.json` proposes `query_logs` then
+    `list_recent_changes`; leaving no `changes.json` behind (unlike the
+    end-to-end test above, which writes one) makes the second check come
+    back `UNAVAILABLE` -- a real `TOOL_UNAVAILABLE` escalation trigger, not
+    a scripted one, reached through the exact same real-backend path
+    `cli.py` wires for a live incident. This is the CLI's own contract for
+    a paused run: print the reason and thread id, exit with a code distinct
+    from 0 and 1, and never call `finalize_investigation` -- the mutation
+    target for that early return is deleting it. Verified (not guessed): the
+    result is not `RESULT_ALREADY_FINALIZED` surfacing as a `RunRecordError`,
+    since `finalize_investigation` never even runs -- `result.report` is
+    read first, at the `print` two lines below the deleted branch, and
+    `EscalatedInvestigation` has no `report` attribute, so mypy catches the
+    missing narrowing statically and the deleted branch also fails this test
+    at runtime with a raw `AttributeError` instead of a clean escalated
+    exit."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    scope = incident_scope()
+    packet = alert_packet()
+    incident = StoredIncident(scope=scope, packet=packet, evidence=packet_evidence())
+    paths = RunPaths(root=tmp_path / "runs" / scope.incident_id)
+    paths.root.mkdir(parents=True)
+    paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+    paths.logs.mkdir(parents=True)
+    (paths.logs / "orders.jsonl").write_text(
+        json.dumps(
+            {
+                "at": scope.started_at.isoformat(),
+                "request_id": "r1",
+                "service": "orders",
+                "severity": "error",
+                "event": "config_rejected_request",
+                "fields": {"config_key": "require_order_token", "detail": "x"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # Deliberately no `write_changes(paths, ...)` call -- the absent
+    # `changes.json` is what makes `list_recent_changes` come back
+    # `UNAVAILABLE` instead of `EXECUTED`.
+
+    exit_status = cli.main(["investigate", scope.incident_id, "--model", "replay"])
+
+    assert exit_status == cli.EXIT_ESCALATED
+    assert exit_status not in (0, 1)
+    printed = capsys.readouterr().out
+    assert "ESCALATED TOOL_UNAVAILABLE" in printed
+    assert "remaining checks:" in printed
+    assert not (tmp_path / "results" / "investigations").exists()

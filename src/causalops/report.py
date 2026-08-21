@@ -32,6 +32,8 @@ def render_report(
     lines.extend(["", *evidence_section(report, evidence)])
     lines.extend(["", *checks_section(receipts)])
     lines.extend(["", *budget_section(report)])
+    if report.escalation is not None:
+        lines.extend(["", *escalation_section(report)])
     lines.extend(["", *limitations_section(report, model_name)])
     return "\n".join(lines) + "\n"
 
@@ -118,6 +120,19 @@ def usage_line(report: InvestigationReport) -> str:
     if report.usage is None:
         return "not reported by this model"
     return f"{report.usage.input_tokens} in, {report.usage.output_tokens} out"
+
+
+def escalation_section(report: InvestigationReport) -> list[str]:
+    """Only called when `report.escalation` is set -- the caller checks, not
+    this function, the same pattern every other optional section in this
+    file leaves to `render_report`."""
+    assert report.escalation is not None
+    return [
+        "## Owner escalation",
+        "",
+        f"- Reason: `{report.escalation.reason.value}`",
+        f"- Decision: **{report.escalation.decision}**",
+    ]
 
 
 def limitations_section(report: InvestigationReport, model_name: str) -> list[str]:

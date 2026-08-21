@@ -52,7 +52,7 @@ against. It closes when the live Claude adapter unit adds a second one.
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, Literal, Protocol, TypedDict, cast
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -61,6 +61,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 from pydantic import JsonValue
 
 from causalops.domain import (
@@ -68,6 +69,9 @@ from causalops.domain import (
     Budgets,
     Clock,
     Disposition,
+    EscalatedInvestigation,
+    EscalationReason,
+    EscalationRecord,
     Evidence,
     FinalAssessment,
     GraphPhase,
@@ -83,6 +87,7 @@ from causalops.domain import (
     ReasonCode,
     ReceiptState,
     RootCauseCode,
+    ToolOutcome,
     ToolProposal,
     ToolReceipt,
     Versions,
@@ -108,9 +113,12 @@ from causalops.tools import TOOL_REGISTRY_VERSION, ToolName
 
 # The library default is 10007 (`_internal/_config.py:32`), meant for graphs
 # whose shape isn't known ahead of time. This graph's longest real path is
-# eight supersteps (investigate, dispatch, normalize, investigate, dispatch,
-# normalize, final_assessment, final_report); 25 leaves headroom for a
-# guard bug without letting a real one spin for thousands of steps first.
+# nine supersteps (investigate, dispatch, normalize, investigate, dispatch,
+# normalize, final_assessment, escalation_interrupt, final_report); 25 leaves
+# headroom for a guard bug without letting a real one spin for thousands of
+# steps first. A resumed run does not add to this count: it is a second,
+# separate `.invoke()` call with its own fresh recursion budget, not more
+# steps stacked onto the first.
 GRAPH_RECURSION_LIMIT = 25
 
 
@@ -152,6 +160,15 @@ class GraphState(TypedDict):
     assessment: dict[str, JsonValue] | None
     usage: dict[str, JsonValue] | None
     failure_reason: str | None
+    # Unit 2b. Both `None` on every run that never reached
+    # `escalation_interrupt`, and both set together once the node returns.
+    # A node's return value only lands in state when the node returns --
+    # never on the interrupted attempt, which raises instead of returning --
+    # so these cannot go through state as "reason known, decision pending":
+    # by the time either is visible here, the run has already resumed and
+    # settled. `_build_report` reads them together for that reason.
+    escalation_reason: str | None
+    escalation_decision: str | None
     report: dict[str, JsonValue] | None
 
 
@@ -295,6 +312,30 @@ def _build_report(
             ReasonCode(reason_value) if reason_value else ReasonCode.INTERNAL_ERROR
         )
 
+    # Unit 2b. Both keys are `None` together on a run that never reached
+    # `escalation_interrupt`, and both set together once it has (see
+    # `GraphState`'s own comment on these two fields for why they cannot be
+    # observed half-set). This is not the same claim as "a failed-safe
+    # report never carries an escalation record" -- it can: if
+    # `escalation_interrupt` committed a real decision and `final_report`
+    # then crashes, `run_graph_investigation`'s outer crash containment
+    # rebuilds this function's `state` from that last committed checkpoint
+    # and calls it with `force_failure_reason` set, so `escalation_reason`/
+    # `escalation_decision` are both still non-`None` even though
+    # `disposition` ends up `FAILED_SAFE` below. `InvestigationReport`'s own
+    # validator does not forbid that combination, and it is the honest
+    # answer: the owner's decision was real and durable; the crash that
+    # follows it is a separate fact.
+    escalation: EscalationRecord | None = None
+    escalation_reason_value = state["escalation_reason"]
+    if escalation_reason_value is not None:
+        decision_value = state["escalation_decision"]
+        assert decision_value in ("accept", "reject")
+        escalation = EscalationRecord(
+            reason=EscalationReason(escalation_reason_value),
+            decision=cast(Literal["accept", "reject"], decision_value),
+        )
+
     return InvestigationReport(
         investigation_id=state["investigation_id"],
         incident_id=state["incident_id"],
@@ -316,6 +357,7 @@ def _build_report(
         evidence_ids=tuple(record.evidence_id for record in store.ordered()),
         receipt_ids=tuple(receipt.receipt_id for receipt in receipts),
         limitations=limitations,
+        escalation=escalation,
     )
 
 
@@ -892,6 +934,117 @@ def _make_final_assessment(
     return final_assessment
 
 
+def _escalation_reason(
+    receipts: Sequence[ToolReceipt], assessment: FinalAssessment, budgets: Budgets
+) -> EscalationReason | None:
+    """`TECHNICAL_SPEC.md` §8's three triggers this milestone can produce.
+    `EscalationReason`'s own member order follows the spec's listing
+    (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`); the checks below
+    deliberately do not -- `TOOL_UNAVAILABLE` is checked first, ahead of
+    the spec's own listing order. Pure, and called from both the router
+    (to pick the edge) and the node (to build the `interrupt()` payload) --
+    the same reuse `_tools_left` already gets elsewhere in this file, not
+    two independent readings of the same rule.
+
+    A receipt going `UNAVAILABLE` is checked first regardless of what the
+    model concluded from the checks that did run -- an owner should see a
+    diagnosis reached with missing data before anything else. The other two
+    triggers are mutually exclusive by construction today (one requires
+    `INSUFFICIENT_EVIDENCE`, the other's citation field has no rule
+    forbidding it on either disposition, but only `DIAGNOSED` runs in this
+    milestone's fixtures ever populate `contrary_evidence_ids`) -- the order
+    below is still asserted by a dedicated test, since "mutually exclusive
+    today" is a fact about current fixtures, not a promise about the fields.
+    """
+    if any(receipt.outcome is ToolOutcome.UNAVAILABLE for receipt in receipts):
+        return EscalationReason.TOOL_UNAVAILABLE
+    if (
+        assessment.disposition is ModelDisposition.INSUFFICIENT_EVIDENCE
+        and _tools_left(receipts, budgets) > 0
+    ):
+        return EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
+    if assessment.contrary_evidence_ids:
+        return EscalationReason.CONFLICTING_EVIDENCE
+    return None
+
+
+def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNode:
+    def escalation_interrupt(state: GraphState) -> dict[str, Any]:
+        receipts = _rebuild_receipts(state)
+        assessment = FinalAssessment.model_validate(state["assessment"])
+        store = _rebuild_store(state["incident_id"], state["evidence"])
+        # The router only routes here when this is not `None`
+        # (`_make_route_after_final_assessment` below calls the same pure
+        # function on the same state) -- this repeats that computation
+        # rather than trusting the edge, the same "recompute, don't trust
+        # the caller" posture `final_assessment`'s own `assert
+        # counters.stop_reason is not None` already takes for an equally
+        # router-guaranteed invariant.
+        reason = _escalation_reason(receipts, assessment, budgets)
+        assert reason is not None
+
+        # Everything above this line is a pure read of state -- no
+        # `recorder.event`, no reservation, no write. `TECHNICAL_SPEC.md`
+        # §5 requires an interrupt node to be side-effect-free before
+        # calling `interrupt()`, and a probe against the installed
+        # LangGraph confirmed why: only this node re-runs on resume, from
+        # its own top, so anything written here would run twice. The
+        # payload itself mirrors §8's interrupt-payload fields this
+        # milestone can supply; `thread_id`/`run_id`/`checkpoint_id` are
+        # not included here because the node has no way to know its own
+        # checkpoint id before it exists -- `run_graph_investigation`
+        # attaches all three once `.invoke()` returns.
+        payload: dict[str, JsonValue] = {
+            "reason": reason.value,
+            "evidence_ids": [record.evidence_id for record in store.ordered()],
+            "remaining_check_count": _tools_left(receipts, budgets),
+        }
+        decision = interrupt(payload)
+        # A bad resume value must not raise here. LangGraph persists a
+        # resume value against the interrupt id and replays it on every
+        # later resume of the same interrupt -- reproduced against a real
+        # `SqliteSaver`: raising on a typo left the thread permanently
+        # stuck replaying that same bad value on every subsequent resume,
+        # valid ones included, because 2b never finalizes on pause and so
+        # never gets a fresh interrupt id to retry against. Re-interrupting
+        # instead asks again, under the same id, so a later valid decision
+        # still settles the run. `retry` is not read by anything in this
+        # milestone; it exists so a caller re-reading the pending
+        # interrupt's payload after a bad attempt can tell a first ask from
+        # a retry apart, the same way `payload` already tells them why the
+        # run paused at all.
+        while decision not in ("accept", "reject"):
+            decision = interrupt({**payload, "retry": True})
+
+        # Nothing above this line ever executes a second time without also
+        # being discarded -- an interrupted attempt raises instead of
+        # returning, so no partial write from it ever reaches state. Only
+        # code from here down runs exactly once, on the attempt that
+        # settles this loop and falls through instead of interrupting
+        # again. This node still crosses no I/O boundary here -- the
+        # settling code below only rebuilds a local recorder from state and
+        # returns a plain dict, the same shape `normalize_evidence` and
+        # `final_report` already return without a `try`/`except` of their
+        # own -- so there is nothing this node holds that a crash here
+        # would lose beyond what a crash in either of those already loses.
+        recorder = _rebuild_recorder(state, event_clock)
+        recorder.event(
+            GraphPhase.ESCALATION_INTERRUPT.value,
+            "escalation_decided",
+            reason=reason.value,
+            decision=decision,
+        )
+        return {
+            "phase": GraphPhase.ESCALATION_INTERRUPT.value,
+            "escalation_reason": reason.value,
+            "escalation_decision": decision,
+            "events": _dump_events(recorder),
+        }
+
+    return escalation_interrupt
+
+
 def _make_final_report(budgets: Budgets, clock: Clock) -> GraphNode:
     def final_report(state: GraphState) -> dict[str, Any]:
         report = _build_report(state, budgets, clock)
@@ -943,6 +1096,25 @@ def _make_route_after_normalize(
     return route_after_normalize
 
 
+def _make_route_after_final_assessment(budgets: Budgets) -> Callable[[GraphState], str]:
+    def route_after_final_assessment(state: GraphState) -> str:
+        if state["failure_reason"] is not None:
+            # A crashed, invalid, or forged-citation `final_assessment` has
+            # no assessment to evaluate triggers against -- `state["assessment"]`
+            # is `None` on every path that sets `failure_reason` here (see
+            # `final_assessment`'s own `failed_state`). A failed-safe run is
+            # never escalated, the same bypass rule `route_after_investigate`
+            # and `route_after_normalize` already apply.
+            return "final_report"
+        receipts = _rebuild_receipts(state)
+        assessment = FinalAssessment.model_validate(state["assessment"])
+        if _escalation_reason(receipts, assessment, budgets) is not None:
+            return "escalation_interrupt"
+        return "final_report"
+
+    return route_after_final_assessment
+
+
 def build_graph(
     scope: IncidentScope,
     packet: InitialAlertPacket,
@@ -990,6 +1162,9 @@ def build_graph(
             scope, packet, budgets, clock=clock, event_clock=event_clock, model=model
         ),
     )
+    graph.add_node(
+        "escalation_interrupt", _make_escalation_interrupt(budgets, event_clock)
+    )
     graph.add_node("final_report", _make_final_report(budgets, clock))
 
     graph.add_edge(START, "investigate")
@@ -1012,7 +1187,15 @@ def build_graph(
             "final_report": "final_report",
         },
     )
-    graph.add_edge("final_assessment", "final_report")
+    graph.add_conditional_edges(
+        "final_assessment",
+        _make_route_after_final_assessment(budgets),
+        {
+            "escalation_interrupt": "escalation_interrupt",
+            "final_report": "final_report",
+        },
+    )
+    graph.add_edge("escalation_interrupt", "final_report")
     graph.add_edge("final_report", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -1030,14 +1213,26 @@ def run_graph_investigation(
     *,
     investigation_id: str | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
-) -> InvestigationResult:
-    """Run one investigation to completion.
+) -> InvestigationResult | EscalatedInvestigation:
+    """Run one investigation to completion, or to its first pause.
 
     `investigation_id` doubles as LangGraph's own `thread_id`
     (`TECHNICAL_SPEC.md:140-142`). It is `None` for every caller today --
     minting a fresh one is what every existing caller already gets -- and
     becomes a real input once Milestone 2's resume path needs to reopen a
     specific thread rather than start a new one.
+
+    Unit 2b: this function takes no `resume` argument on purpose. It always
+    starts a fresh run from `initial_state` below; resuming a paused thread
+    means building a graph directly (`build_graph`, with the same
+    `checkpointer`/`investigation_id`) and calling `compiled.invoke(
+    Command(resume=...), config)` -- the "tests drive `Command(resume=...)`
+    directly" boundary this unit was scoped to, deliberately left as raw
+    graph-level resume rather than a second production entry point. A
+    resumed run therefore gets none of this function's own safety net
+    (the crash containment below, or the `EscalatedInvestigation` assembly)
+    -- 2c decides how `causalops approve`/`reject` validates a decision and
+    handles a crash before it ever calls `Command(resume=...)`.
 
     `checkpointer` defaults to a fresh, process-local `InMemorySaver()` so
     every existing caller (tests included) keeps today's behaviour exactly:
@@ -1094,6 +1289,8 @@ def run_graph_investigation(
         "assessment": None,
         "usage": None,
         "failure_reason": None,
+        "escalation_reason": None,
+        "escalation_decision": None,
         "report": None,
     }
 
@@ -1196,6 +1393,37 @@ def run_graph_investigation(
     recorder.recorded = [
         RunEvent.model_validate(dump) for dump in final_state["events"]
     ]
+
+    # Unit 2b. `.invoke()` returns normally on a real pause -- it does not
+    # raise, so this is not an `except GraphBubbleUp:` case (a probe against
+    # the installed LangGraph confirmed this before any of this file was
+    # written) -- with `"__interrupt__"` present alongside whatever state the
+    # graph had committed before `escalation_interrupt` ran. Checked on
+    # `raw_state`, not `final_state`: `"__interrupt__"` is not a `GraphState`
+    # key, so reading it off the `GraphState`-typed name would not type-check.
+    # This must run before the `InvestigationReport.model_validate` call
+    # below -- on a pause, `final_state["report"]` is still `None`, and that
+    # call would raise a `ValidationError` instead of returning a paused
+    # result.
+    interrupts = raw_state.get("__interrupt__")
+    if interrupts:
+        payload = interrupts[0].value
+        checkpoint_id = str(
+            compiled.get_state(config).config["configurable"]["checkpoint_id"]
+        )
+        store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
+        receipts = tuple(_rebuild_receipts(final_state))
+        return EscalatedInvestigation(
+            thread_id=investigation_id,
+            run_id=run_id,
+            checkpoint_id=checkpoint_id,
+            reason=EscalationReason(payload["reason"]),
+            evidence=store.ordered(),
+            receipts=receipts,
+            remaining_check_count=payload["remaining_check_count"],
+            proposal_fingerprint=None,
+        )
+
     report = InvestigationReport.model_validate(final_state["report"])
     store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
     receipts = tuple(_rebuild_receipts(final_state))
