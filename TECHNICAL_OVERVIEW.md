@@ -651,7 +651,7 @@ only structured decisions, short summaries, and evidence references.
 ## Investigator tools and policy
 
 v1 implements exactly these four read-only tools. `TECHNICAL_SPEC.md` §7
-adds a fifth, optional `search_runbooks` retrieval tool for Milestone 2; it
+adds a fifth, optional `search_runbooks` retrieval tool for Milestone 3; it
 is not implemented yet.
 
 | Tool | Typed input and backend |
@@ -1132,19 +1132,141 @@ on the graph's own behaviour rather than a two-orchestrator comparison — no
 new fix landed in this unit; the evidence-carry fix above is 1d-1's, not
 1d-2's.
 
-## Milestone 2 — Durable escalation and local retrieval
+## Milestone 2 — Durable escalation and owner approval
 
-**Status:** not started. Adds checkpoint/operation IDs, CLI interrupt resume,
-approval routing, and crash/idempotency tests; curated FTS5 runbooks,
-retrieval provenance, and injection/no-ground-truth-leakage tests. Pinecone
+**Status:** Unit 2a complete, frozen for review. Units 2b (the escalation
+interrupt), 2c (approval routing and the append-only decision record — this
+milestone's dual-review completion snapshot), and 2d (crash/idempotency
+tests, the `ControlCounts` gap) have not started. Curated FTS5 runbooks,
+retrieval provenance, and injection/no-ground-truth-leakage tests defer to
+Milestone 3 (`TECHNICAL_SPEC.md` §12, *Amendment, Milestone 2*); Pinecone
 remains a post-milestone optional experiment.
 
-## Milestone 3 — Evidence-backed portfolio release
+Unit 2a (durable checkpoints, no behaviour change) swapped the graph's
+checkpointer from a process-local `InMemorySaver()`, rebuilt on every call,
+to a `SqliteSaver` writing `results/checkpoints.db` — gitignored already by
+the blanket `results/` rule, and outside `runs/`, so `reset_scenario`'s
+`shutil.rmtree` never touches it. `run_graph_investigation` gained two
+keyword-only parameters, both `None`-defaulted to today's exact behaviour so
+no existing caller changed: `investigation_id` (minting moves behind a
+"still `None`" branch — the same value already doubled as LangGraph's
+`thread_id`, now invertible for a future resume to supply) and
+`checkpointer`. `GraphState` gained `run_id` (`TECHNICAL_SPEC.md:140-142`;
+minted via `uuid4().hex` directly rather than through the same counter
+`evidence`/`receipt`/`investigation` IDs share, since it is never cited,
+asserted, or rendered — routing it through that counter would perturb
+externally visible ID sequences it has nothing to do with) and `events`: run
+events, previously accumulated by a `RunRecorder` object shared and mutated
+across a factory closure (and so lost at any process boundary), are now a
+state list rebuilt into a local recorder per node and returned whole on
+every one of that node's return paths, the same pattern `receipts`/`evidence`
+already used. A second, independent clock parameter (`event_clock`) keeps
+`RunEvent` timestamps isolated from the clock that times domain data (tool
+duration, budget expiry, evidence timestamps) — in production both are
+`utc_now` and the split is invisible, but it is what keeps recording an
+event from ever perturbing a domain timestamp, which a `StepClock` test
+double that advances on every read would otherwise expose immediately.
 
-**Status:** not started. Runs the fixed paired evaluation under the USD 2 cap,
-saves raw records and limitations, produces architecture and threat-model
-documents, verifies the clean source commit, and records a short diagnosis
-plus abstention/escalation demo.
+Everything above is a mechanical consequence of moving state that already
+existed (receipts, evidence) or was already planned (`run_id`) into
+`GraphState`. The unit's one piece of genuinely new production logic sits at
+`run_graph_investigation`'s `except GraphBubbleUp:` branch. Before this
+unit, the caller's `RunRecorder` was a single object every node mutated
+directly through a factory closure, so it already held whatever had been
+recorded up to the moment a `GraphBubbleUp` (interrupt, drain, parent
+command) escaped `.invoke()` uncaught — the seed "investigation_started"
+event, plus anything a node recorded before it raised. With events moved
+into state, nothing writes to the caller's `recorder` during the run at
+all; it is synced from `final_state["events"]` only at this function's
+normal return, which a `raise` never reaches. Left alone, that would have
+made the caller's `recorder` come back empty on every such escape — a
+regression a reviewer caught before this snapshot froze. The fix reads the
+last checkpoint LangGraph itself committed and syncs `recorder.recorded`
+from it before re-raising, the same recovery `except Exception` already
+performs to build a report. That read is I/O against the same database
+`checkpointer` uses, so it is wrapped in its own `try/except Exception:
+pass`: a checkpoint-read failure must not replace the control-flow signal
+with an unhandled database error, even at the cost of the event-recovery
+step itself.
+
+This narrows one observable behaviour, honestly recorded here because the
+unit's acceptance criterion was zero behaviour change even though this one
+case is arguably an improvement, not a regression. At `17c65d4`, a
+`GraphBubbleUp` escaping `investigate`'s first turn left the caller's
+`recorder` holding `["investigation_started", "stage_started"]` — the
+node's own in-flight event, recorded as a direct side effect before the
+raise, survived because the shared object was mutated immediately. Today
+the same escape leaves the caller's `recorder` holding only
+`["investigation_started"]`: an uncommitted node's own events are never
+merged into state, so recovering from the last *checkpoint* cannot recover
+work a node was still in the middle of when it raised. The event genuinely
+did not durably happen yet, so losing it is arguably more correct than the
+old behaviour of reporting it anyway — but it is a real, measured
+difference from `17c65d4`, verified with the model-double
+`test_graph.py::test_a_graphbubbleup_escape_still_syncs_the_callers_recorder`
+constructs, and it belongs in this record rather than living only inside
+that one test's assertion.
+
+`cli.py`'s `_sqlite_checkpointer` opens that connection with
+`allowed_msgpack_modules=None` on the checkpoint serializer — the same
+restriction `LANGGRAPH_STRICT_MSGPACK=true` applies, set as a constructor
+argument so the one place this database connection is opened is also the
+one place the policy is decided, rather than adding another `.env.example`
+variable for a database path the owner decided should stay fixed, not
+configurable. Without it, a compromised `checkpoints.db` could make its next
+read import and instantiate an arbitrary class named in a checkpoint blob.
+`test_checkpointing.py::test_the_hardened_serializer_refuses_an_unregistered_type`
+proves the restriction itself actually blocks reconstruction (using a real
+`causalops.domain` type, not a synthetic stand-in) rather than merely being
+configured, and
+`test_checkpointing.py::test_sqlite_checkpointer_yields_a_saver_with_the_hardened_serializer`
+proves `_sqlite_checkpointer` actually wires that restriction into the
+object it hands the caller — a first version of this test file proved only
+the former and left the latter unverified, so a reviewer's mutation
+(swapping the hardened construction for the permissive default inside
+`cli.py`) passed the whole suite undetected.
+
+`langgraph-checkpoint-sqlite` (3.1.1) is the one new direct dependency; it
+ships `py.typed`, type-checks clean under this project's `mypy --strict`
+with no override, and pulls in `aiosqlite` and `sqlite-vec` transitively —
+an async saver and a vector-search extension, respectively, that this
+codebase does not call anywhere. Recorded here so they are not first
+discovered in a `uv.lock` diff: only the package's synchronous `SqliteSaver`
+is used.
+
+**Known gaps carried into Unit 2d, so the owner does not meet either one
+first at a demo:**
+
+- `cli.py`'s `_sqlite_checkpointer` opens `sqlite3.connect(...)` with no
+  error translation. A real failure mode — disk full, permission denied, a
+  locked or corrupted database file — raises a bare `sqlite3.OperationalError`
+  or similar, which is neither `LabError` nor `RunRecordError`, so it
+  escapes `main`'s `except (LabError, RunRecordError)` and surfaces as an
+  unhandled traceback instead of this project's `FAIL <CODE> <message>`
+  contract. The store error type belongs to Unit 2c (the approval database
+  needs one too) and the crash/idempotency tests belong to Unit 2d, so the
+  translation lands with the tests that exercise it rather than being added
+  speculatively in Unit 2a.
+- `doctor.py`'s `ProjectPaths` has no accessor for the checkpoint database
+  path and no pre-flight write-probe for it, unlike the existing
+  `RUN_DIRECTORY_NOT_WRITABLE` check. Unit 2a's own actual need — the
+  directory existing before `_sqlite_checkpointer` opens a connection — is
+  already covered inline by `mkdir(parents=True, exist_ok=True)`, verified
+  against a fresh project with no `results/` directory
+  (`test_checkpointing.py::test_investigate_leaves_a_checkpoint_database_in_a_fresh_project`).
+  A doctor diagnostic for this database's writability is deferred alongside
+  the SQLite error-translation gap above, for the same reason: it exists to
+  pre-empt exactly the failure mode that gap still lets through, so the two
+  should land together.
+
+## Milestone 3 — Local retrieval and evidence-backed portfolio release
+
+**Status:** not started. Adds curated FTS5 runbooks, retrieval provenance,
+and injection/no-ground-truth-leakage tests — deferred here from Milestone 2
+by `TECHNICAL_SPEC.md` §12's *Amendment, Milestone 2*. Runs the fixed paired
+evaluation under the USD 2 cap, saves raw records and limitations, produces
+architecture and threat-model documents, verifies the clean source commit,
+and records a short diagnosis plus abstention/escalation demo.
 
 ## Superseded v1 evaluation design
 

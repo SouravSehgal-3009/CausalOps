@@ -14,7 +14,18 @@ Graph state is a JSON-only `TypedDict`: nothing here lives off-state.
 are both rebuilt fresh, inside a node, from state's `receipts`/`evidence`
 lists on every call that needs them -- there is no live object surviving
 between graph turns, so Milestone 2's SQLite-checkpointed resume needs no
-redesign of anything in this file.
+redesign of anything in this file. Unit 2a closes the one exception to that
+claim: `RunRecorder` used to be a factory-closure object shared and mutated
+across every node call, which would have lost every recorded event at a
+process boundary. Events are now a `state["events"]` list, rebuilt into a
+local `RunRecorder` by `_rebuild_recorder` at the top of each node exactly as
+`_rebuild_receipts` already did for receipts, and written back whole in that
+node's return -- the same "read the full field, extend it, return the full
+field" pattern `dispatch_tool` already used for `evidence`. Every node
+factory that touches the recorder takes two `Clock` parameters, not one:
+`clock` times domain data and `event_clock` times `RunEvent.at` only, kept
+apart so recording an event never perturbs a domain-timing read -- see
+`build_graph`'s docstring for the full reasoning.
 
 Two nodes decide whether the run continues, stops safely, or asks for a
 diagnosis; `final_report` never makes that decision, it only serializes
@@ -42,8 +53,10 @@ against. It closes when the live Claude adapter unit adds a second one.
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Protocol, TypedDict, cast
+from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -84,7 +97,7 @@ from causalops.prompts import (
     SYSTEM_TEXT,
     render_context,
 )
-from causalops.run_records import RunRecorder
+from causalops.run_records import RunEvent, RunRecorder
 from causalops.tool_calls import (
     NativeToolCall,
     parse_tool_call,
@@ -110,6 +123,14 @@ class GraphState(TypedDict):
     """
 
     investigation_id: str
+    # `TECHNICAL_SPEC.md:140-142` requires this as a distinct, immutable field
+    # alongside `investigation_id`/`thread_id`. In Unit 2a they are minted
+    # together and never diverge -- there is no resume path yet for them to
+    # diverge across. The distinction becomes load-bearing in Unit 2b, where
+    # the model-request idempotency key is `run_id + graph_phase +
+    # model_turn` (`TECHNICAL_SPEC.md:155-158`); this field exists now so
+    # that key has something stable to name.
+    run_id: str
     incident_id: str
     phase: str
     model_turn: int
@@ -121,6 +142,12 @@ class GraphState(TypedDict):
     seen_fingerprints: list[str]
     receipts: list[dict[str, JsonValue]]
     evidence: list[dict[str, JsonValue]]
+    # Every event any node has recorded so far, in order. A node rebuilds a
+    # local `RunRecorder` from this list (`_rebuild_recorder`), records its
+    # own events into that local copy, and returns the full extended list --
+    # the same pattern `receipts`/`evidence` already use. See the module
+    # docstring for why this replaced a shared closure-captured recorder.
+    events: list[dict[str, JsonValue]]
     pending_proposal: dict[str, JsonValue] | None
     assessment: dict[str, JsonValue] | None
     usage: dict[str, JsonValue] | None
@@ -150,6 +177,25 @@ def _rebuild_store(
 
 def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
     return [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
+
+
+def _rebuild_recorder(state: GraphState, clock: Clock) -> RunRecorder:
+    """A `RunRecorder` seeded with every event already in state, so the next
+    `.event(...)` call continues the same `sequence` numbering instead of
+    starting over. Takes whole state, the same shape `_rebuild_receipts`
+    takes, plus the one thing state itself cannot carry: a clock is a
+    runtime dependency, not domain data. `RunRecorder.recorded` is a plain
+    public list -- assigning it here is the same kind of reconstruction
+    `_rebuild_receipts` does through `ToolReceipt.model_validate`, just
+    without needing a dedicated "from events" constructor on `RunRecorder`
+    itself."""
+    recorder = RunRecorder(clock)
+    recorder.recorded = [RunEvent.model_validate(dump) for dump in state["events"]]
+    return recorder
+
+
+def _dump_events(recorder: RunRecorder) -> list[dict[str, JsonValue]]:
+    return [event.model_dump(mode="json") for event in recorder.events]
 
 
 def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
@@ -412,14 +458,18 @@ def _make_investigate(
     scope: IncidentScope,
     packet: InitialAlertPacket,
     budgets: Budgets,
+    *,
     clock: Clock,
+    # Deliberately not `clock`: see `build_graph`'s docstring for why event
+    # timestamps and domain-timing reads must not share ticks.
+    event_clock: Clock,
     model: ReplayToolCallingModel,
-    recorder: RunRecorder,
 ) -> GraphNode:
     def investigate(state: GraphState) -> dict[str, Any]:
         turn_index = state["model_turn"]
         stage = Stage.INITIAL_PLAN if turn_index == 0 else Stage.HYPOTHESIS_UPDATE
         schema = InitialPlan if turn_index == 0 else HypothesisUpdate
+        recorder = _rebuild_recorder(state, event_clock)
         recorder.event(GraphPhase.INVESTIGATE.value, "stage_started", stage=stage.value)
 
         receipts = _rebuild_receipts(state)
@@ -478,6 +528,7 @@ def _make_investigate(
                 "failure_reason": (
                     reason.value if reason is not None and turn_index == 0 else None
                 ),
+                "events": _dump_events(recorder),
             }
 
         try:
@@ -531,6 +582,7 @@ def _make_investigate(
                     proposal.model_dump(mode="json") if proposal else None
                 ),
                 "failure_reason": None,
+                "events": _dump_events(recorder),
             }
         except GraphBubbleUp:
             raise
@@ -560,6 +612,7 @@ def _make_investigate(
                 "usage": counters.usage,
                 "pending_proposal": None,
                 "failure_reason": ReasonCode.INTERNAL_ERROR.value,
+                "events": _dump_events(recorder),
             }
 
     return investigate
@@ -568,9 +621,12 @@ def _make_investigate(
 def _make_dispatch_tool(
     scope: IncidentScope,
     budgets: Budgets,
+    *,
     clock: Clock,
+    # Deliberately not `clock`: see `build_graph`'s docstring for why event
+    # timestamps and domain-timing reads must not share ticks.
+    event_clock: Clock,
     registry: Mapping[ToolName, ToolWrapper],
-    recorder: RunRecorder,
 ) -> GraphNode:
     def dispatch_tool(state: GraphState) -> dict[str, Any]:
         assert state["pending_proposal"] is not None
@@ -578,6 +634,7 @@ def _make_dispatch_tool(
         receipts = _rebuild_receipts(state)
         ledger = ReservationLedger.from_receipts(receipts, budgets.executed_tools)
         seen = set(state["seen_fingerprints"])
+        recorder = _rebuild_recorder(state, event_clock)
         recorder.event(
             GraphPhase.DISPATCH_TOOL.value,
             "proposal_received",
@@ -641,6 +698,7 @@ def _make_dispatch_tool(
                 "seen_fingerprints": sorted(seen),
                 "pending_proposal": None,
                 "evidence": evidence,
+                "events": _dump_events(recorder),
             }
         except GraphBubbleUp:
             raise
@@ -686,21 +744,29 @@ def _make_dispatch_tool(
                 "pending_proposal": None,
                 "evidence": [*state["evidence"], *recovered_evidence],
                 "failure_reason": ReasonCode.INTERNAL_ERROR.value,
+                "events": _dump_events(recorder),
             }
 
     return dispatch_tool
 
 
 def _make_normalize_evidence(
-    recorder: RunRecorder,
+    # Deliberately not `clock`: see `build_graph`'s docstring for why event
+    # timestamps and domain-timing reads must not share ticks. This node has
+    # no domain timing of its own, so it takes only this one.
+    event_clock: Clock,
 ) -> GraphNode:
     def normalize_evidence(state: GraphState) -> dict[str, Any]:
+        recorder = _rebuild_recorder(state, event_clock)
         recorder.event(
             GraphPhase.NORMALIZE_EVIDENCE.value,
             "evidence_normalized",
             count=len(state["evidence"]),
         )
-        return {"phase": GraphPhase.NORMALIZE_EVIDENCE.value}
+        return {
+            "phase": GraphPhase.NORMALIZE_EVIDENCE.value,
+            "events": _dump_events(recorder),
+        }
 
     return normalize_evidence
 
@@ -709,11 +775,15 @@ def _make_final_assessment(
     scope: IncidentScope,
     packet: InitialAlertPacket,
     budgets: Budgets,
+    *,
     clock: Clock,
+    # Deliberately not `clock`: see `build_graph`'s docstring for why event
+    # timestamps and domain-timing reads must not share ticks.
+    event_clock: Clock,
     model: ReplayToolCallingModel,
-    recorder: RunRecorder,
 ) -> GraphNode:
     def final_assessment(state: GraphState) -> dict[str, Any]:
+        recorder = _rebuild_recorder(state, event_clock)
         recorder.event(
             GraphPhase.FINAL_ASSESSMENT.value,
             "stage_started",
@@ -767,6 +837,7 @@ def _make_final_assessment(
                 "usage": counters.usage,
                 "assessment": None,
                 "failure_reason": reason_code.value,
+                "events": _dump_events(recorder),
             }
 
         try:
@@ -802,6 +873,7 @@ def _make_final_assessment(
                 "usage": counters.usage,
                 "assessment": parsed.model_dump(mode="json"),
                 "failure_reason": None,
+                "events": _dump_events(recorder),
             }
         except GraphBubbleUp:
             raise
@@ -878,20 +950,45 @@ def build_graph(
     clock: Clock,
     model: ReplayToolCallingModel,
     dispatch_registry: Mapping[ToolName, ToolWrapper],
-    recorder: RunRecorder,
+    checkpointer: BaseCheckpointSaver[str],
+    *,
+    event_clock: Clock,
 ) -> CompiledStateGraph[GraphState, None, GraphState, GraphState]:
+    """`clock` times domain data -- budget expiry, tool duration, timestamps
+    a report or a citation might carry. `event_clock` times `RunEvent.at`
+    only. They are the same function in production (`cli.py` passes
+    `utc_now` for both), but keeping them as distinct parameters means
+    recording an event never perturbs a reading `clock` would otherwise have
+    produced -- book-keeping does not compete with domain data for ticks off
+    the same clock. `test_graph_frozen_reports.py` is the reason this
+    matters operationally, not just in principle: its `StepClock` advances
+    on every read regardless of purpose, so entangling the two would shift
+    evidence timestamps by however many events happened to be recorded
+    first, for a reason that has nothing to do with the evidence itself.
+    """
     graph: StateGraph[GraphState, None, GraphState, GraphState] = StateGraph(GraphState)
     graph.add_node(
-        "investigate", _make_investigate(scope, packet, budgets, clock, model, recorder)
+        "investigate",
+        _make_investigate(
+            scope, packet, budgets, clock=clock, event_clock=event_clock, model=model
+        ),
     )
     graph.add_node(
         "dispatch_tool",
-        _make_dispatch_tool(scope, budgets, clock, dispatch_registry, recorder),
+        _make_dispatch_tool(
+            scope,
+            budgets,
+            clock=clock,
+            event_clock=event_clock,
+            registry=dispatch_registry,
+        ),
     )
-    graph.add_node("normalize_evidence", _make_normalize_evidence(recorder))
+    graph.add_node("normalize_evidence", _make_normalize_evidence(event_clock))
     graph.add_node(
         "final_assessment",
-        _make_final_assessment(scope, packet, budgets, clock, model, recorder),
+        _make_final_assessment(
+            scope, packet, budgets, clock=clock, event_clock=event_clock, model=model
+        ),
     )
     graph.add_node("final_report", _make_final_report(budgets, clock))
 
@@ -918,7 +1015,7 @@ def build_graph(
     graph.add_edge("final_assessment", "final_report")
     graph.add_edge("final_report", END)
 
-    return graph.compile(checkpointer=InMemorySaver())
+    return graph.compile(checkpointer=checkpointer)
 
 
 def run_graph_investigation(
@@ -930,11 +1027,57 @@ def run_graph_investigation(
     recorder: RunRecorder,
     budgets: Budgets = DEFAULT_BUDGETS,
     clock: Clock = utc_now,
+    *,
+    investigation_id: str | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> InvestigationResult:
-    investigation_id = new_opaque_id()
+    """Run one investigation to completion.
+
+    `investigation_id` doubles as LangGraph's own `thread_id`
+    (`TECHNICAL_SPEC.md:140-142`). It is `None` for every caller today --
+    minting a fresh one is what every existing caller already gets -- and
+    becomes a real input once Milestone 2's resume path needs to reopen a
+    specific thread rather than start a new one.
+
+    `checkpointer` defaults to a fresh, process-local `InMemorySaver()` so
+    every existing caller (tests included) keeps today's behaviour exactly:
+    nothing is written to disk unless a caller (`cli.py`, for the real CLI
+    path) explicitly supplies a durable one.
+    """
+    if investigation_id is None:
+        investigation_id = new_opaque_id()
+    # `recorder.clock` -- not the `clock` parameter above -- times every
+    # `RunEvent`. Before this unit, the caller's `RunRecorder` was the only
+    # thing that ever called `.event(...)`, so its own clock never shared
+    # ticks with `clock`, which times domain data (budget expiry, tool
+    # duration, evidence timestamps). Rebuilding a recorder from state inside
+    # each node must preserve that same isolation -- see `build_graph`'s
+    # docstring for why entangling the two is an observable behaviour change,
+    # not just a style choice.
+    event_clock = recorder.clock
+    # `run_id` is internal bookkeeping -- unlike `investigation_id`, evidence
+    # IDs, and receipt IDs, it is never cited by a model, displayed in a
+    # report, or looked up by an owner. It is minted with `uuid4().hex`
+    # directly rather than through `new_opaque_id()`, the shared minting
+    # function those other, user-visible IDs go through: an identifier
+    # nothing outside this function reads has no business drawing from the
+    # same counter as one a citation or an audit trail depends on.
+    #
+    # (Confirmed, not just argued: `evidence.py`/`graph.py`/`tool_wrappers.py`
+    # all bind `new_opaque_id()` to one name each, and
+    # `test_graph_frozen_reports.py`'s `_install_counting_ids` patches all
+    # three to a single shared counter so its literals are deterministic --
+    # routing `run_id` through that counter shifts every ID minted
+    # afterward and fails 5 tests, verified by mutation.)
+    run_id = uuid4().hex
     started_at = clock()
+    seed_recorder = RunRecorder(event_clock)
+    seed_recorder.event(
+        GraphPhase.CREATED.value, "investigation_started", incident=scope.incident_id
+    )
     initial_state: GraphState = {
         "investigation_id": investigation_id,
+        "run_id": run_id,
         "incident_id": scope.incident_id,
         "phase": GraphPhase.CREATED.value,
         "model_turn": 0,
@@ -946,18 +1089,23 @@ def run_graph_investigation(
         "seen_fingerprints": [],
         "receipts": [],
         "evidence": [record.model_dump(mode="json") for record in initial_evidence],
+        "events": _dump_events(seed_recorder),
         "pending_proposal": None,
         "assessment": None,
         "usage": None,
         "failure_reason": None,
         "report": None,
     }
-    recorder.event(
-        GraphPhase.CREATED.value, "investigation_started", incident=scope.incident_id
-    )
 
     compiled = build_graph(
-        scope, packet, budgets, clock, model, dispatch_registry, recorder
+        scope,
+        packet,
+        budgets,
+        clock,
+        model,
+        dispatch_registry,
+        checkpointer if checkpointer is not None else InMemorySaver(),
+        event_clock=event_clock,
     )
     config: RunnableConfig = {
         "recursion_limit": GRAPH_RECURSION_LIMIT,
@@ -970,6 +1118,37 @@ def run_graph_investigation(
         # A control-flow signal (interrupt, drain, parent command), not a
         # failure -- Milestone 2 adds `interrupt()`, and this must keep
         # propagating rather than being turned into a safe report.
+        #
+        # It must still not lose every event recorded before the signal
+        # fired. The caller's `recorder` is empty at this exact point: the
+        # seed event went to `seed_recorder`, not `recorder`, and every node
+        # event since then lives only in state -- synced onto `recorder` at
+        # this function's normal return below, which a `raise` never
+        # reaches. Reading the last checkpoint here and syncing from it is a
+        # data-recovery step, the same one the `except Exception` branch
+        # below already performs to build a report; it is not a write, so it
+        # does not conflict with an interrupt node needing to be
+        # side-effect-free before `interrupt()`.
+        #
+        # This read is I/O against the same database `checkpointer` uses,
+        # so it can itself fail -- a locked, full, or corrupt database
+        # raises `sqlite3.OperationalError`, not `GraphBubbleUp`. The
+        # control-flow signal must survive a checkpoint-read failure and
+        # keep propagating either way: losing a best-effort event-recovery
+        # step is acceptable, but replacing the signal with an unhandled
+        # database error that `main` cannot format into `FAIL <CODE>
+        # <message>` is not. This is the one place in this file that reads
+        # a checkpoint outside a context already prepared to build a report
+        # from what it finds, so it is the one place that read needs its
+        # own guard.
+        try:
+            checkpoint = compiled.get_state(config).values or initial_state
+            state = cast(GraphState, checkpoint)
+            recorder.recorded = [
+                RunEvent.model_validate(dump) for dump in state["events"]
+            ]
+        except Exception:
+            pass
         raise
     except Exception as error:
         # Unmodeled failure: a node bug, or GraphRecursionError (subclasses
@@ -978,18 +1157,45 @@ def run_graph_investigation(
         # `investigate`, and `final_assessment` above already turn their own
         # crashes into a normal state update -- so there is no node-local
         # object to rescue here, only the last checkpoint LangGraph itself
-        # wrote.
-        recorder.event(
-            GraphPhase.FINAL_REPORT.value, "internal_error", error=type(error).__name__
-        )
+        # wrote. That checkpoint carries its own `events` list, so the
+        # `internal_error` event is folded into a recorder rebuilt from it,
+        # the same way every node above records into state rather than onto
+        # this function's own `recorder` parameter directly.
+        #
+        # This fold is not itself a durable write: `state` here is a local
+        # dict, never passed back through `checkpointer.put(...)`, so the
+        # `internal_error` event reaches this run's report and the caller's
+        # `recorder` mirror below, but not the checkpoint store itself. A
+        # second process reopening this thread's checkpoint after this crash
+        # would not see it -- there is nothing to resume into anyway, since
+        # this path is a terminal `FAILED_SAFE`, not a pause.
         checkpoint = compiled.get_state(config).values or initial_state
         state = cast(GraphState, checkpoint)
+        crash_recorder = _rebuild_recorder(state, event_clock)
+        crash_recorder.event(
+            GraphPhase.FINAL_REPORT.value, "internal_error", error=type(error).__name__
+        )
+        state = cast(GraphState, {**state, "events": _dump_events(crash_recorder)})
         report = _build_report(
             state, budgets, clock, force_failure_reason=ReasonCode.INTERNAL_ERROR
         )
         raw_state = {**state, "report": report.model_dump(mode="json")}
 
     final_state = cast(GraphState, raw_state)
+    # The caller's `recorder` never runs live inside a node -- every event
+    # above was recorded into a state-rebuilt local recorder instead. This
+    # assignment REPLACES `recorder.recorded` wholesale with the complete
+    # event list from state; it does not append to whatever the caller's
+    # object already held. That is safe today because every caller
+    # constructs a fresh, empty `RunRecorder` immediately before calling
+    # this function, so replace and extend are indistinguishable in
+    # practice -- but a future caller that reuses a `RunRecorder` across
+    # calls would lose whatever it held before this one. Every existing
+    # caller that reads `recorder.events` after this call still sees
+    # exactly what it saw before this unit.
+    recorder.recorded = [
+        RunEvent.model_validate(dump) for dump in final_state["events"]
+    ]
     report = InvestigationReport.model_validate(final_state["report"])
     store = _rebuild_store(final_state["incident_id"], final_state["evidence"])
     receipts = tuple(_rebuild_receipts(final_state))

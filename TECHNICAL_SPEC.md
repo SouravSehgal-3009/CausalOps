@@ -360,14 +360,33 @@ a separate portfolio milestone.
    policy wrapper, atomic budget reservation, and the existing report/scorer.
    Then wrap all four tools and retire duplicate orchestration only after
    conformance parity.
-2. **Durable escalation and local retrieval.** Add checkpoint/operation IDs,
+2. **Durable escalation and owner approval.** Add checkpoint/operation IDs,
    CLI interrupt resume, approval routing, and crash/idempotency tests. Add
    curated FTS5 runbooks, retrieval provenance, and injection/no-ground-truth
    leakage tests. Pinecone remains a post-milestone optional experiment.
-3. **Evidence-backed portfolio release.** Run the fixed paired evaluation under
-   the USD 2 cap, save raw records and limitations, produce architecture and
-   threat-model documents, verify the clean source commit, and record a short
-   diagnosis plus abstention/escalation demo.
+
+   *Amendment, Milestone 2:* the original wording assigns curated FTS5
+   runbooks, retrieval provenance, and injection/no-ground-truth-leakage
+   tests to this milestone, under the title "Durable escalation and local
+   retrieval." Milestone 2 now ships checkpoint/operation IDs, CLI interrupt
+   resume, approval routing, and crash/idempotency tests only; FTS5
+   retrieval and its associated tests defer to Milestone 3, whose title
+   gains "local retrieval" in turn so the deferred work still has a named
+   home. This milestone is retitled "Durable escalation and owner approval"
+   to match — a title that still promised retrieval after the content moved
+   out from under it would contradict the very amendment describing that
+   move. One further consequence: §8's four escalation triggers land with
+   three of four in Milestone 2 -- `RETRIEVAL_COVERAGE_INSUFFICIENT`
+   requires retrieval and arrives with it. What did not change: the
+   escalation interrupt, approval routing, and crash/idempotency tests
+   remain Milestone 2 work as originally scoped.
+3. **Local retrieval and evidence-backed portfolio release.** Add curated
+   FTS5 runbooks, retrieval provenance, and injection/no-ground-truth-leakage
+   tests, deferred here from Milestone 2 by the amendment above. Run the
+   fixed paired evaluation under the USD 2 cap, save raw records and
+   limitations, produce architecture and threat-model documents, verify the
+   clean source commit, and record a short diagnosis plus
+   abstention/escalation demo.
 
 Every work unit must preserve a runnable, tested existing path. Do not begin a
 later milestone while a P0/P1 finding, owner disposition, or regression remains
