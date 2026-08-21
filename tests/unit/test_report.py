@@ -11,6 +11,7 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
     RootCauseCode,
     ToolOutcome,
     ToolReceipt,
@@ -21,7 +22,12 @@ from causalops.report import REPLAY_CAVEAT, render_report
 VERSIONS = Versions(prompt_version="1", policy_version="1", tool_registry_version="1")
 
 
-def diagnosed_report(cited: tuple[str, ...]) -> InvestigationReport:
+def diagnosed_report(
+    cited: tuple[str, ...],
+    runbook_citations: tuple[str, ...] = (),
+    runbook_passage_ids: tuple[str, ...] = (),
+    retrieval_mode: RetrievalMode = RetrievalMode.DISABLED,
+) -> InvestigationReport:
     return InvestigationReport(
         investigation_id="inv-1",
         incident_id=INCIDENT_ID,
@@ -31,6 +37,7 @@ def diagnosed_report(cited: tuple[str, ...]) -> InvestigationReport:
             disposition=ModelDisposition.DIAGNOSED,
             root_cause=RootCauseCode.CONFIG_CHANGE,
             supporting_evidence_ids=cited,
+            runbook_citations=runbook_citations,
             uncertainty="the change list is short",
             next_step="ask the owner to confirm the setting",
         ),
@@ -44,6 +51,8 @@ def diagnosed_report(cited: tuple[str, ...]) -> InvestigationReport:
         tools_executed=2,
         invalid_responses=0,
         final_context_digest="a" * 64,
+        retrieval_mode=retrieval_mode,
+        runbook_passage_ids=runbook_passage_ids,
     )
 
 
@@ -138,6 +147,29 @@ def test_the_budget_section_reports_what_was_spent() -> None:
     assert "- Model calls: 3 of 4" in text
     assert "- Checks executed: 2 of 2" in text
     assert "- Token usage: not reported by this model" in text
+    assert "- Runbook retrieval mode: `disabled`" in text
+
+
+def test_no_guidance_section_when_retrieval_never_ran() -> None:
+    text = render_report(diagnosed_report(("evidence-1",)), [], [], "replay")
+
+    assert "## Guidance it consulted" in text
+    assert "No runbook guidance was retrieved." in text
+
+
+def test_the_guidance_section_marks_which_passage_was_cited() -> None:
+    report = diagnosed_report(
+        ("evidence-1",),
+        runbook_citations=("runbook-1",),
+        runbook_passage_ids=("runbook-1", "runbook-2"),
+        retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+    )
+    text = render_report(report, [], [], "replay")
+
+    assert "- Runbook retrieval mode: `fts5_lexical`" in text
+    assert "- `runbook-1` (cited)" in text
+    assert "- `runbook-2`" in text
+    assert "- `runbook-2` (cited)" not in text
 
 
 def test_the_report_carries_no_evaluator_words() -> None:

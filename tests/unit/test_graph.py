@@ -9,6 +9,7 @@ from fake_incident import (
     WINDOW_START,
     RecordingLogsBackend,
     RecordingMetricBackend,
+    RecordingRunbooksBackend,
     StepClock,
     UsageReportingModel,
     alert_packet,
@@ -22,6 +23,7 @@ from fake_incident import (
     registry_with,
     replay_model,
     resume_graph_run,
+    runbooks_proposal,
     update_json,
 )
 from langchain_core.runnables import RunnableConfig
@@ -49,7 +51,9 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
     RootCauseCode,
+    RunbookCheckOutcome,
     ToolOutcome,
     ToolProposal,
 )
@@ -57,7 +61,9 @@ from causalops.evaluation import count_control
 from causalops.evidence import build_evidence
 from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
+from causalops.report import render_report
 from causalops.run_records import RunRecorder
+from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.tool_wrappers import ToolWrapper, query_logs_wrapper
 from causalops.tools import LogFilter, QueryLogsArguments, ToolName
 
@@ -1238,6 +1244,311 @@ def test_tool_unavailable_outranks_a_second_trigger_when_both_apply(
     # Confirms the second trigger's own condition genuinely held too --
     # this is not passing merely because the second trigger was absent.
     assert paused.remaining_check_count > 0
+
+
+def test_search_runbooks_runs_end_to_end_through_the_real_backend(
+    tmp_path: Path,
+) -> None:
+    """Every other `search_runbooks` test in this file wires a spy
+    (`RecordingRunbooksBackend`). This is the one place the fifth tool runs
+    against the real `RunbookIndex`/`run_runbook_search` -- the same
+    backend `cli.py` wires -- proving the whole path end to end: real FTS5
+    retrieval, through the policy wrapper, into graph state, onto the
+    report, not just each piece independently against a double."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(
+        run_search=lambda arguments, scope: run_runbook_search(
+            arguments, RunbookIndex()
+        )
+    )
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry,
+        RunRecorder(StepClock()),
+        Budgets(),
+        StepClock(),
+    )
+
+    assert isinstance(result, InvestigationResult)
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.retrieval_mode is RetrievalMode.FTS5_LEXICAL
+    assert report.tools_executed == 1
+    assert len(report.runbook_passage_ids) > 0
+    # Real retrieved content, not a spy's canned passage, reached the model.
+    assert "downstream" in model.requests[-1].context_text.lower()
+    rendered = render_report(report, result.evidence, result.receipts, "replay")
+    assert "fts5_lexical" in rendered
+
+
+def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
+    tmp_path: Path,
+) -> None:
+    """P2 finding from review: `_escalation_reason`'s `retrieval_attempted`
+    check narrows to `ALLOWED`/`SETTLED` receipts specifically so a *denied*
+    `search_runbooks` proposal can never read as "attempted, zero
+    passages." `limit` is model-chosen (`SearchRunbooksArguments.limit`),
+    so without that narrowing a model could manufacture an owner-facing
+    escalation -- or worse, mislabel a policy denial as a coverage problem
+    -- just by asking for more passages than the budget allows. This
+    proposes `limit=6` against the default budget of `5`: `RESULT_LIMIT_
+    EXCEEDED`, no slot spent, the run continues with an ordinary second
+    check and must reach a plain `InvestigationResult`, not a pause.
+
+    This test exercises the `ALLOWED` half of that narrowing; `SETTLED` is
+    correct defensive narrowing but currently unreachable, not demonstrated
+    here -- the only producer of an `ALLOWED`-but-`RESERVED` receipt is
+    `dispatch_tool`'s own crash handler, which always sets
+    `failure_reason`, and every router bypasses escalation entirely once
+    that is set (`route_after_investigate`/`route_after_normalize`/
+    `route_after_final_assessment`'s shared `if state["failure_reason"] is
+    not None: return "final_report"` guard). Forcing that state here would
+    mean fabricating a receipt shape the graph itself cannot produce."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal(limit=6))],
+        "hypothesis_update": [update_json(proposal=logs_proposal())],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_logs=RecordingLogsBackend())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry,
+        RunRecorder(StepClock()),
+        Budgets(),
+        StepClock(),
+    )
+
+    assert isinstance(result, InvestigationResult)
+    assert result.report.disposition is Disposition.DIAGNOSED
+    denied = [
+        receipt
+        for receipt in result.receipts
+        if receipt.tool is ToolName.SEARCH_RUNBOOKS
+    ]
+    assert len(denied) == 1
+    assert denied[0].policy_result is PolicyResult.DENIED
+    assert denied[0].reason_code is ReasonCode.RESULT_LIMIT_EXCEEDED
+
+
+def test_a_zero_passage_runbook_search_triggers_retrieval_coverage_insufficient(
+    tmp_path: Path,
+) -> None:
+    """`TECHNICAL_SPEC.md` §8's fourth trigger, reachable for the first time
+    in Unit 3a. A `search_runbooks` call that is allowed and settles but
+    returns zero passages must pause the run even though the diagnosis
+    itself is otherwise ordinary -- `DIAGNOSED`, no contrary citations, no
+    remaining-budget abstention -- isolating this trigger from the other
+    three the same way `test_conflicting_evidence_triggers_escalation`
+    isolates `CONFLICTING_EVIDENCE` above."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json()],
+    }
+    empty_search = RecordingRunbooksBackend(
+        outcome=RunbookCheckOutcome(
+            outcome=ToolOutcome.EXECUTED,
+            passages=(),
+            retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+            duration_ms=5,
+        )
+    )
+
+    paused, compiled, config, _ = _escalate(
+        tmp_path, script, registry=registry_with(run_search=empty_search)
+    )
+
+    assert paused.reason is EscalationReason.RETRIEVAL_COVERAGE_INSUFFICIENT
+
+    # Correctness's M15: seeding `retrieval_mode` as `FTS5_LEXICAL` instead
+    # of `DISABLED` at graph construction left the whole suite green with
+    # nothing catching it. The frozen-report tests now pin the negative
+    # case (never dispatched -> `DISABLED`); this is the positive case on
+    # the same field -- a zero-passage search still genuinely ran in
+    # `fts5_lexical` mode, and the *finalized* report, after the pause
+    # resolves, must still say so.
+    settled = resume_graph_run(compiled, config, "accept")
+    assert settled.report.retrieval_mode is RetrievalMode.FTS5_LEXICAL
+
+
+def test_retrieval_coverage_insufficient_outranks_insufficient_evidence(
+    tmp_path: Path,
+) -> None:
+    """`_escalation_reason` checks `RETRIEVAL_COVERAGE_INSUFFICIENT` before
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`, mirroring
+    `test_tool_unavailable_outranks_a_second_trigger_when_both_apply` above
+    for the newest pair of triggers: this scenario satisfies both at once
+    (a zero-passage search that still leaves a slot open, and an
+    abstention), so which one comes back proves the order is enforced, not
+    incidental."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal(limit=1))],
+        "hypothesis_update": [update_json(stop_reason="no second check available")],
+        "final_assessment": [
+            assessment_json(
+                disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                root_cause=RootCauseCode.UNDETERMINED,
+                supporting=(),
+            )
+        ],
+    }
+    empty_search = RecordingRunbooksBackend(
+        outcome=RunbookCheckOutcome(
+            outcome=ToolOutcome.EXECUTED,
+            passages=(),
+            retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+            duration_ms=5,
+        )
+    )
+
+    paused, _, _, _ = _escalate(
+        tmp_path, script, registry=registry_with(run_search=empty_search)
+    )
+
+    assert paused.reason is EscalationReason.RETRIEVAL_COVERAGE_INSUFFICIENT
+    # Confirms the second trigger's own condition genuinely held too -- this
+    # is not passing merely because the second trigger was absent.
+    assert paused.remaining_check_count > 0
+
+
+def test_a_non_empty_runbook_search_does_not_escalate(tmp_path: Path) -> None:
+    """The negative case for the test above: the same shape of run, but the
+    search actually finds a passage, so `RETRIEVAL_COVERAGE_INSUFFICIENT`
+    must not fire and the investigation reaches a normal, unpaused report."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_search=RecordingRunbooksBackend())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry,
+        RunRecorder(StepClock()),
+        Budgets(),
+        StepClock(),
+    )
+
+    assert isinstance(result, InvestigationResult)
+    assert result.report.disposition is Disposition.DIAGNOSED
+    assert result.report.retrieval_mode is RetrievalMode.FTS5_LEXICAL
+
+
+def test_an_unresolved_runbook_citation_is_a_limitation_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """Owner-approved redesign of this unit's original pre-edit proposal:
+    both reviewers rejected routing a forged runbook citation through
+    `ReasonCode.FORGED_EVIDENCE_REFERENCE`, because that reason nulls the
+    assessment (`final_assessment`'s own `failed_state`) and would turn a
+    correct, fully evidence-backed diagnosis into `FAILED_SAFE` over a
+    citation that cannot affect whether the diagnosis is right --
+    `evaluation.py`'s `diagnosis_correct` reads only `report.root_cause`.
+    A model that cites a `passage_id` this run never actually retrieved
+    (a hallucinated reference, not the real evidence-forgery threat) must
+    still reach `DIAGNOSED`, with the gap named in `limitations` instead --
+    and, per review, in the audit trail too: `final_report`'s own
+    `runbook_citation_unresolved` event, with its count, not just the
+    owner-readable limitation text."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [
+            assessment_json(runbook_citations=("runbook-never-retrieved",))
+        ],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    recorder = RunRecorder(StepClock())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry_with(),
+        recorder,
+        Budgets(),
+        StepClock(),
+    )
+
+    assert isinstance(result, InvestigationResult)
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.reason_code is None
+    assert report.assessment is not None
+    assert report.assessment.runbook_citations == ("runbook-never-retrieved",)
+    assert any(
+        "could not be resolved" in limitation for limitation in report.limitations
+    )
+    unresolved_events = [
+        event
+        for event in recorder.events
+        if event.name == "runbook_citation_unresolved"
+    ]
+    assert len(unresolved_events) == 1
+    assert unresolved_events[0].fields["count"] == 1
+
+
+def test_a_genuinely_retrieved_citation_is_not_flagged_as_unresolved(
+    tmp_path: Path,
+) -> None:
+    """Falsifies the test above: cites the passage a `search_runbooks` call
+    genuinely retrieved this run, and the same shape of check must find it
+    resolved -- no limitation, no `runbook_citation_unresolved` event.
+    Review's own words: 'inverting the resolution check so every citation
+    reports unresolved survives' the suite without this test, because
+    nothing else cites a passage that *was* retrieved -- an inverted check
+    would accuse the model of forging a citation on every honest
+    retrieval-arm run and nothing here would catch it."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json(runbook_citations=("runbook-test-01",))],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_search=RecordingRunbooksBackend())
+    recorder = RunRecorder(StepClock())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry,
+        recorder,
+        Budgets(),
+        StepClock(),
+    )
+
+    assert isinstance(result, InvestigationResult)
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.assessment is not None
+    assert report.assessment.runbook_citations == ("runbook-test-01",)
+    assert not any(
+        "could not be resolved" in limitation for limitation in report.limitations
+    )
+    assert not any(
+        event.name == "runbook_citation_unresolved" for event in recorder.events
+    )
 
 
 def test_resuming_does_not_repeat_the_model_call_the_pause_already_spent(

@@ -226,6 +226,19 @@ curated, application-visible synthetic runbook corpus. The corpus must exclude
 expected answers, evaluator-only predicates, semantic scenario keys, secrets,
 and controller-only instructions.
 
+  *Amendment, Unit 3a:* the original wording's `query` implied a free-text
+  argument. `tools.py`'s own module docstring already promises "raw ...
+  queries ... have no representation here and cannot be proposed," and a
+  free-text `query` field would have made `search_runbooks` the one tool
+  that broke that promise instead of merely constraining it. The shipped
+  tool takes a closed `RunbookTopic` enum instead: `SearchRunbooksArguments`
+  is `{topic: RunbookTopic, limit: int}`, and the module-private
+  `_TOPIC_QUERIES` table (`runbooks.py`) is the only place a topic becomes
+  an FTS5 `MATCH` string -- written by application code, never by a model.
+  The corpus's small, curated size (this section, above) is what makes a
+  fixed topic set sufficient; nothing about `search_runbooks(query, limit)`
+  changed beyond how `query` is typed.
+
 The default mode is SQLite FTS5 and must be called **lexical retrieval**.
 Pinecone Starter may be enabled as an opt-in semantic-retrieval experiment only
 after the local project is complete. The project must run, test, and demo
@@ -241,6 +254,19 @@ passage_id, content, source_version, content_hash, score, retrieval_mode
 CLI report, audit record, and evaluation record must surface this value. Never
 silently fall back, mix modes in one benchmark aggregate, or represent FTS5 as
 semantic retrieval. `disabled` means no runbook passage was retrieved.
+
+  *Amendment, Unit 3a:* "no runbook passage was retrieved" reads
+  ambiguously between "retrieval was never attempted" and "retrieval ran
+  and found nothing." The shipped implementation resolves it to the first
+  reading: `disabled` means no `search_runbooks` proposal was ever allowed
+  and settled this run. A proposal that settled in `fts5_lexical` mode and
+  retrieved zero passages stays `fts5_lexical`, not `disabled` -- that case
+  is `RETRIEVAL_COVERAGE_INSUFFICIENT` (§8) instead, a different fact about
+  the same run that a report claiming `disabled` would erase. This
+  distinction is load-bearing for §10's ablation partitions and for the
+  "never mix modes in one benchmark aggregate" rule immediately above: a
+  zero-hit lexical run and a never-attempted run are not the same
+  condition and must not collapse into the same label.
 
 Retrieved telemetry and runbook text is untrusted data. Prompts isolate it as
 quoted evidence. It cannot alter system policy, register tools, extend scope,

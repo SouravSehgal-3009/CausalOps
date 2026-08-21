@@ -1,0 +1,55 @@
+{
+  "corpus_version": "1",
+  "passages": [
+    {
+      "passage_id": "runbook-gateway-errors-01",
+      "source_version": "1",
+      "content": "When gateway error rates climb, check whether the errors cluster on one endpoint or spread across all traffic. A narrow cluster usually traces to a single dependency; a broad rise across every endpoint points to something shared, such as a recent rollout or a saturated shared resource."
+    },
+    {
+      "passage_id": "runbook-gateway-errors-02",
+      "source_version": "1",
+      "content": "Cross-reference an error spike against the change log for the affected service first. A rollout that shipped in the same window is the fastest lead to check, before assuming the cause is load-related."
+    },
+    {
+      "passage_id": "runbook-gateway-latency-01",
+      "source_version": "1",
+      "content": "Elevated p95 latency without a matching error spike usually means requests still succeed but wait longer -- for a downstream call, a lock, or a busy connection pool. Check downstream timeout metrics before assuming the gateway itself slowed down."
+    },
+    {
+      "passage_id": "runbook-gateway-latency-02",
+      "source_version": "1",
+      "content": "A latency rise that tracks a downstream service's own timeout rate suggests the gateway is absorbing a slow dependency rather than being slow itself. Compare the two timeseries before narrowing further."
+    },
+    {
+      "passage_id": "runbook-downstream-timeouts-01",
+      "source_version": "1",
+      "content": "A burst of downstream timeouts followed by a growing retry rate can amplify itself: each timeout triggers a retry, which adds load to an already struggling dependency, which causes more timeouts. Check whether retry volume is rising faster than the underlying request volume."
+    },
+    {
+      "passage_id": "runbook-downstream-timeouts-02",
+      "source_version": "1",
+      "content": "If timeouts concentrate on one downstream service while the others stay healthy, the fix is scoped to that one dependency, not the gateway. Confirm which service is timing out before proposing a broader change."
+    },
+    {
+      "passage_id": "runbook-resource-pool-pressure-01",
+      "source_version": "1",
+      "content": "A connection or worker pool running near its ceiling shows up as rising queue wait time well before requests start failing outright. Check pool utilization alongside latency, not error rate alone -- pressure often shows up as slowness first."
+    },
+    {
+      "passage_id": "runbook-resource-pool-pressure-02",
+      "source_version": "1",
+      "content": "Pool pressure frequently follows a change that increased how long each request holds a slot -- a slower downstream call, a larger query, or a lock held longer than usual. Look for what changed in the request path before assuming raw traffic growth is the cause."
+    },
+    {
+      "passage_id": "runbook-recent-config-changes-01",
+      "source_version": "1",
+      "content": "A configuration change landing right before a symptom starts is the highest-value lead to check first: line up the change timestamp against when the symptom timeseries actually turns, not just when the alert fired."
+    },
+    {
+      "passage_id": "runbook-recent-config-changes-02",
+      "source_version": "1",
+      "content": "Not every change near an incident's start caused it -- confirm the change actually touched the affected service, or a service directly upstream of it, before treating the timing alone as proof."
+    }
+  ]
+}

@@ -650,9 +650,9 @@ only structured decisions, short summaries, and evidence references.
 
 ## Investigator tools and policy
 
-v1 implements exactly these four read-only tools. `TECHNICAL_SPEC.md` §7
-adds a fifth, optional `search_runbooks` retrieval tool for Milestone 3; it
-is not implemented yet.
+v1 implemented the first four read-only tools. Milestone 3's Unit 3a adds
+the fifth, `search_runbooks`, over a small curated corpus -- optional in the
+sense that a run may never dispatch it, not in the sense that it is unbuilt.
 
 | Tool | Typed input and backend |
 |---|---|
@@ -660,10 +660,14 @@ is not implemented yet.
 | `query_logs` | Registered filter ID, service, bounded window, and row limit; scans active-run JSONL |
 | `list_recent_changes` | Service and bounded window; reads the active-run change manifest |
 | `get_topology` | Active incident ID; reads the active-run topology manifest |
+| `search_runbooks` | Registered `RunbookTopic` and passage limit; queries an in-memory SQLite FTS5 index built from `runbook_corpus.json` |
 
 The model selects registered template IDs and typed parameters. Application
-code constructs PromQL and log predicates. The model cannot submit raw shell,
-SQL, PromQL, URLs, paths, code, or infrastructure manifests.
+code constructs PromQL and log predicates; for `search_runbooks`, application
+code constructs the FTS5 `MATCH` query from the topic -- `query` is a closed
+enum, not free text, so nothing about this fifth tool weakens the same claim
+for the other four. The model cannot submit raw shell, SQL, PromQL, URLs,
+paths, code, or infrastructure manifests.
 
 Policy denies and records:
 
@@ -1426,7 +1430,7 @@ is not.
 
 - The `interrupt()` payload itself carries `reason`, `evidence_ids`, and
   `remaining_check_count`, but not `thread_id`/`run_id`/`checkpoint_id` —
-  all three `TECHNICAL_SPEC.md:272-273` names as part of the payload. All
+  all three `TECHNICAL_SPEC.md:298-299` names as part of the payload. All
   three are recoverable by any second process that already knows the
   thread id (which it must, to call `compiled.get_state(config)` at all)
   and are attached by `run_graph_investigation` when assembling
@@ -1932,7 +1936,7 @@ wrote. The §5 amendment landed first in the document and pushed 2c's own
 `*Amendment, Unit 2c:*` paragraph from `:166` to `:174` — so by the time
 this unit's own §8 amendment was written, further down the same file, and
 cited that paragraph as "the same structural gap `:166`'s Unit 2c amendment
-recorded" (twice, `TECHNICAL_SPEC.md:298` and `:305`), the `:166` in that
+recorded" (twice, `TECHNICAL_SPEC.md:324` and `:331`), the `:166` in that
 new text was already wrong the moment it was typed, before this unit ever
 ran a citation sweep. Fixed to `:174` at both sites. The lesson `CLAUDE.md`
 already records from Unit 2c — "when an amendment moves spec content,

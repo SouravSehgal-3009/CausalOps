@@ -61,11 +61,23 @@ What each test pins, and what it does not:
   test machine is fast. This file's own stated contract is why fixing it
   here is legitimate rather than a quiet literal update -- see
   `TECHNICAL_OVERVIEW.md`'s Milestone 2 section for the full record. No
-  other literal in this file moved: ids, digests, disposition, receipt
-  shapes and evidence kinds are unaffected, and
+  other literal moved at that unit: ids, digests, disposition, receipt
+  shapes and evidence kinds were unaffected, and
   `test_a_simulated_slow_machine_still_matches_the_frozen_report` below
   reproduces the Windows measurement directly so the fix is provable on any
   machine, not just a slow one.
+
+**Unit 3a moves every `final_context_digest` literal below, and nothing
+else.** `SYSTEM_TEXT` (`prompts.py`) gained one sentence distinguishing
+runbook guidance from incident evidence, so the model correctly cites
+retrieved passages separately once `search_runbooks` exists. The digest is
+`digest_text(system_text + context_text + repair_errors)`
+(`_render_stage_request`), and `system_text` is identical across every
+stage in every scenario here, so that one sentence shifts every digest in
+this file -- a real, named reason, not drift. None of the five scenarios
+below ever proposes `search_runbooks` (confirmed: no fixture script
+references it), so ids, disposition, receipt shapes, evidence kinds, event
+vocabulary and `duration_ms` are all unaffected -- only the digest moved.
 """
 
 from pathlib import Path
@@ -101,9 +113,11 @@ from causalops.domain import (
     InitialAlertPacket,
     InvestigationReport,
     InvestigationResult,
+    RetrievalMode,
     RootCauseCode,
     ToolProposal,
     ToolReceipt,
+    Versions,
 )
 from causalops.evidence import EvidenceKind
 from causalops.graph import build_graph, run_graph_investigation
@@ -115,6 +129,7 @@ from causalops.models import (
 )
 from causalops.prometheus import run_metric_check
 from causalops.run_records import RunEvent, RunRecorder
+from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
     RunPaths,
     run_changes_check,
@@ -309,6 +324,7 @@ def run_once(
     _install_counting_ids(monkeypatch)
     domain_clock = StepClock()
     graph_recorder = RunRecorder(StepClock())
+    runbook_index = RunbookIndex()
     registry = dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
             arguments, scope, "http://unused", 1
@@ -316,6 +332,14 @@ def run_once(
         run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
         run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
         run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
+        # None of this file's five scenarios ever scripts `search_runbooks`
+        # (confirmed: no fixture references it), so this is wired to the
+        # same real backend `cli.py` uses -- this file's own module
+        # docstring's claim, "the same real backends `cli.py` wires, not
+        # spies" -- even though it is never actually invoked.
+        run_search=lambda arguments, scope: run_runbook_search(
+            arguments, runbook_index
+        ),
     )
     checkpointer = InMemorySaver()
     graph_result = run_graph_investigation(
@@ -376,6 +400,33 @@ def assert_report_matches_frozen(
     assert report.final_context_digest == final_context_digest
     assert report.evidence_ids == evidence_ids
     assert report.receipt_ids == receipt_ids
+    # Unit 3a, added on review: no scenario in this file ever dispatches
+    # `search_runbooks`, so every one of these five reports must show
+    # retrieval never ran. Correctness's M15 proved these were unguarded --
+    # seeding `retrieval_mode` as `FTS5_LEXICAL` at `graph.py`'s
+    # `initial_state` construction left the full suite green with no
+    # assertion anywhere catching it, even though the resulting report would
+    # then falsely claim retrieval that never happened on every run in the
+    # project.
+    assert report.retrieval_mode is RetrievalMode.DISABLED
+    assert report.runbook_passage_ids == ()
+    # Unit 3a, added on review: nothing else in this file pinned `versions`
+    # at all, so a future prompt/policy/tool-registry edit could ship
+    # without its version bump and nothing here would notice -- the same
+    # defect class as the `retrieval_mode` seed above, on a §10
+    # reproducibility stamp. Deliberately hardcoded string literals, not a
+    # comparison against the live `PROMPT_VERSION`/`POLICY_VERSION`/
+    # `TOOL_REGISTRY_VERSION` constants: importing and comparing against
+    # those would make this assertion move in lockstep with any future
+    # change to them, which proves nothing -- confirmed by reverting
+    # `PROMPT_VERSION` to `"1"` alone and getting 420 passed with no
+    # constant-comparison version of this line to catch it.
+    assert report.versions == Versions(
+        schema_version="1",
+        prompt_version="2",
+        policy_version="2",
+        tool_registry_version="2",
+    )
 
 
 def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
@@ -409,7 +460,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "ed690a1ae427badf456f7e4cb50ac532b980cbb601074e572de7fc78ed83dbfe"
+            "777f37685e316dbff088c3b44f6ff755ddae9fe7356151b45c5ce6839ea90229"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -465,7 +516,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "0bc37313ccbaa1bc89ad576dfb200988ca959d2673de0dcd34edd2f35ce62ae2"
+            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -522,7 +573,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "0bc37313ccbaa1bc89ad576dfb200988ca959d2673de0dcd34edd2f35ce62ae2"
+            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -583,7 +634,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "67b92dc34438566a373fb89780377510388271e973c993209fd6e35ac63cab5d"
+            "515e37e7e18020d6ec35bf6c41621ab3ae04b21f48021049bbc5be38e7ea4120"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -633,7 +684,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "44e5043842b3e3701b183c4b995d8d7e1935021daaba017c8321d0fff4fc802b"
+            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -720,7 +771,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "44e5043842b3e3701b183c4b995d8d7e1935021daaba017c8321d0fff4fc802b"
+            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

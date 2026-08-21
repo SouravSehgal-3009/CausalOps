@@ -33,6 +33,22 @@ CONTEXT_QUOTAS: dict[EvidenceKind, int] = {
     EvidenceKind.CHANGE: 3,
 }
 
+# `context_evidence` below does an unguarded `CONTEXT_QUOTAS[record.kind]`
+# lookup -- the only unguarded per-kind lookup in `src/` (confirmed by
+# review during Unit 3a). A new `EvidenceKind` member added without a
+# matching entry here would not fail at the point it was added; it would
+# crash the first investigation that ever produced evidence of that kind.
+# Unit 3a removed the *motive* for that (no `EvidenceKind.RUNBOOK` --
+# `RunbookCheckOutcome` has no `kind` field to populate one with) but not
+# the *capability* -- nothing stops a future kind from being added here
+# without its quota. This assertion is that guard, checked at import time
+# rather than left to whichever investigation happens to hit the gap first.
+assert set(CONTEXT_QUOTAS) == set(EvidenceKind), (
+    "CONTEXT_QUOTAS is missing an entry for at least one EvidenceKind member "
+    "-- context_evidence()'s per-kind lookup would crash on that kind's "
+    "first evidence record"
+)
+
 
 def new_opaque_id() -> str:
     return uuid4().hex

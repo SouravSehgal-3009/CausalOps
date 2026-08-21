@@ -30,13 +30,16 @@ from causalops.domain import (
     ModelDisposition,
     ModelUsage,
     ReasonCode,
+    RetrievalMode,
     RootCauseCode,
+    RunbookCheckOutcome,
+    RunbookPassage,
     RunCheck,
     ToolOutcome,
     ToolProposal,
     ToolReceipt,
 )
-from causalops.evidence import EvidenceStore, content_hash
+from causalops.evidence import EvidenceStore, content_hash, digest_text
 from causalops.models import ModelRequest, ModelResponse, ReplayReasoningModel
 from causalops.prometheus import MAX_METRIC_SAMPLES
 from causalops.telemetry import RunPaths
@@ -48,6 +51,8 @@ from causalops.tools import (
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    RunbookTopic,
+    SearchRunbooksArguments,
     ToolName,
 )
 
@@ -210,6 +215,16 @@ def topology_proposal(incident_id: str = INCIDENT_ID) -> ToolProposal:
     )
 
 
+def runbooks_proposal(limit: int = 3) -> ToolProposal:
+    return ToolProposal(
+        arguments=SearchRunbooksArguments(
+            topic=RunbookTopic.DOWNSTREAM_TIMEOUTS, limit=limit
+        ),
+        evidence_gap="what guidance exists for a downstream timeout pattern",
+        expected_observation="a runbook passage describing retry amplification",
+    )
+
+
 def hypotheses() -> tuple[Hypothesis, Hypothesis]:
     return (
         Hypothesis(
@@ -248,12 +263,14 @@ def assessment_json(
     root_cause: RootCauseCode = RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
     supporting: tuple[str, ...] = (SYMPTOM_EVIDENCE_ID,),
     contrary: tuple[str, ...] = (),
+    runbook_citations: tuple[str, ...] = (),
 ) -> dict[str, JsonValue]:
     assessment = FinalAssessment(
         disposition=disposition,
         root_cause=root_cause,
         supporting_evidence_ids=supporting,
         contrary_evidence_ids=contrary,
+        runbook_citations=runbook_citations,
         uncertainty="one check could not separate the two remaining causes",
         next_step="ask the owner to confirm the inventory timeout setting",
     )
@@ -373,12 +390,13 @@ def check_runner(
     return run
 
 
-class RecordingBackend[ArgsT: BaseModel]:
+class RecordingBackend[ArgsT: BaseModel, OutcomeT: CheckOutcome | RunbookCheckOutcome]:
     """A backend seam stand-in that records every call instead of touching the
     lab -- the shape every `_make_wrapper` backend now takes,
-    `Callable[[ArgsT, IncidentScope], CheckOutcome]`. Matches `FakeProbe.disk_paths`:
-    a plain list a test can assert against with whole-list `==`, so "the spy
-    was never called" is a one-line assertion, independently, per tool.
+    `Callable[[ArgsT, IncidentScope], CheckOutcome | RunbookCheckOutcome]`.
+    Matches `FakeProbe.disk_paths`: a plain list a test can assert against
+    with whole-list `==`, so "the spy was never called" is a one-line
+    assertion, independently, per tool.
 
     `calls` records the full `(arguments, scope)` pair, not just the
     arguments -- `query_metric`'s backend is the one seam that actually reads
@@ -389,28 +407,31 @@ class RecordingBackend[ArgsT: BaseModel]:
 
     Set `raises` to make the backend fail mid-dispatch instead of returning,
     for testing that a crash still leaves a visible reserved receipt. Each
-    tool's named subclass below only supplies its own default `CheckOutcome`
-    shape -- the recording/raising behaviour lives here once.
+    tool's named subclass below only supplies its own default outcome shape
+    -- the recording/raising behaviour lives here once. Unit 3a widens the
+    second type parameter to `CheckOutcome | RunbookCheckOutcome` so
+    `RecordingRunbooksBackend` below can reuse this same class instead of a
+    near-identical copy that differs only in outcome type.
     """
 
     def __init__(
         self,
-        default_outcome: CheckOutcome,
-        outcome: CheckOutcome | None = None,
+        default_outcome: OutcomeT,
+        outcome: OutcomeT | None = None,
         raises: Exception | None = None,
     ) -> None:
         self.calls: list[tuple[ArgsT, IncidentScope]] = []
         self.raises = raises
         self.outcome = outcome or default_outcome
 
-    def __call__(self, arguments: ArgsT, scope: IncidentScope) -> CheckOutcome:
+    def __call__(self, arguments: ArgsT, scope: IncidentScope) -> OutcomeT:
         self.calls.append((arguments, scope))
         if self.raises is not None:
             raise self.raises
         return self.outcome
 
 
-class RecordingMetricBackend(RecordingBackend[QueryMetricArguments]):
+class RecordingMetricBackend(RecordingBackend[QueryMetricArguments, CheckOutcome]):
     def __init__(
         self, outcome: CheckOutcome | None = None, raises: Exception | None = None
     ) -> None:
@@ -428,7 +449,7 @@ class RecordingMetricBackend(RecordingBackend[QueryMetricArguments]):
         )
 
 
-class RecordingLogsBackend(RecordingBackend[QueryLogsArguments]):
+class RecordingLogsBackend(RecordingBackend[QueryLogsArguments, CheckOutcome]):
     def __init__(
         self, outcome: CheckOutcome | None = None, raises: Exception | None = None
     ) -> None:
@@ -446,7 +467,9 @@ class RecordingLogsBackend(RecordingBackend[QueryLogsArguments]):
         )
 
 
-class RecordingChangesBackend(RecordingBackend[ListRecentChangesArguments]):
+class RecordingChangesBackend(
+    RecordingBackend[ListRecentChangesArguments, CheckOutcome]
+):
     def __init__(
         self, outcome: CheckOutcome | None = None, raises: Exception | None = None
     ) -> None:
@@ -464,7 +487,7 @@ class RecordingChangesBackend(RecordingBackend[ListRecentChangesArguments]):
         )
 
 
-class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments]):
+class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments, CheckOutcome]):
     def __init__(
         self, outcome: CheckOutcome | None = None, raises: Exception | None = None
     ) -> None:
@@ -475,6 +498,43 @@ class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments]):
                 source="get_topology",
                 summary="1 service edge",
                 payload={"edge_count": 1},
+                duration_ms=5,
+            ),
+            outcome,
+            raises,
+        )
+
+
+class RecordingRunbooksBackend(
+    RecordingBackend[SearchRunbooksArguments, RunbookCheckOutcome]
+):
+    """Unit 3a's fifth spy. Its default outcome carries one passage, not
+    zero -- most tests wiring this backend want a normal retrieval result,
+    not `RETRIEVAL_COVERAGE_INSUFFICIENT`'s zero-passage trigger; a test
+    that wants that trigger passes its own `outcome=RunbookCheckOutcome(...,
+    passages=())` explicitly, the same override pattern every other
+    `Recording*Backend` already supports."""
+
+    def __init__(
+        self,
+        outcome: RunbookCheckOutcome | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        content = "check whether a recent change lines up with the symptom"
+        super().__init__(
+            RunbookCheckOutcome(
+                outcome=ToolOutcome.EXECUTED,
+                passages=(
+                    RunbookPassage(
+                        passage_id="runbook-test-01",
+                        content=content,
+                        source_version="test",
+                        content_hash=digest_text(content),
+                        score=1.0,
+                        retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+                    ),
+                ),
+                retrieval_mode=RetrievalMode.FTS5_LEXICAL,
                 duration_ms=5,
             ),
             outcome,
@@ -501,9 +561,9 @@ class UnexpectedBackendCall(BaseException):
 
 
 def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
-    """Wired into the three tool slots a `logs_only_registry` test does not
-    care about. Raising here instead of returning a benign outcome means a
-    test whose script unexpectedly proposes one of those tools fails loudly.
+    """Wired into the tool slots a `logs_only_registry` test does not care
+    about. Raising here instead of returning a benign outcome means a test
+    whose script unexpectedly proposes one of those tools fails loudly.
     The raise stays after `dispatch()`'s own `ledger.reserve()` -- moving it
     earlier would drop the reserved-receipt guarantee `tool_wrappers.py`
     exists to hold even for a crashing backend -- and the recorded event
@@ -512,6 +572,15 @@ def _unexpected_call(*args: object, **kwargs: object) -> CheckOutcome:
     lives in this exception's own name instead: `events.jsonl` reads
     `backend_crashed {'error': 'UnexpectedBackendCall'}`, self-explanatory
     without needing this message at all."""
+    raise UnexpectedBackendCall("this tool backend was not expected to be called")
+
+
+def _unexpected_runbook_call(*args: object, **kwargs: object) -> RunbookCheckOutcome:
+    """`_unexpected_call`'s own twin for `run_search` -- a separate function,
+    not a shared one, only because `RunCheck`'s `CheckOutcome` return type
+    and `search_runbooks`'s `RunbookCheckOutcome` return type are distinct
+    (see `RunbookCheckOutcome`'s own docstring for why); the raise and its
+    reasoning are identical."""
     raise UnexpectedBackendCall("this tool backend was not expected to be called")
 
 
@@ -529,19 +598,24 @@ def registry_with(
     run_topology: Callable[
         [GetTopologyArguments, IncidentScope], CheckOutcome
     ] = _unexpected_call,
+    run_search: Callable[
+        [SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome
+    ] = _unexpected_runbook_call,
 ) -> dict[ToolName, ToolWrapper]:
-    """The full four-tool registry `dispatch_registry` now requires, with
+    """The full five-tool registry `dispatch_registry` now requires, with
     only the backends a test's script actually calls wired to a real or spy
-    callable -- every other slot defaults to `_unexpected_call`, so a script
-    that unexpectedly proposes one of them fails loudly instead of silently
-    returning a benign outcome. Generalises `logs_only_registry` below (kept
-    as a thin, still-named alias -- most existing tests only ever script
-    `query_logs`) to the two- and three-tool scripts newer tests need."""
+    callable -- every other slot defaults to `_unexpected_call`/
+    `_unexpected_runbook_call`, so a script that unexpectedly proposes one
+    of them fails loudly instead of silently returning a benign outcome.
+    Generalises `logs_only_registry` below (kept as a thin, still-named
+    alias -- most existing tests only ever script `query_logs`) to the
+    two-, three-, and now five-tool scripts newer tests need."""
     return dispatch_registry(
         run_metric=run_metric,
         run_logs=run_logs,
         run_changes=run_changes,
         run_topology=run_topology,
+        run_search=run_search,
     )
 
 

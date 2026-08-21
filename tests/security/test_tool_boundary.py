@@ -27,6 +27,7 @@ from fake_incident import (
     RecordingChangesBackend,
     RecordingLogsBackend,
     RecordingMetricBackend,
+    RecordingRunbooksBackend,
     RecordingTopologyBackend,
     StepClock,
     incident_scope,
@@ -42,12 +43,18 @@ from causalops.tools import (
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    RunbookTopic,
+    SearchRunbooksArguments,
     ToolName,
 )
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIR = REPOSITORY / "src" / PACKAGE
-BACKEND_MODULES = {f"{PACKAGE}.telemetry", f"{PACKAGE}.prometheus"}
+BACKEND_MODULES = {
+    f"{PACKAGE}.telemetry",
+    f"{PACKAGE}.prometheus",
+    f"{PACKAGE}.runbooks",
+}
 DISPATCH_SOURCE_FILES = ("tool_wrappers.py", "tool_calls.py", "graph.py")
 
 
@@ -102,15 +109,32 @@ def out_of_scope_topology_proposal() -> ToolProposal:
     )
 
 
+def out_of_scope_runbooks_proposal() -> ToolProposal:
+    """`search_runbooks` has no service or window either -- guidance is not
+    incident-scoped (`TECHNICAL_SPEC.md` §6/§7). Its one refusable shape is
+    an oversized `limit`, the same `RESULT_LIMIT_EXCEEDED` category
+    `QueryLogsArguments.row_limit` already uses, not a new denial category
+    invented for this tool alone."""
+    return ToolProposal(
+        arguments=SearchRunbooksArguments(
+            topic=RunbookTopic.RESOURCE_POOL_PRESSURE,
+            limit=Budgets().runbook_passages + 1,
+        ),
+        evidence_gap="guidance on resource pool pressure",
+        expected_observation="nothing, that limit is above the budget",
+    )
+
+
 # One arm per registered tool -- the property this table backs (§9's spy
-# control) outlives the tool count, so a fifth registered tool (Milestone 2's
-# `search_runbooks`) must add its own arm here or the assertion below fails
-# loudly rather than silently narrowing coverage.
+# control) outlives the tool count, so a newly registered tool must add its
+# own arm here or the assertion below fails loudly rather than silently
+# narrowing coverage. Unit 3a added `SEARCH_RUNBOOKS`.
 OUT_OF_SCOPE_PROPOSAL_BY_TOOL: dict[ToolName, ToolProposal] = {
     ToolName.QUERY_METRIC: out_of_scope_metric_proposal(),
     ToolName.QUERY_LOGS: out_of_scope_logs_proposal(),
     ToolName.LIST_RECENT_CHANGES: out_of_scope_changes_proposal(),
     ToolName.GET_TOPOLOGY: out_of_scope_topology_proposal(),
+    ToolName.SEARCH_RUNBOOKS: out_of_scope_runbooks_proposal(),
 }
 
 # Pinned so a denial for the wrong reason cannot pass silently -- without
@@ -124,6 +148,7 @@ EXPECTED_REASON_BY_TOOL: dict[ToolName, ReasonCode] = {
     ToolName.QUERY_LOGS: ReasonCode.UNKNOWN_SERVICE,
     ToolName.LIST_RECENT_CHANGES: ReasonCode.UNKNOWN_SERVICE,
     ToolName.GET_TOPOLOGY: ReasonCode.CROSS_INCIDENT_REQUEST,
+    ToolName.SEARCH_RUNBOOKS: ReasonCode.RESULT_LIMIT_EXCEEDED,
 }
 
 
@@ -144,6 +169,7 @@ def test_every_dispatch_registry_entry_is_wrapper_produced() -> None:
         run_logs=RecordingLogsBackend(),
         run_changes=RecordingChangesBackend(),
         run_topology=RecordingTopologyBackend(),
+        run_search=RecordingRunbooksBackend(),
     )
 
     assert registry, "the registry must not be empty for this check to mean anything"
@@ -162,21 +188,23 @@ def test_a_hand_built_tool_wrapper_is_rejected() -> None:
 
 
 def test_every_registered_tool_denies_an_out_of_scope_proposal_untouched() -> None:
-    """Four separate spies, not one: with a single shared spy, denying three
-    tools and executing the fourth would still read `backend.calls == []` if
-    the one spy happened to sit behind the untouched three, silently proving
-    only a quarter of the registry. Each backend below is asserted
+    """Five separate spies, not one: with a single shared spy, denying four
+    tools and executing the fifth would still read `backend.calls == []` if
+    the one spy happened to sit behind the untouched four, silently proving
+    only a fifth of the registry. Each backend below is asserted
     independently, so a regression in any one wrapper is caught by its own
     tool's assertion, not hidden behind another tool's."""
     metric_backend = RecordingMetricBackend()
     logs_backend = RecordingLogsBackend()
     changes_backend = RecordingChangesBackend()
     topology_backend = RecordingTopologyBackend()
+    runbooks_backend = RecordingRunbooksBackend()
     registry = dispatch_registry(
         run_metric=metric_backend,
         run_logs=logs_backend,
         run_changes=changes_backend,
         run_topology=topology_backend,
+        run_search=runbooks_backend,
     )
 
     assert set(registry) == set(OUT_OF_SCOPE_PROPOSAL_BY_TOOL), (
@@ -198,3 +226,4 @@ def test_every_registered_tool_denies_an_out_of_scope_proposal_untouched() -> No
     assert logs_backend.calls == []
     assert changes_backend.calls == []
     assert topology_backend.calls == []
+    assert runbooks_backend.calls == []

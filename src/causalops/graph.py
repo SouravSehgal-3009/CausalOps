@@ -86,7 +86,9 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
     RootCauseCode,
+    RunbookPassage,
     ToolOutcome,
     ToolProposal,
     ToolReceipt,
@@ -150,6 +152,17 @@ class GraphState(TypedDict):
     seen_fingerprints: list[str]
     receipts: list[dict[str, JsonValue]]
     evidence: list[dict[str, JsonValue]]
+    # Milestone 3, Unit 3a. `runbook_passages` mirrors `evidence`'s own
+    # "full list, rebuilt and extended, written back whole" pattern
+    # (`_rebuild_passages` below), but a `RunbookPassage` dump, never an
+    # `Evidence` one -- retrieved guidance never enters `evidence`, the
+    # structural claim this whole unit exists to keep true. `retrieval_mode`
+    # starts `disabled` and is set once a `search_runbooks` proposal is
+    # actually reserved and dispatched, from the backend's own
+    # configuration -- never inferred from whether `runbook_passages` ends
+    # up non-empty. See `RetrievalMode`'s own docstring for why.
+    runbook_passages: list[dict[str, JsonValue]]
+    retrieval_mode: str
     # Every event any node has recorded so far, in order. A node rebuilds a
     # local `RunRecorder` from this list (`_rebuild_recorder`), records its
     # own events into that local copy, and returns the full extended list --
@@ -199,6 +212,13 @@ def _rebuild_store(
 
 def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
     return [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
+
+
+def _rebuild_passages(state: GraphState) -> list[RunbookPassage]:
+    """Milestone 3, Unit 3a. `state["runbook_passages"]`'s live-object
+    counterpart, the same "rebuild from state's own dump list" pattern
+    `_rebuild_receipts` already uses one line up."""
+    return [RunbookPassage.model_validate(dump) for dump in state["runbook_passages"]]
 
 
 def _rebuild_recorder(state: GraphState, clock: Clock) -> RunRecorder:
@@ -252,6 +272,41 @@ def _accumulate_usage(
     return combined.model_dump(mode="json")
 
 
+def _unresolved_runbook_citations(
+    assessment: FinalAssessment | None, passages: Sequence[RunbookPassage]
+) -> tuple[str, ...]:
+    """Milestone 3, Unit 3a. Cited `passage_id`s the model wrote that this
+    run never actually retrieved -- a forged runbook citation, the same
+    threat §9's "Forged citations" row names, applied to guidance instead
+    of evidence.
+
+    Deliberately non-fatal, and *not* `ReasonCode.FORGED_EVIDENCE_REFERENCE`
+    -- both reviewers rejected that shape during the owner's review of this
+    unit's pre-edit report, and the reasoning is load-bearing enough to
+    repeat here: `FORGED_EVIDENCE_REFERENCE` nulls the assessment
+    (`final_assessment`'s own `failed_state`), which turns a correct,
+    fully evidence-backed `DIAGNOSED` result into `FAILED_SAFE` /
+    `UNDETERMINED` over a citation that provably cannot affect whether the
+    diagnosis is right -- `evaluation.py`'s `diagnosis_correct` reads
+    `report.root_cause`, and a `RunbookPassage` can never support or
+    contradict a root cause (§6). Failing the run would be a systematic
+    confound in exactly the retrieval-vs-no-retrieval comparison Milestone
+    3 exists to measure, introduced by the unit creating the treatment arm.
+    Called from `_build_report`, not `final_assessment`: `final_assessment`
+    needs no change at all, and the assessment's own bytes stay exactly
+    what the model wrote (`_build_report` never reconstructs or strips
+    `FinalAssessment` -- see its own call site below).
+    """
+    if assessment is None or not assessment.runbook_citations:
+        return ()
+    known = {passage.passage_id for passage in passages}
+    return tuple(
+        passage_id
+        for passage_id in assessment.runbook_citations
+        if passage_id not in known
+    )
+
+
 def _build_report(
     state: GraphState,
     budgets: Budgets,
@@ -267,6 +322,7 @@ def _build_report(
     """
     receipts = _rebuild_receipts(state)
     store = _rebuild_store(state["incident_id"], state["evidence"])
+    passages = _rebuild_passages(state)
     started_at = datetime.fromisoformat(state["started_at"])
     finished_at = clock()
     usage = (
@@ -274,8 +330,8 @@ def _build_report(
         if state["usage"] is not None
         else None
     )
-    limitations: tuple[str, ...] = (
-        () if usage is not None else ("this model reports no token usage",)
+    limitations: list[str] = (
+        [] if usage is not None else ["this model reports no token usage"]
     )
     # Matches `ReservationLedger.slots_left()`'s own definition of "spent":
     # an ALLOWED receipt that is still RESERVED (a crash mid-dispatch, see
@@ -315,6 +371,13 @@ def _build_report(
         )
         reason_code = (
             ReasonCode(reason_value) if reason_value else ReasonCode.INTERNAL_ERROR
+        )
+
+    unresolved_runbook_citations = _unresolved_runbook_citations(assessment, passages)
+    if unresolved_runbook_citations:
+        limitations.append(
+            f"{len(unresolved_runbook_citations)} cited runbook passage id(s) "
+            "could not be resolved against what this run actually retrieved"
         )
 
     # Unit 2b. Both keys are `None` together on a run that never reached
@@ -362,7 +425,9 @@ def _build_report(
         final_context_digest=state["context_digest"],
         evidence_ids=tuple(record.evidence_id for record in store.ordered()),
         receipt_ids=tuple(receipt.receipt_id for receipt in receipts),
-        limitations=limitations,
+        retrieval_mode=RetrievalMode(state["retrieval_mode"]),
+        runbook_passage_ids=tuple(passage.passage_id for passage in passages),
+        limitations=tuple(limitations),
         escalation=escalation,
     )
 
@@ -419,6 +484,7 @@ def _render_stage_request(
     model_calls_used: int,
     stage: Stage,
     repair_errors: str | None,
+    passages: Sequence[RunbookPassage] = (),
 ) -> tuple[ModelRequest, str]:
     """The context-render-and-digest step every model call needs, identical
     for `INVESTIGATE` and `FINAL_ASSESSMENT`. While `workflow.py` still ran,
@@ -440,6 +506,7 @@ def _render_stage_request(
         markers,
         _model_calls_left(model_calls_used, budgets),
         _tools_left(receipts, budgets),
+        passages,
     )
     request = ModelRequest(
         stage=stage,
@@ -522,6 +589,7 @@ def _make_investigate(
 
         receipts = _rebuild_receipts(state)
         store = _rebuild_store(state["incident_id"], state["evidence"])
+        passages = _rebuild_passages(state)
         counters = _StageCounters(
             state["model_calls_used"],
             state["repairs_used"],
@@ -542,6 +610,7 @@ def _make_investigate(
                 counters.model_calls_used,
                 stage,
                 repair_errors,
+                passages,
             )
             counters.record_call(digest)
             turn = model.propose(request, schema)
@@ -740,12 +809,36 @@ def _make_dispatch_tool(
             evidence = state["evidence"]
             if result.evidence is not None:
                 evidence = [*evidence, result.evidence.model_dump(mode="json")]
+            # Milestone 3, Unit 3a. `result.passages`/`result.retrieval_mode`
+            # are only ever non-empty/non-`None` when `proposal.tool` is
+            # `search_runbooks` and the dispatch was allowed (see
+            # `DispatchResult`'s own docstring) -- a denial never reaches
+            # this far, and the other four tools' wrappers never populate
+            # either field. `retrieval_mode` is taken from the result, not
+            # inferred from whether `passages` is empty: a search that ran
+            # in `fts5_lexical` mode and found nothing still ran in that
+            # mode, which is exactly the condition `_escalation_reason`'s
+            # new `RETRIEVAL_COVERAGE_INSUFFICIENT` branch below exists to
+            # catch -- `disabled` must stay reserved for "never attempted."
+            runbook_passages = state["runbook_passages"]
+            if result.passages:
+                runbook_passages = [
+                    *runbook_passages,
+                    *(passage.model_dump(mode="json") for passage in result.passages),
+                ]
+            retrieval_mode = (
+                result.retrieval_mode.value
+                if result.retrieval_mode is not None
+                else state["retrieval_mode"]
+            )
             return {
                 "phase": GraphPhase.DISPATCH_TOOL.value,
                 "receipts": [r.model_dump(mode="json") for r in ledger.receipts()],
                 "seen_fingerprints": sorted(seen),
                 "pending_proposal": None,
                 "evidence": evidence,
+                "runbook_passages": runbook_passages,
+                "retrieval_mode": retrieval_mode,
                 "events": _dump_events(recorder),
             }
         except GraphBubbleUp:
@@ -839,6 +932,7 @@ def _make_final_assessment(
         )
         receipts = _rebuild_receipts(state)
         store = _rebuild_store(state["incident_id"], state["evidence"])
+        passages = _rebuild_passages(state)
         counters = _StageCounters(
             state["model_calls_used"],
             state["repairs_used"],
@@ -857,6 +951,7 @@ def _make_final_assessment(
                 counters.model_calls_used,
                 Stage.FINAL_ASSESSMENT,
                 repair_errors,
+                passages,
             )
             counters.record_call(digest)
             response = model.respond(request)
@@ -941,23 +1036,40 @@ def _make_final_assessment(
 
 
 def _escalation_reason(
-    receipts: Sequence[ToolReceipt], assessment: FinalAssessment, budgets: Budgets
+    receipts: Sequence[ToolReceipt],
+    assessment: FinalAssessment,
+    budgets: Budgets,
+    retrieved_passage_count: int,
 ) -> EscalationReason | None:
-    """`TECHNICAL_SPEC.md` §8's three triggers this milestone can produce.
-    `EscalationReason`'s own member order follows the spec's listing
-    (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
-    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`); the checks below
-    deliberately do not -- `TOOL_UNAVAILABLE` is checked first, ahead of
-    the spec's own listing order. Pure, and called from both the router
-    (to pick the edge) and the node (to build the `interrupt()` payload) --
-    the same reuse `_tools_left` already gets elsewhere in this file, not
-    two independent readings of the same rule.
+    """`TECHNICAL_SPEC.md` §8's four triggers, now that Unit 3a makes the
+    fourth reachable. `EscalationReason`'s own member order follows the
+    spec's listing (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`,
+    `RETRIEVAL_COVERAGE_INSUFFICIENT`); the checks below deliberately do
+    not -- `TOOL_UNAVAILABLE` is checked first, ahead of the spec's own
+    listing order, and `RETRIEVAL_COVERAGE_INSUFFICIENT` is checked
+    immediately after it, for the same reason. Pure, and called from both
+    the router (to pick the edge) and the node (to build the `interrupt()`
+    payload) -- the same reuse `_tools_left` already gets elsewhere in this
+    file, not two independent readings of the same rule.
 
     A receipt going `UNAVAILABLE` is checked first regardless of what the
     model concluded from the checks that did run -- an owner should see a
-    diagnosis reached with missing data before anything else. The other two
-    triggers are mutually exclusive by construction today (one requires
-    `INSUFFICIENT_EVIDENCE`, the other's citation field has no rule
+    diagnosis reached with missing data before anything else.
+    `RETRIEVAL_COVERAGE_INSUFFICIENT` is the same kind of missing-data
+    signal, placed right after it: `retrieved_passage_count` counts
+    passages this run actually **retrieved** (`len(state["runbook_
+    passages"])` at both call sites below), never how many the model
+    **cited** in `runbook_citations`. That is a deliberate, load-bearing
+    choice, not an oversight: if this trigger is ever changed to read
+    citations instead, a hallucinated `passage_id` becomes a way to
+    manufacture (or dodge) an owner-facing escalation -- talking past the
+    owner gate `TECHNICAL_SPEC.md` §8 exists to guarantee. It is exactly
+    why `_build_report`'s own unresolved-citation check (see its docstring)
+    is allowed to be non-fatal: nothing about a forged citation can move
+    this trigger, because this trigger never looks at citations at all. The
+    remaining two triggers are mutually exclusive by construction today (one
+    requires `INSUFFICIENT_EVIDENCE`, the other's citation field has no rule
     forbidding it on either disposition, but only `DIAGNOSED` runs in this
     milestone's fixtures ever populate `contrary_evidence_ids`) -- the order
     below is still asserted by a dedicated test, since "mutually exclusive
@@ -965,6 +1077,14 @@ def _escalation_reason(
     """
     if any(receipt.outcome is ToolOutcome.UNAVAILABLE for receipt in receipts):
         return EscalationReason.TOOL_UNAVAILABLE
+    retrieval_attempted = any(
+        receipt.tool is ToolName.SEARCH_RUNBOOKS
+        and receipt.policy_result is PolicyResult.ALLOWED
+        and receipt.state is ReceiptState.SETTLED
+        for receipt in receipts
+    )
+    if retrieval_attempted and retrieved_passage_count == 0:
+        return EscalationReason.RETRIEVAL_COVERAGE_INSUFFICIENT
     if (
         assessment.disposition is ModelDisposition.INSUFFICIENT_EVIDENCE
         and _tools_left(receipts, budgets) > 0
@@ -1023,7 +1143,9 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         # the caller" posture `final_assessment`'s own `assert
         # counters.stop_reason is not None` already takes for an equally
         # router-guaranteed invariant.
-        reason = _escalation_reason(receipts, assessment, budgets)
+        reason = _escalation_reason(
+            receipts, assessment, budgets, len(state["runbook_passages"])
+        )
         assert reason is not None
 
         # Everything above this line is a pure read of state -- no
@@ -1103,12 +1225,38 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
     return escalation_interrupt
 
 
-def _make_final_report(budgets: Budgets, clock: Clock) -> GraphNode:
+def _make_final_report(
+    budgets: Budgets,
+    clock: Clock,
+    # Deliberately not `clock`: see `build_graph`'s docstring for why event
+    # timestamps and domain-timing reads must not share ticks.
+    event_clock: Clock,
+) -> GraphNode:
     def final_report(state: GraphState) -> dict[str, Any]:
         report = _build_report(state, budgets, clock)
+        recorder = _rebuild_recorder(state, event_clock)
+        # `_build_report` already folded the same computation into
+        # `report.limitations` as owner-readable text; this recomputes it
+        # from the same pure helper to put the fact into the audit trail
+        # too, as a count rather than free text. Never fires on any
+        # scenario that predates `search_runbooks` (its `runbook_citations`
+        # is always empty), so no existing frozen event list moves.
+        assessment = (
+            FinalAssessment.model_validate(state["assessment"])
+            if state["assessment"] is not None
+            else None
+        )
+        unresolved = _unresolved_runbook_citations(assessment, _rebuild_passages(state))
+        if unresolved:
+            recorder.event(
+                GraphPhase.FINAL_REPORT.value,
+                "runbook_citation_unresolved",
+                count=len(unresolved),
+            )
         return {
             "phase": GraphPhase.FINAL_REPORT.value,
             "report": report.model_dump(mode="json"),
+            "events": _dump_events(recorder),
         }
 
     return final_report
@@ -1166,7 +1314,12 @@ def _make_route_after_final_assessment(budgets: Budgets) -> Callable[[GraphState
             return "final_report"
         receipts = _rebuild_receipts(state)
         assessment = FinalAssessment.model_validate(state["assessment"])
-        if _escalation_reason(receipts, assessment, budgets) is not None:
+        if (
+            _escalation_reason(
+                receipts, assessment, budgets, len(state["runbook_passages"])
+            )
+            is not None
+        ):
             return "escalation_interrupt"
         return "final_report"
 
@@ -1223,7 +1376,9 @@ def build_graph(
     graph.add_node(
         "escalation_interrupt", _make_escalation_interrupt(budgets, event_clock)
     )
-    graph.add_node("final_report", _make_final_report(budgets, clock))
+    graph.add_node(
+        "final_report", _make_final_report(budgets, clock, event_clock=event_clock)
+    )
 
     graph.add_edge(START, "investigate")
     graph.add_conditional_edges(
@@ -1491,6 +1646,8 @@ def run_graph_investigation(
         "seen_fingerprints": [],
         "receipts": [],
         "evidence": [record.model_dump(mode="json") for record in initial_evidence],
+        "runbook_passages": [],
+        "retrieval_mode": RetrievalMode.DISABLED.value,
         "events": _dump_events(seed_recorder),
         "pending_proposal": None,
         "assessment": None,

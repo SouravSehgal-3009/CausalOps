@@ -1,4 +1,4 @@
-"""The four registered read-only investigator tools and their typed arguments.
+"""The five registered read-only investigator tools and their typed arguments.
 
 The model picks a tool and a registered template or filter. Application code turns
 that choice into a real query, so raw PromQL, SQL, shell, paths, and URLs have no
@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "1"
+TOOL_REGISTRY_VERSION = "2"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -31,6 +31,7 @@ class ToolName(StrEnum):
     QUERY_LOGS = "query_logs"
     LIST_RECENT_CHANGES = "list_recent_changes"
     GET_TOPOLOGY = "get_topology"
+    SEARCH_RUNBOOKS = "search_runbooks"
 
 
 class MetricTemplate(StrEnum):
@@ -45,6 +46,28 @@ class LogFilter(StrEnum):
     TIMEOUTS_ONLY = "timeouts_only"
     POOL_EXHAUSTION = "pool_exhaustion"
     CONFIG_RELOAD = "config_reload"
+
+
+class RunbookTopic(StrEnum):
+    """The closed set of guidance topics `search_runbooks` may request.
+
+    Milestone 3's owner decision, taken over the plan's original "sanitize a
+    free-text query" framing: this module's own docstring already promises
+    "raw ... queries ... have no representation here and cannot be
+    proposed," and a free-text `query` field would have made `search_runbooks`
+    the one tool that broke that promise instead of merely constraining it.
+    A closed enum keeps the promise literally true -- there is no FTS5 MATCH
+    syntax for the model to write, so there is nothing for an injected
+    document or a malicious model turn to smuggle through it -- and the
+    small, curated corpus this topic set searches has no long tail a fixed
+    handful of topics can't cover.
+    """
+
+    GATEWAY_ERRORS = "gateway_errors"
+    GATEWAY_LATENCY = "gateway_latency"
+    DOWNSTREAM_TIMEOUTS = "downstream_timeouts"
+    RESOURCE_POOL_PRESSURE = "resource_pool_pressure"
+    RECENT_CONFIG_CHANGES = "recent_config_changes"
 
 
 class QueryMetricArguments(BaseModel):
@@ -86,13 +109,37 @@ class GetTopologyArguments(BaseModel):
     incident_id: str
 
 
+class SearchRunbooksArguments(BaseModel):
+    """Not incident-scoped: a runbook topic has no service or time window,
+    only a topic and how many passages are worth returning. `limit`
+    follows `QueryLogsArguments.row_limit`'s own pattern -- the schema
+    allows a wider range than the budget, so an oversized request is a
+    policy decision with a reason code (`policy.py`'s new branch), not a
+    silent schema rejection."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tool: Literal[ToolName.SEARCH_RUNBOOKS] = ToolName.SEARCH_RUNBOOKS
+    topic: RunbookTopic
+    # `le=20` is deliberately not tied to `Budgets.runbook_passages` (5): a
+    # schema bound is a hard shape limit, a budget is the number policy
+    # actually allows through, and the two must stay independently
+    # editable, the same separation `QueryLogsArguments.row_limit`'s `le=200`
+    # against `Budgets.log_rows`'s default of 40 already establishes. 20 is
+    # a headroom multiple of the current default (4x, versus row_limit's
+    # 5x), not a value derived from the corpus's own size (ten passages
+    # today) -- the corpus can grow without this bound needing to change.
+    limit: int = Field(ge=1, le=20)
+
+
 # This union is the tool registry. A second lookup table would be a competing
 # source of truth about which tools and arguments exist.
 ToolArguments = Annotated[
     QueryMetricArguments
     | QueryLogsArguments
     | ListRecentChangesArguments
-    | GetTopologyArguments,
+    | GetTopologyArguments
+    | SearchRunbooksArguments,
     Field(discriminator="tool"),
 ]
 

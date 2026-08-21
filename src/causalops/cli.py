@@ -47,6 +47,7 @@ from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
+from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.scenario_control import (
     LabError,
     LabReasonCode,
@@ -257,6 +258,12 @@ def _build_model_and_registry(
             },
         )
     )
+    # A fresh in-memory index per call -- the corpus is small and read-only,
+    # so rebuilding it costs nothing measurable, and it keeps this function's
+    # "everything an incident needs, built fresh" contract intact rather
+    # than reaching for a module-level singleton `search_runbooks` alone
+    # would need.
+    runbook_index = RunbookIndex()
     registry = dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
             arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
@@ -264,6 +271,9 @@ def _build_model_and_registry(
         run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
         run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
         run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
+        run_search=lambda arguments, scope: run_runbook_search(
+            arguments, runbook_index
+        ),
     )
     return model, registry
 
