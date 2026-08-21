@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fake_incident import (
@@ -20,16 +21,23 @@ from fake_incident import (
     plan_json,
     registry_with,
     replay_model,
+    resume_graph_run,
     update_json,
 )
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 import causalops.graph as graph_module
 import causalops.tool_wrappers as tool_wrappers_module
 from causalops.domain import (
     Budgets,
+    CheckOutcome,
     Disposition,
+    EscalatedInvestigation,
+    EscalationReason,
     EvidenceKind,
     FinalAssessment,
     GraphPhase,
@@ -46,7 +54,7 @@ from causalops.domain import (
     ToolProposal,
 )
 from causalops.evidence import build_evidence
-from causalops.graph import GRAPH_RECURSION_LIMIT, run_graph_investigation
+from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunRecorder
 from causalops.tool_wrappers import ToolWrapper, query_logs_wrapper
@@ -86,7 +94,7 @@ def investigate_via_graph(
     registry: dict[ToolName, ToolWrapper] | None = None,
     budgets: Budgets | None = None,
     clock: StepClock | None = None,
-) -> tuple[InvestigationResult, RunRecorder]:
+) -> tuple[InvestigationResult | EscalatedInvestigation, RunRecorder]:
     ticking = clock or StepClock()
     recorder = RunRecorder(ticking)
     resolved_registry = (
@@ -562,7 +570,14 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
     against `billing`, which `incident_scope()` does not name, so the wrapper
     denies it before any backend call and the model has no safe check left to
     propose -- an abstention that still spent the model call the denied
-    proposal used."""
+    proposal used.
+
+    Unit 2b: an abstention with an unspent check slot (nothing was executed,
+    so the full budget remains) is exactly `INSUFFICIENT_EVIDENCE_WITH_
+    CHECK_REMAINING`, so this scenario now pauses rather than reaching
+    `final_report` directly. The receipt/backend assertions below are
+    unaffected -- `dispatch_tool` already settled that receipt before
+    `final_assessment`, let alone `escalation_interrupt`, ever ran."""
     backend = RecordingMetricBackend()
     registry = registry_with(run_metric=backend)
 
@@ -575,11 +590,12 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
     assert receipt.reason_code is ReasonCode.UNKNOWN_SERVICE
     assert receipt.outcome is ToolOutcome.NOT_EXECUTED
     assert backend.calls == []
-    # A denial is not terminal: the run reached a valid abstention anyway.
-    assert result.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
-    assert result.report.tools_executed == 0
-    assert result.report.model_calls_used == 3
     assert len(result.evidence) == 2
+    # A denial is not terminal: the run reached a valid abstention, with a
+    # check slot still open, and paused for the owner rather than finalizing.
+    assert isinstance(result, EscalatedInvestigation)
+    assert result.reason is EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
+    assert result.remaining_check_count > 0
 
 
 def test_the_same_proposal_twice_is_denied_as_a_duplicate() -> None:
@@ -604,18 +620,23 @@ def test_the_same_proposal_twice_is_denied_as_a_duplicate() -> None:
 def test_a_scripted_abstention_stops_early_and_abstains() -> None:
     """`test_workflow.py::test_a_scripted_abstention_stops_early_and_abstains`,
     ported: `correct_abstention.json` proposes one `query_metric` check, then
-    stops and abstains rather than diagnosing."""
+    stops and abstains rather than diagnosing.
+
+    Unit 2b: one executed check out of a two-check budget still leaves a
+    slot open, so this abstention is also `INSUFFICIENT_EVIDENCE_WITH_
+    CHECK_REMAINING` and now pauses instead of finalizing -- see the sibling
+    test above for the same change on a zero-executed-checks abstention."""
     registry = registry_with(run_metric=RecordingMetricBackend())
 
     result, _ = investigate_via_graph(
         fixture_model("correct_abstention.json"), registry=registry
     )
-    report = result.report
 
-    assert report.disposition is Disposition.INSUFFICIENT_EVIDENCE
-    assert report.root_cause is RootCauseCode.UNDETERMINED
-    assert report.tools_executed == 1
-    assert report.model_calls_used == 3
+    assert len(result.receipts) == 1
+    assert result.receipts[0].outcome is ToolOutcome.EXECUTED
+    assert isinstance(result, EscalatedInvestigation)
+    assert result.reason is EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
+    assert result.remaining_check_count == 1
 
 
 def test_one_invalid_response_is_repaired_and_the_run_continues() -> None:
@@ -769,7 +790,19 @@ def test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposi
     """`test_workflow.py::test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposition`,
     ported -- the control case paired with the two forged-citation tests
     above: a real, same-incident evidence id cited as contrary is not a
-    forgery."""
+    forgery.
+
+    Unit 2b: this scenario also happens to satisfy two escalation triggers
+    at once (an abstention with a full, unspent check budget, and a
+    non-empty `contrary_evidence_ids`), so it now pauses rather than
+    reaching `final_report`. That pause is itself still the proof this test
+    exists for: `final_assessment`'s forged-citation check runs before the
+    escalation router does, and a forged citation would have produced a
+    `FAILED_SAFE` `InvestigationResult` there, bypassing escalation
+    entirely (`route_after_final_assessment` only reaches the router when
+    `final_assessment` produced a real assessment). Reaching
+    `EscalatedInvestigation` at all is therefore still evidence the
+    citation was accepted as genuine, not a forgery."""
     model = ReplayToolCallingModel(
         replay_model(
             tmp_path,
@@ -790,8 +823,8 @@ def test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposi
 
     result, _ = investigate_via_graph(model)
 
-    assert result.report.disposition is not Disposition.FAILED_SAFE
-    assert result.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
+    assert isinstance(result, EscalatedInvestigation)
+    assert result.reason is EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
 
 
 def test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output(
@@ -1036,3 +1069,408 @@ def test_events_stay_continuous_across_a_second_dispatch_and_normalize_pass(
     assert [event.sequence for event in recorder.events] == list(
         range(1, len(recorder.events) + 1)
     )
+
+
+# --- Unit 2b: the escalation interrupt. `_escalate` runs a scripted scenario
+# to its first pause and hands back everything a test needs to resume it
+# directly against the raw LangGraph API -- `run_graph_investigation` has no
+# resume parameter of its own (see its own docstring for why: 2b's approved
+# boundary is graph-level resume driven from tests, not a second production
+# entry point), so every resume below goes through `Command(resume=...)`
+# against a `compiled` graph and `config` this helper already built with the
+# same `checkpointer`/`investigation_id` the pause used.
+
+
+def _escalate(
+    tmp_path: Path,
+    script: dict[str, list[dict[str, Any]]],
+    *,
+    registry: dict[ToolName, ToolWrapper] | None = None,
+    investigation_id: str = "escalation-probe",
+) -> tuple[
+    EscalatedInvestigation,
+    CompiledStateGraph[Any, Any, Any, Any],
+    RunnableConfig,
+    ReplayToolCallingModel,
+]:
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    resolved_registry = (
+        registry if registry is not None else logs_only_registry(RecordingLogsBackend())
+    )
+    checkpointer = InMemorySaver()
+    clock = StepClock()
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        resolved_registry,
+        RunRecorder(StepClock()),
+        Budgets(),
+        clock,
+        investigation_id=investigation_id,
+        checkpointer=checkpointer,
+    )
+    assert isinstance(result, EscalatedInvestigation)
+    compiled = build_graph(
+        incident_scope(),
+        alert_packet(),
+        Budgets(),
+        clock,
+        model,
+        resolved_registry,
+        checkpointer,
+        event_clock=StepClock(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": investigation_id}}
+    return result, compiled, config, model
+
+
+def _unavailable_logs_backend() -> RecordingLogsBackend:
+    return RecordingLogsBackend(
+        outcome=CheckOutcome(
+            outcome=ToolOutcome.UNAVAILABLE,
+            kind=EvidenceKind.LOG,
+            source="query_logs",
+            summary="log backend unavailable",
+            reason_code=ReasonCode.TOOL_UNAVAILABLE,
+        )
+    )
+
+
+def test_a_tool_unavailable_receipt_triggers_escalation(tmp_path: Path) -> None:
+    """A `query_logs` check that comes back `UNAVAILABLE` pauses the run
+    regardless of what the model concludes from the checks that did run --
+    `_escalation_reason` checks this trigger first, independent of
+    disposition.
+
+    Resumed here, not just paused: every other test asserting the recorded
+    `escalation_decided` event's `reason` field uses this file's
+    `CONFLICTING_EVIDENCE` scenario, so an assertion of
+    `reason == "CONFLICTING_EVIDENCE"` there cannot tell a correct event
+    from one that always records that same literal regardless of the real
+    trigger. This is the one place a different reason value is available to
+    check it against."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json()],
+    }
+
+    paused, compiled, config, _ = _escalate(
+        tmp_path, script, registry=logs_only_registry(_unavailable_logs_backend())
+    )
+
+    assert paused.reason is EscalationReason.TOOL_UNAVAILABLE
+
+    resume_graph_run(compiled, config, "accept")
+
+    events = compiled.get_state(config).values["events"]
+    decided = [event for event in events if event["name"] == "escalation_decided"]
+    assert len(decided) == 1
+    assert decided[0]["fields"]["reason"] == "TOOL_UNAVAILABLE"
+
+
+def test_conflicting_evidence_triggers_escalation(tmp_path: Path) -> None:
+    """A diagnosis that cites its own supporting evidence as contrary too is
+    still a real diagnosis (`FinalAssessment` has no rule forbidding an id
+    appearing in both lists) -- it is `_escalation_reason`'s
+    `CONFLICTING_EVIDENCE` check that catches it, isolated from the other
+    two triggers: zero checks are proposed, so no receipt exists to go
+    `UNAVAILABLE`, and the disposition is `DIAGNOSED`, not
+    `INSUFFICIENT_EVIDENCE`."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+
+    paused, _, _, _ = _escalate(tmp_path, script)
+
+    assert paused.reason is EscalationReason.CONFLICTING_EVIDENCE
+    assert paused.receipts == ()
+
+
+def test_tool_unavailable_outranks_a_second_trigger_when_both_apply(
+    tmp_path: Path,
+) -> None:
+    """`_escalation_reason` checks `TOOL_UNAVAILABLE` before
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING` -- this scenario satisfies
+    both at once (an `UNAVAILABLE` receipt that still leaves a slot open,
+    and an abstention), so which one comes back proves the order is
+    enforced, not incidental."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [update_json(stop_reason="no second check available")],
+        "final_assessment": [
+            assessment_json(
+                disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                root_cause=RootCauseCode.UNDETERMINED,
+                supporting=(),
+            )
+        ],
+    }
+
+    paused, _, _, _ = _escalate(
+        tmp_path, script, registry=logs_only_registry(_unavailable_logs_backend())
+    )
+
+    assert paused.reason is EscalationReason.TOOL_UNAVAILABLE
+    # Confirms the second trigger's own condition genuinely held too --
+    # this is not passing merely because the second trigger was absent.
+    assert paused.remaining_check_count > 0
+
+
+def test_resuming_does_not_repeat_the_model_call_the_pause_already_spent(
+    tmp_path: Path,
+) -> None:
+    """A probe against the installed LangGraph (recorded in this unit's
+    pre-edit report) showed only the interrupted node re-running on
+    resume, not the whole graph. This is the operationally meaningful form
+    of that claim: `final_assessment` -- the node whose model call produced
+    the assessment `escalation_interrupt` is now pausing on -- must not run
+    a second time and spend a second model call when the pause resumes."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, model = _escalate(tmp_path, script)
+    calls_before_resume = len(model.requests)
+
+    resume_graph_run(compiled, config, "accept")
+
+    assert len(model.requests) == calls_before_resume
+
+
+def test_accepting_an_escalation_keeps_the_assessment_and_records_accept(
+    tmp_path: Path,
+) -> None:
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    settled = resume_graph_run(compiled, config, "accept")
+
+    assert settled.report.disposition is Disposition.DIAGNOSED
+    assert (
+        settled.report.root_cause
+        is RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION
+    )
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.reason is EscalationReason.CONFLICTING_EVIDENCE
+    assert settled.report.escalation.decision == "accept"
+
+    # The node's own event, not just its effect on the report -- deletable
+    # with the suite green until this asserted it directly.
+    events = compiled.get_state(config).values["events"]
+    decided = [event for event in events if event["name"] == "escalation_decided"]
+    assert len(decided) == 1
+    assert decided[0]["fields"] == {
+        "reason": "CONFLICTING_EVIDENCE",
+        "decision": "accept",
+    }
+
+
+def test_rejecting_an_escalation_keeps_the_assessment_and_records_reject(
+    tmp_path: Path,
+) -> None:
+    """`reject` stops an investigation without erasing what it concluded:
+    the disposition and root cause the model reached still stand, only
+    `escalation.decision` differs from the accept case above."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    settled = resume_graph_run(compiled, config, "reject")
+
+    assert settled.report.disposition is Disposition.DIAGNOSED
+    assert (
+        settled.report.root_cause
+        is RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION
+    )
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.reason is EscalationReason.CONFLICTING_EVIDENCE
+    assert settled.report.escalation.decision == "reject"
+
+    # The node's own event, not just its effect on the report -- paired
+    # with the accept test's identical check, this is what actually pins
+    # `decision` to the real resume value rather than to whichever literal
+    # a single scenario happened to use.
+    events = compiled.get_state(config).values["events"]
+    decided = [event for event in events if event["name"] == "escalation_decided"]
+    assert len(decided) == 1
+    assert decided[0]["fields"] == {
+        "reason": "CONFLICTING_EVIDENCE",
+        "decision": "reject",
+    }
+
+
+def test_an_unrecognised_resume_decision_re_pauses_instead_of_bricking_the_run(
+    tmp_path: Path,
+) -> None:
+    """A reviewer reproduced this against a real `SqliteSaver`: an earlier
+    version of this node raised on a bad decision, and because LangGraph
+    persists a resume value against the interrupt id and replays it on
+    every later resume of that same interrupt, the raise recurred on every
+    subsequent attempt -- a typo permanently bricked the thread, with no
+    finalized artifact either, since 2b never finalizes on pause. The fix
+    is to re-interrupt instead of raising, so the recovery this test
+    proves is the property that actually matters: a bad decision re-pauses
+    the same thread, and a later valid decision still settles it.
+
+    Two consecutive bad resumes, not one: a single bad resume cannot tell
+    `while decision not in (...): decision = interrupt(...)` apart from
+    `if decision not in (...): decision = interrupt(...)` -- both handle
+    exactly one retry. Only a second consecutive bad resume distinguishes
+    them, and a reviewer measured the `if` variant failing that second
+    resume with a bare `AssertionError` out of `_build_report`, no report,
+    no recoverable artifact -- the exact bricking class this fix exists to
+    prevent, and the class 2c's real owner input will hit routinely, since
+    two typos in a row is ordinary."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    first_bad = compiled.invoke(Command(resume="maybe"), config)
+    assert "__interrupt__" in first_bad
+    assert first_bad["__interrupt__"][0].value["retry"] is True
+
+    second_bad = compiled.invoke(Command(resume="also-bad"), config)
+    assert "__interrupt__" in second_bad
+    assert second_bad["__interrupt__"][0].value["retry"] is True
+
+    settled = resume_graph_run(compiled, config, "accept")
+
+    assert settled.report.escalation is not None
+    assert settled.report.escalation.decision == "accept"
+
+
+def test_an_abstention_with_the_check_budget_spent_does_not_escalate(
+    tmp_path: Path,
+) -> None:
+    """`INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING` is named for the case
+    where a slot is still open -- an abstention that already spent the
+    whole two-check budget is not that case, and must reach a real,
+    finalized `InvestigationResult` rather than pausing. Mutating
+    `_escalation_reason`'s `_tools_left(receipts, budgets) > 0` to `>= 0`
+    would escalate this scenario too; this is the test that catches it."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [update_json(proposal=another_logs_proposal())],
+        "final_assessment": [
+            assessment_json(
+                disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                root_cause=RootCauseCode.UNDETERMINED,
+                supporting=(),
+            )
+        ],
+    }
+    registry = logs_only_registry(RecordingLogsBackend())
+
+    result, _ = investigate_via_graph(
+        ReplayToolCallingModel(replay_model(tmp_path, script)), registry=registry
+    )
+
+    assert isinstance(result, InvestigationResult)
+    assert result.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
+    assert result.report.tools_executed == 2
+
+
+def test_the_escalation_interrupt_node_advances_the_phase_before_final_report(
+    tmp_path: Path,
+) -> None:
+    """`escalation_interrupt`'s own `"phase"` write is unobservable through
+    any of this file's other resume tests -- `final_report` always runs
+    immediately after and overwrites it, so a terminal `InvestigationResult`
+    can never show `ESCALATION_INTERRUPT` regardless of whether this node's
+    own return carried that key. `compiled.stream(..., stream_mode="values")`
+    is the one way to see it: it yields the committed state after each
+    superstep, so the chunk between `final_assessment` and `final_report`
+    is `escalation_interrupt`'s own commit, still holding its phase."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    _, compiled, config, _ = _escalate(tmp_path, script)
+
+    phases = [
+        chunk["phase"]
+        for chunk in compiled.stream(
+            Command(resume="accept"), config, stream_mode="values"
+        )
+    ]
+
+    assert phases == [
+        GraphPhase.FINAL_ASSESSMENT.value,
+        GraphPhase.ESCALATION_INTERRUPT.value,
+        GraphPhase.FINAL_REPORT.value,
+    ]
+
+
+def test_a_paused_runs_recorder_is_not_empty_and_ends_at_the_pre_pause_stage(
+    tmp_path: Path,
+) -> None:
+    """The recorder sync inside `run_graph_investigation`'s tail runs before
+    the pause branch is checked, precisely so a caller's own `RunRecorder`
+    still reflects everything recorded before the pause. Moving that sync
+    below the pause check passes the whole suite green with an empty
+    recorder handed back on a paused run, since nothing else in this
+    project reads a paused caller's `recorder.events` -- this does."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    recorder = RunRecorder(StepClock())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        logs_only_registry(RecordingLogsBackend()),
+        recorder,
+        Budgets(),
+        StepClock(),
+        investigation_id="paused-recorder-probe",
+        checkpointer=InMemorySaver(),
+    )
+
+    assert isinstance(result, EscalatedInvestigation)
+    names = [event.name for event in recorder.events]
+    assert names
+    assert names[0] == "investigation_started"
+    # The last event recorded is `final_assessment`'s own `stage_started`
+    # -- the stage that pauses next, `escalation_interrupt`, never gets a
+    # chance to record anything into this recorder at all, since its own
+    # event only lands in state on the resumed attempt.
+    assert names[-1] == "stage_started"
+
+
+def test_an_escalated_investigation_carries_the_same_evidence_and_receipts_so_far(
+    tmp_path: Path,
+) -> None:
+    """`EscalatedInvestigation` mirrors `InvestigationResult`'s own
+    `evidence`/`receipts` shape, so an owner inspecting a paused run sees
+    the same policy-authorized tool evidence a finished one would show."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [update_json(stop_reason="one check was enough")],
+        "final_assessment": [assessment_json()],
+    }
+
+    paused, _, _, _ = _escalate(
+        tmp_path, script, registry=logs_only_registry(_unavailable_logs_backend())
+    )
+
+    assert paused.thread_id == "escalation-probe"
+    assert paused.checkpoint_id
+    assert paused.proposal_fingerprint is None
+    assert len(paused.receipts) == 1
+    assert paused.receipts[0].outcome is ToolOutcome.UNAVAILABLE
+    assert len(paused.evidence) == 2

@@ -104,6 +104,35 @@ class GraphPhase(StrEnum):
     FINAL_REPORT = "FINAL_REPORT"
 
 
+class EscalationReason(StrEnum):
+    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers.
+
+    Only the first three are reachable from Unit 2b: `graph.py`'s
+    `_escalation_reason` checks a receipt outcome, the model's own
+    disposition, and its own contrary-citation list -- all already in state.
+    `RETRIEVAL_COVERAGE_INSUFFICIENT` needs `search_runbooks`, which does not
+    exist until Milestone 3's retrieval lands (`TECHNICAL_SPEC.md`'s Unit 0
+    amendment). It is named here anyway, the same precedent `GraphPhase`
+    itself sets above: naming a state before anything reaches it costs
+    nothing and means this enum doesn't need a second, breaking edit when
+    Milestone 3 arrives.
+    """
+
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
+    # `TECHNICAL_SPEC.md` §8 mandates this exact literal, which is also
+    # `ReasonCode.TOOL_UNAVAILABLE`'s value. Both are `StrEnum`, so
+    # `EscalationReason.TOOL_UNAVAILABLE == ReasonCode.TOOL_UNAVAILABLE` is
+    # `True` (plain string equality) even though they are different classes
+    # and `is` says they are not the same member -- a trap for an `==`
+    # comparison written against the wrong vocabulary. `ReasonCode` names a
+    # receipt outcome; this enum names why a run paused because of one.
+    TOOL_UNAVAILABLE = "TOOL_UNAVAILABLE"
+    INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING = (
+        "INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING"
+    )
+    RETRIEVAL_COVERAGE_INSUFFICIENT = "RETRIEVAL_COVERAGE_INSUFFICIENT"
+
+
 class Budgets(BaseModel):
     """The limits this step enforces. Provider limits arrive with the Claude model."""
 
@@ -360,6 +389,25 @@ RunCheck = Callable[[ToolProposal, IncidentScope], CheckOutcome]
 Clock = Callable[[], datetime]
 
 
+class EscalationRecord(BaseModel):
+    """Whether this investigation paused for the owner, and what they decided.
+
+    A separate type from `EscalationReason` alone, because a report needs to
+    carry both the trigger and the outcome together -- `reason` without a
+    `decision` would leave a reader unable to tell a still-open escalation
+    from a resolved one, and `graph.py`'s `_build_report` only ever
+    constructs this once both are known. `decision` matches the literal
+    resume values `escalation_interrupt` accepts (`"accept"`/`"reject"`),
+    not a past-tense rewording, so there is one vocabulary for the same
+    concept across the node, the graph state, and the report.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reason: EscalationReason
+    decision: Literal["accept", "reject"]
+
+
 class InvestigationReport(BaseModel):
     """The finalized result of one investigation."""
 
@@ -386,6 +434,15 @@ class InvestigationReport(BaseModel):
     evidence_ids: tuple[str, ...] = ()
     receipt_ids: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
+    # Unit 2b. `None` for every run that never escalated -- which is every
+    # run before this unit and most runs after it. Deliberately not folded
+    # into `limitations`: that field is free text an evaluator would have to
+    # string-match to answer "did this escalate, and what did the owner
+    # decide," where this field answers it directly. Additive and optional,
+    # so `check_terminal_invariants` below needs no change -- disposition,
+    # root_cause, assessment, and reason_code are unaffected by whether an
+    # owner accepted or rejected the assessment they describe.
+    escalation: EscalationRecord | None = None
 
     @model_validator(mode="after")
     def check_terminal_invariants(self) -> Self:
@@ -430,3 +487,34 @@ class InvestigationResult(BaseModel):
     report: InvestigationReport
     evidence: tuple[Evidence, ...]
     receipts: tuple[ToolReceipt, ...]
+
+
+class EscalatedInvestigation(BaseModel):
+    """A paused investigation awaiting the owner's accept/reject decision.
+
+    A sibling to `InvestigationResult`, not a variant of it: a paused run has
+    no `InvestigationReport` yet, since its disposition is not resolved, so
+    it cannot satisfy that model's strict terminal-disposition validator
+    (`check_terminal_invariants` above) or its required `report` field.
+    `evidence`/`receipts` mirror `InvestigationResult`'s own shape exactly,
+    so an owner inspecting a paused run sees the same policy-authorized tool
+    evidence a finished one would show -- `graph.py`'s
+    `run_graph_investigation` already has both in hand at pause time, from
+    the same state a finished run's report is built from, so carrying them
+    costs nothing extra. `checkpoint_id`/`reason`/`remaining_check_count`/
+    `proposal_fingerprint` are `TECHNICAL_SPEC.md` §8's interrupt payload;
+    `proposal_fingerprint` is always `None` in Unit 2b -- nothing in the
+    codebase can produce a policy-approved next-check proposal at escalation
+    time yet (see `graph.py`'s module docstring).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    thread_id: str
+    run_id: str
+    checkpoint_id: str
+    reason: EscalationReason
+    evidence: tuple[Evidence, ...]
+    receipts: tuple[ToolReceipt, ...]
+    remaining_check_count: int = Field(ge=0)
+    proposal_fingerprint: str | None = None

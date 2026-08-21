@@ -7,8 +7,11 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 from pydantic import BaseModel, JsonValue
 
 from causalops.domain import (
@@ -22,6 +25,8 @@ from causalops.domain import (
     IncidentScope,
     InitialAlertPacket,
     InitialPlan,
+    InvestigationReport,
+    InvestigationResult,
     ModelDisposition,
     ModelUsage,
     ReasonCode,
@@ -29,8 +34,9 @@ from causalops.domain import (
     RunCheck,
     ToolOutcome,
     ToolProposal,
+    ToolReceipt,
 )
-from causalops.evidence import content_hash
+from causalops.evidence import EvidenceStore, content_hash
 from causalops.models import ModelRequest, ModelResponse, ReplayReasoningModel
 from causalops.prometheus import MAX_METRIC_SAMPLES
 from causalops.telemetry import RunPaths
@@ -241,11 +247,13 @@ def assessment_json(
     disposition: ModelDisposition = ModelDisposition.DIAGNOSED,
     root_cause: RootCauseCode = RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
     supporting: tuple[str, ...] = (SYMPTOM_EVIDENCE_ID,),
+    contrary: tuple[str, ...] = (),
 ) -> dict[str, JsonValue]:
     assessment = FinalAssessment(
         disposition=disposition,
         root_cause=root_cause,
         supporting_evidence_ids=supporting,
+        contrary_evidence_ids=contrary,
         uncertainty="one check could not separate the two remaining causes",
         next_step="ask the owner to confirm the inventory timeout setting",
     )
@@ -259,6 +267,35 @@ def replay_model(
     fixture = tmp_path / "fixture.json"
     fixture.write_text(json.dumps({"responses": responses}), encoding="utf-8")
     return ReplayReasoningModel(fixture)
+
+
+def resume_graph_run(
+    compiled: CompiledStateGraph[Any, Any, Any, Any],
+    config: RunnableConfig,
+    decision: str,
+) -> InvestigationResult:
+    """Resumes a paused compiled graph with an owner decision and reconstructs
+    the terminal `InvestigationResult`, for tests proving Unit 2b's
+    graph-level resume.
+
+    `graph.py`'s `run_graph_investigation` deliberately has no resume
+    parameter of its own (2b's approved boundary: tests drive
+    `Command(resume=...)` directly, 2c owns a real resumable entry point),
+    so a test resuming a pause has nothing but the raw LangGraph API to call
+    -- this is that call, plus the same result assembly
+    `run_graph_investigation`'s own tail does, written against only public
+    domain types (`EvidenceStore`, `InvestigationReport.model_validate`)
+    rather than reaching into that module's private helpers.
+    """
+    raw_state = compiled.invoke(Command(resume=decision), config)
+    report = InvestigationReport.model_validate(raw_state["report"])
+    store = EvidenceStore(raw_state["incident_id"])
+    for dump in raw_state["evidence"]:
+        store.add(Evidence.model_validate(dump))
+    receipts = tuple(ToolReceipt.model_validate(dump) for dump in raw_state["receipts"])
+    return InvestigationResult(
+        report=report, evidence=store.ordered(), receipts=receipts
+    )
 
 
 class UsageReportingModel:

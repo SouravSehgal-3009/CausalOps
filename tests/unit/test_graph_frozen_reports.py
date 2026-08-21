@@ -66,8 +66,11 @@ from fake_incident import (
     packet_evidence,
     plan_json,
     replay_model,
+    resume_graph_run,
     write_changes,
 )
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 
 import causalops.evidence as evidence_module
 import causalops.graph as graph_module
@@ -75,6 +78,7 @@ import causalops.tool_wrappers as tool_wrappers_module
 from causalops.domain import (
     Budgets,
     Disposition,
+    EscalatedInvestigation,
     IncidentScope,
     InitialAlertPacket,
     InvestigationReport,
@@ -84,7 +88,7 @@ from causalops.domain import (
     ToolReceipt,
 )
 from causalops.evidence import EvidenceKind
-from causalops.graph import run_graph_investigation
+from causalops.graph import build_graph, run_graph_investigation
 from causalops.models import (
     ModelRequest,
     ModelResponse,
@@ -92,7 +96,7 @@ from causalops.models import (
     ReplayToolCallingModel,
 )
 from causalops.prometheus import run_metric_check
-from causalops.run_records import RunRecorder
+from causalops.run_records import RunEvent, RunRecorder
 from causalops.telemetry import (
     RunPaths,
     run_changes_check,
@@ -238,13 +242,30 @@ def run_once(
     """Runs the graph orchestrator alone. `run_both`'s old name for this half
     is gone along with the loop half it used to run beside -- kept as one
     function, not inlined per test, since all five scenarios wire the same
-    real four-tool registry the same way."""
+    real four-tool registry the same way.
+
+    Unit 2b: two of the five scenarios this function serves escalate (a
+    `query_logs` receipt that comes back `UNAVAILABLE` because those two
+    scripts never call `write_orders_error_row`, reaching a diagnosis
+    anyway). Rather than weaken this file's frozen-literal pin for those
+    two, this function resumes a pause with "accept" and returns the
+    settled report -- proving an accepted escalation is report-preserving,
+    which is a real claim worth the extra step, not a workaround. An
+    explicit `checkpointer` is passed to `run_graph_investigation` only so
+    this function can hold onto it to resume; `investigation_id` is left
+    for `run_graph_investigation` to auto-mint exactly as before, since the
+    id-counting harness below depends on that one call to `new_opaque_id()`
+    still happening before any evidence/receipt id is minted -- an explicit
+    `investigation_id` here would shift every id after it by one and break
+    all five scenarios' frozen id literals, not just the two that escalate.
+    """
     scope = incident_scope()
     packet = alert_packet()
     evidence_records = packet_evidence()
     resolved_budgets = budgets or Budgets()
 
     _install_counting_ids(monkeypatch)
+    domain_clock = StepClock()
     graph_recorder = RunRecorder(StepClock())
     registry = dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
@@ -254,6 +275,7 @@ def run_once(
         run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
         run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
     )
+    checkpointer = InMemorySaver()
     graph_result = run_graph_investigation(
         scope,
         packet,
@@ -262,8 +284,26 @@ def run_once(
         registry,
         graph_recorder,
         resolved_budgets,
-        StepClock(),
+        domain_clock,
+        checkpointer=checkpointer,
     )
+    if isinstance(graph_result, EscalatedInvestigation):
+        compiled = build_graph(
+            scope,
+            packet,
+            resolved_budgets,
+            domain_clock,
+            graph_model,
+            registry,
+            checkpointer,
+            event_clock=graph_recorder.clock,
+        )
+        config: RunnableConfig = {"configurable": {"thread_id": graph_result.thread_id}}
+        graph_result = resume_graph_run(compiled, config, "accept")
+        graph_recorder.recorded = [
+            RunEvent.model_validate(dump)
+            for dump in compiled.get_state(config).values["events"]
+        ]
     return graph_result, graph_recorder
 
 

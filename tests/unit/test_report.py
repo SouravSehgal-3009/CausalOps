@@ -3,6 +3,8 @@ from fake_incident import INCIDENT_ID, WINDOW_END, WINDOW_START, packet_evidence
 from causalops.domain import (
     Budgets,
     Disposition,
+    EscalationReason,
+    EscalationRecord,
     FinalAssessment,
     InvestigationReport,
     ModelDisposition,
@@ -143,6 +145,28 @@ def test_the_report_carries_no_evaluator_words() -> None:
 
     for evaluator_word in ("expected", "predicate", "seed", "scenario"):
         assert evaluator_word not in text
+
+
+def test_a_never_escalated_report_has_no_owner_escalation_section() -> None:
+    text = render_report(diagnosed_report(("evidence-1",)), [], [], "replay")
+
+    assert "## Owner escalation" not in text
+
+
+def test_an_escalated_report_names_the_reason_and_the_decision() -> None:
+    escalated = diagnosed_report(("evidence-1",)).model_copy(
+        update={
+            "escalation": EscalationRecord(
+                reason=EscalationReason.CONFLICTING_EVIDENCE, decision="reject"
+            )
+        }
+    )
+
+    text = render_report(escalated, [], [], "replay")
+
+    assert "## Owner escalation" in text
+    assert "CONFLICTING_EVIDENCE" in text
+    assert "reject" in text
 
 
 def test_an_unsettled_check_reads_as_unsettled_not_a_blank_outcome() -> None:

@@ -14,6 +14,9 @@ from causalops.doctor import CheckResult, DoctorReport
 from causalops.domain import (
     Budgets,
     Disposition,
+    EscalatedInvestigation,
+    EscalationReason,
+    EscalationRecord,
     Evidence,
     FinalAssessment,
     GraphPhase,
@@ -51,6 +54,7 @@ def report(
     root_cause: RootCauseCode,
     final: FinalAssessment | None,
     reason_code: ReasonCode | None = None,
+    escalation: EscalationRecord | None = None,
 ) -> InvestigationReport:
     return InvestigationReport(
         investigation_id="inv-1",
@@ -71,6 +75,7 @@ def report(
         tools_executed=1,
         invalid_responses=0,
         final_context_digest="digest",
+        escalation=escalation,
     )
 
 
@@ -203,6 +208,66 @@ def test_the_graph_phase_enum_matches_the_seven_phases_in_the_spec() -> None:
         "ESCALATION_INTERRUPT",
         "FINAL_REPORT",
     ]
+
+
+def test_the_escalation_reason_enum_matches_the_four_triggers_in_the_spec() -> None:
+    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, named
+    in the order the spec lists them. `graph.py`'s `_escalation_reason` does
+    *not* check them in this same order -- it checks `TOOL_UNAVAILABLE`
+    first, deliberately ahead of the spec's own listing order, and says why
+    in its own docstring. `RETRIEVAL_COVERAGE_INSUFFICIENT` is unreachable
+    until Milestone 3's retrieval lands; it is named here anyway, the same
+    precedent `GraphPhase` above already sets."""
+    assert [reason.value for reason in EscalationReason] == [
+        "CONFLICTING_EVIDENCE",
+        "TOOL_UNAVAILABLE",
+        "INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING",
+        "RETRIEVAL_COVERAGE_INSUFFICIENT",
+    ]
+
+
+def test_a_report_carries_no_escalation_record_unless_the_run_escalated() -> None:
+    """The default an ordinary, never-escalated run gets -- every report
+    before Unit 2b, and most reports after it."""
+    diagnosed = report(Disposition.DIAGNOSED, RootCauseCode.CONFIG_CHANGE, assessment())
+
+    assert diagnosed.escalation is None
+
+
+def test_an_escalation_record_survives_on_a_report_without_disturbing_it() -> None:
+    """Adding `escalation` is additive: it does not interact with
+    `check_terminal_invariants`, so a diagnosed report carrying one still
+    validates, and the disposition/root_cause it names are unaffected by
+    what the owner decided about it."""
+    decided = report(
+        Disposition.DIAGNOSED,
+        RootCauseCode.CONFIG_CHANGE,
+        assessment(),
+        escalation=EscalationRecord(
+            reason=EscalationReason.CONFLICTING_EVIDENCE, decision="reject"
+        ),
+    )
+
+    assert decided.disposition is Disposition.DIAGNOSED
+    assert decided.escalation is not None
+    assert decided.escalation.reason is EscalationReason.CONFLICTING_EVIDENCE
+    assert decided.escalation.decision == "reject"
+
+
+def test_an_escalation_record_only_accepts_the_two_named_decisions() -> None:
+    with pytest.raises(ValidationError):
+        EscalationRecord(
+            reason=EscalationReason.TOOL_UNAVAILABLE,
+            decision="approve",  # type: ignore[arg-type]
+        )
+
+
+def test_an_escalated_investigation_has_no_report_field() -> None:
+    """The type-level proof this is a sibling to `InvestigationResult`, not
+    a variant of it: a paused run's disposition is not resolved, so there is
+    no `InvestigationReport` to carry, and this model does not pretend
+    otherwise with an `Optional[report]`."""
+    assert "report" not in EscalatedInvestigation.model_fields
 
 
 def receipt(**overrides: object) -> ToolReceipt:

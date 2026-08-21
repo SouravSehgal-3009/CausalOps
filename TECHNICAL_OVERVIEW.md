@@ -1134,13 +1134,13 @@ new fix landed in this unit; the evidence-carry fix above is 1d-1's, not
 
 ## Milestone 2 — Durable escalation and owner approval
 
-**Status:** Unit 2a complete, frozen for review. Units 2b (the escalation
-interrupt), 2c (approval routing and the append-only decision record — this
-milestone's dual-review completion snapshot), and 2d (crash/idempotency
-tests, the `ControlCounts` gap) have not started. Curated FTS5 runbooks,
-retrieval provenance, and injection/no-ground-truth-leakage tests defer to
-Milestone 3 (`TECHNICAL_SPEC.md` §12, *Amendment, Milestone 2*); Pinecone
-remains a post-milestone optional experiment.
+**Status:** Units 2a and 2b complete, frozen for review. Unit 2c (approval
+routing and the append-only decision record — this milestone's dual-review
+completion snapshot) and 2d (crash/idempotency tests, the `ControlCounts`
+gap) have not started. Curated FTS5 runbooks, retrieval provenance, and
+injection/no-ground-truth-leakage tests defer to Milestone 3
+(`TECHNICAL_SPEC.md` §12, *Amendment, Milestone 2*); Pinecone remains a
+post-milestone optional experiment.
 
 Unit 2a (durable checkpoints, no behaviour change) swapped the graph's
 checkpointer from a process-local `InMemorySaver()`, rebuilt on every call,
@@ -1258,6 +1258,205 @@ first at a demo:**
   the SQLite error-translation gap above, for the same reason: it exists to
   pre-empt exactly the failure mode that gap still lets through, so the two
   should land together.
+
+### Unit 2b — the escalation interrupt
+
+Inserts a ninth node, `escalation_interrupt`, between `final_assessment` and
+`final_report`, replacing the plain edge with a conditional one
+(`route_after_final_assessment`) so a run pauses for the owner on one of
+three deterministic triggers and survives its own process. `GraphPhase`
+already named `ESCALATION_INTERRUPT` in Unit 1b's enum; this unit is its
+first consumer.
+
+**Triggers, checked in `_escalation_reason` — deliberately not the order
+`TECHNICAL_SPEC.md` §8 lists them in.** The spec (and `EscalationReason`'s
+own member order) lists `CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
+`INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`,
+`RETRIEVAL_COVERAGE_INSUFFICIENT`. The function checks a receipt going
+`UNAVAILABLE` first, ahead of the other two: an owner should see a
+diagnosis reached with missing data before anything else, regardless of
+what the model concluded from the checks that did run. `graph.py`'s own
+docstring on `_escalation_reason` says so explicitly, after an earlier
+version of that docstring and `test_domain.py`'s enum-pin test both claimed
+the function followed the spec's listing order — both reviewers caught the
+same contradiction independently (the docstring's very next paragraph
+already said `TOOL_UNAVAILABLE` was checked first), and both comments were
+corrected to say what the code actually does. `RETRIEVAL_COVERAGE_INSUFFICIENT`
+is unreachable until Milestone 3 supplies `search_runbooks`; it is named in
+the enum anyway, the same precedent `GraphPhase` itself set for phases no
+code visited yet.
+
+**The finding that shaped the unit, from the pre-edit report and confirmed
+before implementation began:** nothing in the codebase can produce a
+policy-approved next-check proposal at escalation time — the model proposes
+at most one check per turn, it dispatches immediately, and a denied or
+allowed proposal's fingerprint is marked seen either way, so re-proposing it
+returns `DUPLICATE_PROPOSAL`. The owner gets accept or reject in this unit;
+the approve-one-additional-check route (`TECHNICAL_SPEC.md` §8's third
+option) is not built, so there is no dead route to `dispatch_tool` sitting
+untested.
+
+**The paused result is a sibling type, not a variant of `InvestigationResult`.**
+`EscalatedInvestigation` (frozen, in `domain.py`) carries `thread_id`,
+`run_id`, `checkpoint_id`, `reason: EscalationReason`, `evidence`, `receipts`
+(mirroring `InvestigationResult`'s own shape, not just the spec's leaner
+"evidence IDs" wording — `run_graph_investigation` already has the full
+records in hand at pause time, at zero extra cost), `remaining_check_count`,
+and `proposal_fingerprint` (always `None` this unit). `InvestigationReport`
+cannot express "paused" — frozen, a required `report`, a strict
+DIAGNOSED/INSUFFICIENT_EVIDENCE/FAILED_SAFE trichotomy validator — so
+`run_graph_investigation` now returns `InvestigationResult | EscalatedInvestigation`,
+detected by checking `"__interrupt__"` in `.invoke()`'s own return value
+before the pre-existing `InvestigationReport.model_validate(final_state["report"])`
+call, which raised a `ValidationError` on a real pause before this unit (the
+landing hazard the pre-edit report located in advance).
+
+**The owner's decision is recorded, not just acted on.** `InvestigationReport`
+gained one additive optional field, `escalation: EscalationRecord | None`
+(reason plus `"accept"`/`"reject"`), over the cheaper but weaker alternative
+of folding it into the existing free-text `limitations` field — a decision
+the pre-edit report flagged for the owner rather than resolving silently,
+and the owner approved the new-field shape. Rejecting an escalation does
+**not** overwrite `disposition`/`root_cause` to `FAILED_SAFE`: the model's
+assessment stands, annotated as rejected, on the reasoning that "reject"
+means the owner did not accept it as final, not that nothing was concluded.
+The field does not interact with `check_terminal_invariants` and does not
+trip `test_ground_truth_isolation.py`'s field-name scan.
+
+**A bad resume value re-interrupts; it does not raise.** The first
+implementation raised `ValueError` on an unrecognised decision, reasoning
+that the node crosses no I/O boundary and so has nothing at risk from a
+crash. Both reviewers found this wrong by actually reproducing it against a
+real `SqliteSaver`: LangGraph persists a resume value against the
+interrupt's own id and replays that same value on **every** later resume of
+that interrupt, so raising on a typo left the thread permanently stuck
+replaying the same bad value on every subsequent attempt — valid ones
+included — because this unit never finalizes on pause and so the run never
+gets a fresh interrupt id to retry against. A single typo destroyed the run
+with no recoverable artifact. The fix asks again under the same interrupt
+id: `while decision not in ("accept", "reject"): decision = interrupt({**payload, "retry": True})`.
+The `try`/`except` question this raised dissolves with the fix in place, but
+the real reason the node stays unwrapped is `normalize_evidence` and
+`final_report` are unwrapped for the same reason: none of the three cross an
+I/O boundary or hold a reservation a crash could strand.
+
+**Purity before `interrupt()` is enforced by construction, and only
+partially independently testable.** Everything before the `interrupt()`
+call is a pure read of state — no `recorder.event`, no reservation, no
+write — because only the interrupted node re-runs on resume (measured
+against the installed LangGraph, not assumed) and anything written above
+that call would run twice. A mutation moving a `recorder.event(...)` call
+to *before* `interrupt()` survives every test in this project: on the
+interrupted attempt `GraphInterrupt` raises before the node returns, so the
+write never reaches a state channel regardless of where it sits in the
+function, and on the resumed attempt the function runs once top-to-bottom
+either way — placement relative to `interrupt()` is unobservable through
+checkpointed state for a node that stays inside the rebuild-from-state
+pattern every node already follows. This immunity covers *recorder* writes
+only: a durable write that reaches outside the checkpoint (a real backend
+call, a file write, a module-level mutable) or an asserted clock tick taken
+above `interrupt()` would still double, and neither reviewer nor the
+implementation found a way to make that specific class of mistake
+observable without actually introducing an external effect the node does
+not otherwise need. The operational form of the purity guarantee that *is*
+mutation-tested and does fail cleanly: no upstream node with a real side
+effect (`final_assessment`'s model call) re-executes on resume, proven by
+asserting the replay model's own request count is unchanged after resuming
+a pause, both in-process and reopened from a fresh `SqliteSaver` connection.
+
+**The unit's own proof is a two-process resume, not the in-process
+convenience every other test in this project's escalation coverage uses.**
+Every other resume test drives `InMemorySaver()`, which would pass
+identically whether or not this unit's actual target — resuming through the
+hardened `SqliteSaver` `cli._sqlite_checkpointer` wires in production —
+works at all. `test_checkpointing.py::test_a_two_process_pause_and_resume_settles_over_a_real_sqlite_file`
+pauses under a real `cli._sqlite_checkpointer(path)`, closes that context
+entirely, opens a second, independent one against the same file (standing
+in for the second process `causalops approve`/`reject` will be in Unit 2c),
+reads the pending interrupt and its payload off it, resumes, and asserts
+zero additional model calls — a stronger claim than the in-process version,
+since it holds across a reopened connection, not just within one process's
+live object graph. This was the first version's most material gap: every
+resume test it shipped used `InMemorySaver()`, so the milestone's actual
+proof was simply missing.
+
+**`run_graph_investigation` gained no `resume` parameter.** 2b's approved
+boundary is graph-level resume driven directly from tests
+(`build_graph(...)` plus `Command(resume=...)` against the same
+`checkpointer`/`thread_id` the pause used), not a second production entry
+point — Unit 2c owns the real resumable surface (`causalops approve`/
+`reject`) and reviews it on its own. One consequence: a resumed run never
+enters `run_graph_investigation` at all, so it gets none of that function's
+own crash containment. A bad resume value is the caller's mistake to catch
+before ever calling `Command(resume=...)`, not this graph's to paper over —
+2b's own tests are the only caller today, and Unit 2c decides how a real
+CLI command validates a decision before resuming for real.
+
+**Two existing fixture scenarios started escalating, flagged in the
+pre-edit report before implementation and dispositioned by the owner in
+advance:** `test_graph_frozen_reports.py`'s `after_a_first_turn_denial` and
+`after_a_repeated_proposal` throwaway scripts never call
+`write_orders_error_row`, so their real `run_logs_check` backend genuinely
+returns `UNAVAILABLE` — a real `TOOL_UNAVAILABLE` trigger, not a scripted
+one. Rather than weaken those two tests' frozen-literal pins, `run_once`
+now resumes a pause with `"accept"` and returns the settled report, proving
+an accepted escalation is report-preserving rather than merely asserting
+something weaker. Diffed against `aa834c5`: both tests' bodies, and every
+shared assertion helper in that file, are byte-identical — only `run_once`'s
+setup changed. A third, previously unflagged instance was caught during
+implementation itself (`test_graph.py`'s
+`test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposition`,
+whose forged-citation control case also happens to satisfy
+`INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`) and fixed the same way, since
+a test-only assertion update is in-scope for the coding subagent mid-pass
+under this project's protocol, while anything touching production behaviour
+is not.
+
+**Known gaps, deliberately not this unit's to close:**
+
+- The `interrupt()` payload itself carries `reason`, `evidence_ids`, and
+  `remaining_check_count`, but not `thread_id`/`run_id`/`checkpoint_id` —
+  all three `TECHNICAL_SPEC.md:253-254` names as part of the payload. All
+  three are recoverable by any second process that already knows the
+  thread id (which it must, to call `compiled.get_state(config)` at all)
+  and are attached by `run_graph_investigation` when assembling
+  `EscalatedInvestigation` from outside the node — but a caller reading the
+  raw LangGraph `Interrupt.value` directly, rather than going through
+  `run_graph_investigation`, would not find them there. Closing this is
+  Unit 2c's, once a real second-process caller exists to specify the
+  contract against.
+- `evaluation.py:195`'s `disposition_correct` check is blind to
+  `escalation.decision` — an owner-rejected diagnosis still scores as
+  correct if the underlying `disposition`/`root_cause` match the expected
+  label, because rejecting an escalation deliberately does not change
+  either field (see above). Whether a rejected run should score
+  differently is an evaluation-design question outside this unit's scope,
+  written down here so it is not silently assumed away.
+- `EscalationReason.TOOL_UNAVAILABLE` and `ReasonCode.TOOL_UNAVAILABLE`
+  share the literal `"TOOL_UNAVAILABLE"`, mandated by `TECHNICAL_SPEC.md`
+  §8 for the former. Both are `StrEnum`, so they compare equal (`==`)
+  across the two vocabularies despite being different classes and
+  different concepts — one names a receipt outcome, the other names why a
+  run paused because of one. Commented at the enum definition as a trap
+  for a future `==` comparison written against the wrong vocabulary.
+- **Two third-party/mechanical traps for Unit 2c, verified against the
+  installed LangGraph, not this project's bug to fix:**
+  - `Command(resume=None)` raises `UnboundLocalError: cannot access local
+    variable 'resume_is_map' where it is not associated with a value` from
+    inside LangGraph itself (`pregel/_loop.py:910,927` — `resume_is_map`
+    is bound only on one conditional branch but read unconditionally). A
+    `None` resume value is a real possibility for a real CLI command
+    parsing real argv, so `causalops approve`/`reject` must validate its
+    decision argument before ever calling `Command(resume=...)`, not rely
+    on the graph to reject a bad one gracefully.
+  - After a re-pause (a second or later `interrupt()` call on the same
+    interrupt id, following an invalid decision), `compiled.get_state(config).next`
+    reads `()` — empty, as if the run had finished — while `.interrupts`
+    still holds the one pending `Interrupt`. Verified directly: a bad
+    resume leaves `next=()` and `interrupts=(Interrupt(...),)` together.
+    Unit 2c must detect a pending approval by checking `.interrupts`,
+    never `.next` — `.next` alone would misreport a re-paused thread as
+    settled.
 
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
