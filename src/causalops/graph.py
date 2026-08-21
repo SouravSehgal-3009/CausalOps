@@ -1557,7 +1557,7 @@ def resume_graph_investigation(
     that `thread_id` names a real, pending interrupt, that `decision`/
     `rejection_note` are a validated pair, and that the owner's decision is
     already durably recorded in `owner_decisions` before this function is
-    ever called (`TECHNICAL_SPEC.md:162-164`'s record-before-resume rule).
+    ever called (`TECHNICAL_SPEC.md:170-172`'s record-before-resume rule).
     This function's only job is the graph turn itself -- the assertion
     below is a "recompute, don't trust the caller" check of the one
     precondition (a real checkpoint exists) that would otherwise fail

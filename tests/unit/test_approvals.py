@@ -17,6 +17,7 @@ is inert and exercises the real production code path rather than a stub.
 """
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import timedelta
@@ -36,12 +37,12 @@ from fake_incident import (
     replay_model,
 )
 from langchain_core.runnables import RunnableConfig
-from langgraph.types import Command
+from langgraph.types import Command, StateSnapshot
 from pydantic import ValidationError
 
 from causalops import cli
 from causalops.approvals import (
-    ApprovalError,
+    CheckpointStoreError,
     DecisionRow,
     OwnerDecision,
     ensure_decisions_table,
@@ -154,7 +155,7 @@ def test_a_conflicting_composite_key_write_is_refused_by_the_database(
             conn, "thread-1", "cp-1", OwnerDecision(decision="accept"), utc_now()
         )
 
-        with pytest.raises(ApprovalError) as excinfo:
+        with pytest.raises(CheckpointStoreError) as excinfo:
             record_decision_before_resume(
                 conn,
                 "thread-1",
@@ -188,7 +189,7 @@ def test_a_mispaired_row_is_refused_as_a_store_problem_not_a_traceback(
         )
         conn.commit()
 
-        with pytest.raises(ApprovalError) as excinfo:
+        with pytest.raises(CheckpointStoreError) as excinfo:
             read_decision_for_thread(conn, "thread-1")
 
     assert excinfo.value.reason_code.value == "STORE_UNAVAILABLE"
@@ -211,7 +212,7 @@ def test_an_unparseable_decided_at_is_refused_as_a_store_problem(
         )
         conn.commit()
 
-        with pytest.raises(ApprovalError) as excinfo:
+        with pytest.raises(CheckpointStoreError) as excinfo:
             read_decision_for_thread(conn, "thread-1")
 
     assert excinfo.value.reason_code.value == "STORE_UNAVAILABLE"
@@ -222,7 +223,7 @@ def test_approve_refuses_cleanly_when_the_decision_row_is_corrupted(
 ) -> None:
     """The end-to-end proof through `cli.main`: a corrupted `owner_decisions`
     row must surface as `FAIL STORE_UNAVAILABLE ...`, never an unhandled
-    traceback, since `ApprovalError` is in `main`'s `except` tuple."""
+    traceback, since `CheckpointStoreError` is in `main`'s `except` tuple."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_incident(tmp_path)
@@ -373,6 +374,32 @@ def _report_json(root: Path, thread_id: str) -> InvestigationReport:
     return InvestigationReport.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def _checkpoint_snapshot(root: Path, thread_id: str) -> StateSnapshot:
+    """The same read `run_decision_command` itself performs before deciding
+    whether a thread is still pending -- `.next`/`.interrupts`, never a bare
+    `SqliteSaver.get_tuple`, which exposes neither. Used by the crash-
+    recovery tests below to confirm each retry actually starts from the
+    window its name claims: paused (interrupted, no report) for one test,
+    settled (no interrupt, report present) for the other -- not merely
+    "whichever function got monkeypatched," which a future `DISPATCH_TOOL`
+    route could make ambiguous (a re-paused settle looks identical to a
+    still-pending one by function-patched alone)."""
+    db_path = root / "results" / "checkpoints.db"
+    with cli._sqlite_checkpointer(db_path) as checkpointer:
+        compiled = build_graph(
+            incident_scope(),
+            alert_packet(),
+            Budgets(),
+            utc_now,
+            ReplayToolCallingModel(replay_model(root, {})),
+            logs_only_registry(RecordingLogsBackend()),
+            checkpointer,
+            event_clock=utc_now,
+        )
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        return compiled.get_state(config)
+
+
 def _feed_one_bad_resume(root: Path, thread_id: str) -> None:
     """Puts a paused thread into the *re-paused* state from Unit 2b's own
     measured table -- `.next == ()`, `.interrupts` still non-empty --
@@ -418,6 +445,34 @@ def test_a_re_paused_thread_is_still_approvable_through_dot_interrupts(
     report = _report_json(tmp_path, "re-paused-thread")
     assert report.escalation is not None
     assert report.escalation.decision == "accept"
+
+
+def test_approve_reports_a_locked_checkpoint_store_instead_of_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unit 2d: `run_decision_command`'s own `mkdir`/`sqlite3.connect` pair
+    (`cli.py`, the connection `owner_decisions` lives behind) was the other
+    untranslated connection open -- reached before any thread lookup, so no
+    incident or paused thread is needed to exercise it, only a `results/`
+    directory this process cannot write into."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    os.chmod(results_dir, 0o500)
+    assert not os.access(results_dir, os.W_OK), (
+        "chmod did not make results/ read-only on this filesystem -- "
+        "this test cannot prove anything here"
+    )
+
+    try:
+        exit_status = cli.main(["approve", "any-thread-id"])
+    finally:
+        os.chmod(results_dir, 0o700)
+
+    assert exit_status == 1
+    assert "FAIL STORE_UNAVAILABLE" in capsys.readouterr().out
 
 
 def test_approve_on_an_unknown_thread_fails_thread_not_found(
@@ -478,7 +533,7 @@ def test_approve_on_a_never_paused_thread_fails_no_pending_interrupt(
 def test_the_decision_is_recorded_before_the_graph_is_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`TECHNICAL_SPEC.md:162-164`'s record-before-resume rule, pinned
+    """`TECHNICAL_SPEC.md:170-172`'s record-before-resume rule, pinned
     behaviourally rather than by call order: `resume_graph_investigation`
     is monkeypatched to crash before it can do anything, standing in for a
     real crash mid-resume. If the decision were recorded *after* resuming
@@ -512,6 +567,116 @@ def test_the_decision_is_recorded_before_the_graph_is_resumed(
     assert not (
         tmp_path / "results" / "investigations" / "crash-before-settle-thread"
     ).exists()
+
+
+def test_a_retry_after_a_crash_before_resume_still_settles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unit 2d's own crash/idempotency suite. The branch the test above
+    stops short of: after the identical crash (decision row written,
+    `Command(resume=...)` never called at all -- this thread is still
+    genuinely paused, not merely reported as such), a *retry* must find the
+    existing row, skip the redundant write, and actually resume this time.
+    Before this unit this was 2c's own design note ("the retry path...is
+    what turns a mid-resume crash into a recoverable second attempt"),
+    reasoned about but never exercised."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _write_incident(tmp_path)
+    _pause_a_thread(tmp_path, "crash-before-resume-thread")
+
+    real_resume = cli.resume_graph_investigation
+
+    def _crash(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated crash mid-resume")
+
+    monkeypatch.setattr(cli, "resume_graph_investigation", _crash)
+    with pytest.raises(RuntimeError, match="simulated crash mid-resume"):
+        cli.main(["approve", "crash-before-resume-thread"])
+    # `monkeypatch.undo()` would also revert `monkeypatch.chdir` above --
+    # restore only the one attribute this test actually broke.
+    monkeypatch.setattr(cli, "resume_graph_investigation", real_resume)
+
+    db_path = tmp_path / "results" / "checkpoints.db"
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        row_before_retry = read_decision_for_thread(conn, "crash-before-resume-thread")
+    assert row_before_retry is not None
+    assert not (
+        tmp_path / "results" / "investigations" / "crash-before-resume-thread"
+    ).exists()
+    # The property this test's name claims and the earlier test does not
+    # distinguish itself from: the thread is still genuinely paused, not
+    # merely reported as such by which function got monkeypatched.
+    snapshot_before_retry = _checkpoint_snapshot(tmp_path, "crash-before-resume-thread")
+    assert snapshot_before_retry.interrupts
+    assert snapshot_before_retry.next == ("escalation_interrupt",)
+    assert snapshot_before_retry.values.get("report") is None
+
+    exit_status = cli.main(["approve", "crash-before-resume-thread"])
+
+    assert exit_status == 0
+    report = _report_json(tmp_path, "crash-before-resume-thread")
+    assert report.escalation is not None
+    assert report.escalation.decision == "accept"
+
+
+def test_a_retry_after_a_crash_before_finalize_still_writes_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other untested transition: a crash *after* the graph genuinely
+    resumes and settles (the decision row exists, the checkpoint is
+    settled) but *before* `finalize_investigation` ever writes
+    `report.json`. `run_decision_command`'s fall-through path (`existing is
+    not None` and `investigations_dir` absent) must rebuild the graph, call
+    `resume_graph_investigation` again against the now-settled thread, and
+    finish the write -- resting on `Command(resume=...)` being a genuine
+    no-op against a settled thread, confirmed by direct measurement before
+    this suite was written (not merely asserted by a docstring)."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _write_incident(tmp_path)
+    _pause_a_thread(tmp_path, "crash-before-finalize-thread")
+
+    real_write_artifacts = cli._write_investigation_artifacts
+
+    def _crash(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated crash before finalize")
+
+    monkeypatch.setattr(cli, "_write_investigation_artifacts", _crash)
+    with pytest.raises(RuntimeError, match="simulated crash before finalize"):
+        cli.main(["approve", "crash-before-finalize-thread"])
+    # `monkeypatch.undo()` would also revert `monkeypatch.chdir` above --
+    # restore only the one attribute this test actually broke.
+    monkeypatch.setattr(cli, "_write_investigation_artifacts", real_write_artifacts)
+
+    db_path = tmp_path / "results" / "checkpoints.db"
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        row_before_retry = read_decision_for_thread(
+            conn, "crash-before-finalize-thread"
+        )
+    assert row_before_retry is not None
+    assert not (
+        tmp_path / "results" / "investigations" / "crash-before-finalize-thread"
+    ).exists()
+    # The property this test's name claims: the graph genuinely settled --
+    # no pending interrupt, a real report already in the checkpoint -- not
+    # merely "the function that writes artifacts happened to be the one
+    # patched." Without this, a future `DISPATCH_TOOL` route that lets
+    # `escalation_interrupt` re-pause could make this test a silent
+    # duplicate of the one above and stay green.
+    snapshot_before_retry = _checkpoint_snapshot(
+        tmp_path, "crash-before-finalize-thread"
+    )
+    assert not snapshot_before_retry.interrupts
+    assert snapshot_before_retry.next == ()
+    assert snapshot_before_retry.values.get("report") is not None
+
+    exit_status = cli.main(["approve", "crash-before-finalize-thread"])
+
+    assert exit_status == 0
+    report = _report_json(tmp_path, "crash-before-finalize-thread")
+    assert report.escalation is not None
+    assert report.escalation.decision == "accept"
 
 
 def test_a_two_process_approve_settles_and_writes_full_events(

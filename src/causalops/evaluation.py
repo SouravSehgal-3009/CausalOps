@@ -18,6 +18,7 @@ from causalops.domain import (
     InvestigationReport,
     PolicyResult,
     ReasonCode,
+    ReceiptState,
     RootCauseCode,
     ToolReceipt,
 )
@@ -68,6 +69,17 @@ class ControlCounts(BaseModel):
     duplicate: int = 0
     out_of_scope: int = 0
     invalid_responses: int = 0
+    # A check that spent budget and never got a result -- a crash between
+    # `ReservationLedger.reserve()` and `.settle()` (see `tool_wrappers.py`).
+    # `count_control` below counts this as `state is ReceiptState.RESERVED`,
+    # not the more cautious `policy_result is ALLOWED and state is RESERVED`
+    # it might look like it should be: `tool_wrappers.py:142-153` constructs
+    # every `RESERVED` receipt with `policy_result=ALLOWED` unconditionally,
+    # and `record()` (the only path that ever writes a `DENIED` receipt,
+    # `tool_wrappers.py:205-222`) refuses anything not already `SETTLED`. No
+    # `DENIED` receipt can be `RESERVED` by construction, so the simpler
+    # predicate is not an approximation -- it is the same set.
+    unsettled: int = 0
 
 
 class Efficiency(BaseModel):
@@ -180,6 +192,9 @@ def count_control(
             [denial for denial in denied if denial.reason_code in OUT_OF_SCOPE_REASONS]
         ),
         invalid_responses=report.invalid_responses,
+        unsettled=len(
+            [receipt for receipt in receipts if receipt.state is ReceiptState.RESERVED]
+        ),
     )
 
 
@@ -190,9 +205,24 @@ def score_run(
     expected: ExpectedOutcome,
 ) -> MechanicalScores:
     supported = cited_evidence(report, evidence)
+    # `diagnosis_correct` and `disposition_correct` deliberately answer
+    # different questions. `diagnosis_correct` is a factual property of the
+    # root cause the model proposed, independent of what the owner did with
+    # it -- conflating the two would make a rejected-but-correct diagnosis
+    # indistinguishable from a rejected-and-wrong one, losing exactly the
+    # signal a diagnostic-quality evaluation needs. `disposition_correct`
+    # answers whether the disposition this run actually settled on was one
+    # worth acting on -- and an owner **rejection** overrides that, however
+    # accurate the underlying assessment was, since `report.disposition`
+    # itself is left unchanged by a reject (`graph.py:301-309`'s
+    # `_build_report` computes `disposition` from `assessment` alone and
+    # never consults `escalation` -- rejection deliberately preserves the
+    # assessment, but that is this function's own behaviour, not a claim
+    # `EscalationRecord`'s docstring makes).
+    rejected = report.escalation is not None and report.escalation.decision == "reject"
     return MechanicalScores(
         diagnosis_correct=report.root_cause is expected.root_cause,
-        disposition_correct=report.disposition is expected.disposition,
+        disposition_correct=report.disposition is expected.disposition and not rejected,
         citations_valid=citations_are_valid(report, evidence),
         citations_sufficient=all(
             any(satisfies(predicate, record) for record in supported)

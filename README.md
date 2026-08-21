@@ -27,9 +27,11 @@ uv run causalops doctor
 The same commands run from a POSIX shell on Linux x86-64.
 
 `doctor` checks the operating system, total and available RAM, free disk on the
-project drive, that `runs/` and `results/` are writable, that Docker answers,
-and that `ANTHROPIC_API_KEY` is set. It exits 0 when every hard check passes and
-1 otherwise, printing a stable reason code for each problem.
+project drive, that `runs/` and `results/` are writable, that
+`results/checkpoints.db` is readable if it already exists, that Docker
+answers, and that `ANTHROPIC_API_KEY` is set. It exits 0 when every hard
+check passes and 1 otherwise, printing a stable reason code for each
+problem.
 
 The authenticated `claude-sonnet-5` metadata request described in
 `TECHNICAL_OVERVIEW.md`'s CLI contract section is not implemented yet.

@@ -12,6 +12,16 @@ instruction from outside the process (`TECHNICAL_SPEC.md` §12's dual-review
 trigger for this unit): `causalops approve`/`reject` run in a second process
 from the one that paused, with nothing but a thread id and, for a reject,
 free text a person typed.
+
+`CheckpointStoreError`/`CheckpointStoreReasonCode` (Unit 2d) are named for
+`results/checkpoints.db`, not for "approval," even though they are defined
+here: `owner_decisions` and LangGraph's own `checkpoints`/`writes` tables
+live in that one physical file, and `cli.py`'s `_sqlite_checkpointer` --
+used unconditionally by a plain `causalops investigate`, with no approval in
+sight -- raises the same type on a failure to open it. The name was
+`ApprovalError` through Unit 2c, when this module was the only thing that
+ever opened that file; keeping that name once a second, approval-free
+caller needed it too would have left it wrong at half its call sites.
 """
 
 import sqlite3
@@ -32,13 +42,19 @@ from pydantic import (
 from causalops.tools import UtcDatetime
 
 
-class ApprovalReasonCode(StrEnum):
-    """Stable codes for `causalops approve`/`reject`'s own refusals.
+class CheckpointStoreReasonCode(StrEnum):
+    """Stable codes for a refusal reading or writing `results/checkpoints.db`.
 
     A new vocabulary, not `causalops.domain.ReasonCode` (receipt/report
     outcomes) or `causalops.scenario_control.LabReasonCode` (lab/scenario
-    commands) -- this unit's failures are about an authorization instruction
-    from outside the process, a genuinely different category from either.
+    commands) -- these failures are about an authorization instruction from
+    outside the process, or about the local store itself, a genuinely
+    different category from either. `THREAD_NOT_FOUND`,
+    `NO_PENDING_INTERRUPT`, `CONFLICTING_DECISION`, and
+    `INVALID_REJECTION_NOTE` are reachable only through `causalops
+    approve`/`reject`; `STORE_UNAVAILABLE` is also raised by
+    `cli._sqlite_checkpointer`, reachable from a plain `causalops
+    investigate` too, since both open the same file.
     """
 
     THREAD_NOT_FOUND = "THREAD_NOT_FOUND"
@@ -48,13 +64,13 @@ class ApprovalReasonCode(StrEnum):
     STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
 
 
-class ApprovalError(Exception):
-    """`causalops approve`/`reject` refused, with one stable reason code --
-    the same shape `causalops.run_records.RunRecordError` and
+class CheckpointStoreError(Exception):
+    """`results/checkpoints.db` could not be opened or used, with one stable
+    reason code -- the same shape `causalops.run_records.RunRecordError` and
     `causalops.scenario_control.LabError` already use, so `cli.py`'s `main`
     can format all three into one `FAIL <CODE> <message>` contract."""
 
-    def __init__(self, reason_code: ApprovalReasonCode, message: str) -> None:
+    def __init__(self, reason_code: CheckpointStoreReasonCode, message: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
 
@@ -178,8 +194,8 @@ def ensure_decisions_table(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
     except sqlite3.Error as error:
-        raise ApprovalError(
-            ApprovalReasonCode.STORE_UNAVAILABLE,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"owner_decisions table unavailable: {error}",
         ) from error
 
@@ -207,8 +223,8 @@ def read_decision_for_thread(
             (thread_id,),
         ).fetchone()
     except sqlite3.Error as error:
-        raise ApprovalError(
-            ApprovalReasonCode.STORE_UNAVAILABLE,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"owner_decisions unreadable: {error}",
         ) from error
     if row is None:
@@ -229,8 +245,8 @@ def read_decision_for_thread(
             decided_at=row[4],
         )
     except ValidationError as error:
-        raise ApprovalError(
-            ApprovalReasonCode.STORE_UNAVAILABLE,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"owner_decisions holds an unreadable row for {thread_id}: {error}",
         ) from error
 
@@ -243,7 +259,7 @@ def record_decision_before_resume(
     decided_at: datetime,
 ) -> None:
     """Writes one append-only row before the caller ever calls
-    `Command(resume=...)` (`TECHNICAL_SPEC.md:162-164`'s record-before-resume
+    `Command(resume=...)` (`TECHNICAL_SPEC.md:170-172`'s record-before-resume
     rule) -- no update or delete path exists anywhere in this module.
 
     Called only after the caller has already confirmed, via
@@ -269,13 +285,13 @@ def record_decision_before_resume(
         )
         conn.commit()
     except sqlite3.IntegrityError as error:
-        raise ApprovalError(
-            ApprovalReasonCode.CONFLICTING_DECISION,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.CONFLICTING_DECISION,
             f"{thread_id} already has a recorded decision for checkpoint "
             f"{checkpoint_id}",
         ) from error
     except sqlite3.Error as error:
-        raise ApprovalError(
-            ApprovalReasonCode.STORE_UNAVAILABLE,
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"owner_decisions unwritable: {error}",
         ) from error

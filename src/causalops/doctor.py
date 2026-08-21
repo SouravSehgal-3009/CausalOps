@@ -1,6 +1,8 @@
 """Local environment checks behind `causalops doctor`."""
 
+import sqlite3
 from collections.abc import Mapping
+from contextlib import closing
 from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
@@ -39,6 +41,7 @@ class DoctorReasonCode(StrEnum):
     LOW_AVAILABLE_MEMORY = "LOW_AVAILABLE_MEMORY"
     INSUFFICIENT_FREE_DISK = "INSUFFICIENT_FREE_DISK"
     RUN_DIRECTORY_NOT_WRITABLE = "RUN_DIRECTORY_NOT_WRITABLE"
+    CHECKPOINT_DATABASE_UNREADABLE = "CHECKPOINT_DATABASE_UNREADABLE"
     DOCKER_UNAVAILABLE = "DOCKER_UNAVAILABLE"
     MISSING_API_KEY = "MISSING_API_KEY"
     SYSTEM_READ_FAILED = "SYSTEM_READ_FAILED"
@@ -59,6 +62,14 @@ class ProjectPaths(BaseModel):
     @property
     def results(self) -> Path:
         return self.root / "results"
+
+    @property
+    def checkpoints_db(self) -> Path:
+        """`cli.py` spelled this path independently at two call sites
+        (`_sqlite_checkpointer`'s caller and `run_decision_command`) before
+        Unit 2d, with no shared name to keep them from drifting apart. One
+        accessor here, next to `runs`/`results` above."""
+        return self.results / "checkpoints.db"
 
 
 def find_project_root(start: Path) -> Path | None:
@@ -266,6 +277,71 @@ def check_writable_directories(paths: ProjectPaths) -> CheckResult:
     )
 
 
+def check_checkpoint_database(paths: ProjectPaths) -> CheckResult:
+    """Whether `results/checkpoints.db` -- the file `cli._sqlite_checkpointer`
+    and `causalops approve`/`reject` both open -- is a database this machine
+    can actually read.
+
+    Unit 2d. Distinct from `check_writable_directories` above: that check
+    proves `results/` accepts a *new* file; it says nothing about whether an
+    *existing* `checkpoints.db` is readable, locked, or corrupt. It is also
+    the one thing `cli.py`'s own connection-open translation cannot catch --
+    `sqlite3.connect` is lazy, so a corrupt-but-openable file passes
+    `connect()` and only raises once something reads or writes it, deep
+    inside a LangGraph call `cli.py` does not wrap. This check reads the
+    file directly, here, before that ever happens.
+
+    The read is `SELECT name FROM sqlite_master LIMIT 1`, not `SELECT 1`:
+    `SELECT 1` needs no page from the file at all, so some SQLite builds
+    answer it without ever reading the header -- measured directly, the
+    bundled `uv`-pinned 3.53.1 happens to raise on a corrupt file with
+    either query, but the system's 3.46.1 answers `SELECT 1` with no error
+    on the exact same corrupt file and would silently `PASS`. Reading
+    `sqlite_master` forces a real page read on every build, which is the
+    one thing a check whose entire job is detecting corruption cannot skip.
+
+    Never creates the file: a project that has never run `investigate` has
+    no `checkpoints.db` yet, and that is healthy, not a failure. `run_doctor`'s
+    own no-leftover-scratch-file guarantee
+    (`test_scratch_file_leaves_nothing_behind`) still holds for this check:
+    nothing here ever calls anything but `is_file()`/`sqlite3.connect()`
+    read-only against a path that already exists.
+
+    `db_path.is_file()` itself can raise `OSError` (`PermissionError` on a
+    directory this process cannot even stat, such as a root-owned
+    `results/` from the Docker lab) -- it is inside the `try` below, not a
+    guard before it, precisely so that failure is `CHECKPOINT_DATABASE_
+    UNREADABLE` and not an unhandled traceback. `run_doctor_command` runs
+    outside `main`'s own `try`/`except`, so any exception escaping a check
+    function reaches the owner as a raw traceback instead of the report
+    this command exists to produce -- on the exact machine this command
+    exists to diagnose.
+    """
+    db_path = paths.checkpoints_db
+    try:
+        if not db_path.is_file():
+            return CheckResult(
+                name="checkpoint_database",
+                status=CheckStatus.PASS,
+                message=f"No {db_path} yet -- nothing to check before the "
+                "first investigation.",
+            )
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+    except (sqlite3.Error, OSError) as error:
+        return CheckResult(
+            name="checkpoint_database",
+            status=CheckStatus.FAIL,
+            reason_code=DoctorReasonCode.CHECKPOINT_DATABASE_UNREADABLE,
+            message=f"{db_path} could not be read: {error}",
+        )
+    return CheckResult(
+        name="checkpoint_database",
+        status=CheckStatus.PASS,
+        message=f"{db_path} is readable.",
+    )
+
+
 def check_docker(probe: SystemProbe) -> CheckResult:
     if not probe.docker_responds():
         return CheckResult(
@@ -322,6 +398,7 @@ def run_doctor(
             check_available_memory(probe),
             check_free_disk(probe, paths.root),
             check_writable_directories(paths),
+            check_checkpoint_database(paths),
             check_docker(probe),
             check_api_key(environment),
         )

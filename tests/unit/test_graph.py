@@ -53,6 +53,7 @@ from causalops.domain import (
     ToolOutcome,
     ToolProposal,
 )
+from causalops.evaluation import count_control
 from causalops.evidence import build_evidence
 from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_investigation
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
@@ -262,6 +263,25 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
     assert "RuntimeError" in recorded
     assert "lab unreachable" not in recorded
     assert "lab unreachable" not in result.report.model_dump_json()
+
+
+def test_a_real_crashed_receipt_scores_as_unsettled() -> None:
+    """`ControlCounts.unsettled` (Unit 2d) closes the gap the test above
+    demonstrates at the receipt level -- this scores the *same kind* of
+    crash-produced report through the real scorer, not a hand-built
+    `ToolReceipt` fixture (`test_evaluation.py`'s own `unsettled` tests use
+    one, since that file's job is the scoring function's own logic in
+    isolation). A production crash and the scorer disagreeing about what
+    happened is exactly the failure mode a hand-built fixture cannot
+    surface."""
+    backend = RecordingLogsBackend(raises=RuntimeError("lab unreachable"))
+    registry = logs_only_registry(backend)
+
+    result, _ = investigate_via_graph(graph_replay_model(), registry=registry)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    control = count_control(result.report, result.receipts)
+    assert control.unsettled == 1
 
 
 def test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached(

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -269,6 +270,46 @@ def test_investigate_runs_an_investigation_end_to_end(
         ToolOutcome.EXECUTED,
         ToolOutcome.EXECUTED,
     ]
+
+
+def test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unit 2d: before this unit, `cli._sqlite_checkpointer`'s bare
+    `sqlite3.connect(...)` let a locked/missing-parent database escape as a
+    raw traceback -- measured against exactly this scenario (a read-only
+    `results/` directory with no `checkpoints.db` in it yet, so
+    `sqlite3.connect` itself has to create the file and raises
+    `OperationalError` immediately, rather than the lazier corrupt-existing
+    -file case a connect-time wrap cannot catch)."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    scope = incident_scope()
+    incident = StoredIncident(
+        scope=scope, packet=alert_packet(), evidence=packet_evidence()
+    )
+    paths = RunPaths(root=tmp_path / "runs" / scope.incident_id)
+    paths.root.mkdir(parents=True)
+    paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    os.chmod(results_dir, 0o500)
+    # A permission bit that silently failed to take would make this test
+    # pass for the wrong reason -- the same defect class this project keeps
+    # finding (see `CLAUDE.md`'s "Current state" log). Fail loudly instead.
+    assert not os.access(results_dir, os.W_OK), (
+        "chmod did not make results/ read-only on this filesystem -- "
+        "this test cannot prove anything here"
+    )
+
+    try:
+        exit_status = cli.main(["investigate", scope.incident_id, "--model", "replay"])
+    finally:
+        os.chmod(results_dir, 0o700)
+
+    assert exit_status == 1
+    assert "FAIL STORE_UNAVAILABLE" in capsys.readouterr().out
 
 
 def test_investigate_pauses_and_reports_escalation_without_finalizing(

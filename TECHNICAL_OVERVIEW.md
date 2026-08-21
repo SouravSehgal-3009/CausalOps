@@ -1062,12 +1062,17 @@ tie on `observed_at` to fall through to the id tie-break.
   forbids indirection without a concrete demonstrated need, and one
   implementation is not that. Closes when the live Claude adapter unit adds
   a second implementation to design the protocol against.
-- `evaluation.py`'s `count_control` (`evaluation.py:164-183`) reads only
-  `policy_result` and `reason_code`, never `outcome` or the new `state`
-  field, so a run ending with a `RESERVED` receipt is invisible to the
-  scorer's `ControlCounts`. Scorer changes were out of scope for Unit 1a or
-  1b; this closes once Milestone 2 makes reservations durable across a
-  checkpoint resume.
+- ~~`evaluation.py`'s `count_control` reads only `policy_result` and
+  `reason_code`, never `outcome` or the new `state` field, so a run ending
+  with a `RESERVED` receipt is invisible to the scorer's `ControlCounts`.~~
+  **Closed in Unit 2d**, which added `ControlCounts.unsettled`. The closing
+  condition recorded here at the time — "once Milestone 2 makes reservations
+  durable across a checkpoint resume" — was wrong: reachability was never
+  gated on durability. The in-process crash path has produced a `RESERVED`
+  receipt in a finalized report since Unit 1d-1 (`test_graph.py:221-253`),
+  before any SQLite checkpointer existed. What Unit 2d actually needed was
+  simply teaching the scorer to count a state the domain model already
+  supported.
 - `ToolReceipt`'s lifecycle validator checks `state` against `outcome`/
   `result_digest`/`evidence_id` only. It does not (yet) reject a `RESERVED`
   receipt carrying a `reason_code` or a nonzero `duration_ms`, or a
@@ -1134,11 +1139,15 @@ new fix landed in this unit; the evidence-carry fix above is 1d-1's, not
 
 ## Milestone 2 — Durable escalation and owner approval
 
-**Status:** Units 2a and 2b landed. Unit 2c (approval routing and the
-append-only decision record — this milestone's dual-review completion
-snapshot) is implemented below and frozen for review; not yet committed. 2d
-(crash/idempotency tests, the `ControlCounts` gap) has not started. Curated
-FTS5 runbooks, retrieval provenance, and
+**Status:** Units 2a, 2b, 2c, and 2d are implemented below; Milestone 2 is
+complete pending dual review of 2d's frozen snapshot. §12's "approval
+routing" deliverable is two-thirds built, not fully: accept and reject both
+route to `FINAL_REPORT` and are fully tested; the third owner option
+(approving one additional already-authorized check, routed to
+`DISPATCH_TOOL`) defers until a policy-approved next-check proposal exists to
+approve (`TECHNICAL_SPEC.md` §8, *Amendment, Unit 2d*) — 2b's own gap list
+assigned closing this to 2c, 2c did neither, and it went unrecorded until
+2d's planning caught it. Curated FTS5 runbooks, retrieval provenance, and
 injection/no-ground-truth-leakage tests defer to Milestone 3
 (`TECHNICAL_SPEC.md` §12, *Amendment, Milestone 2*); Pinecone remains a
 post-milestone optional experiment.
@@ -1417,7 +1426,7 @@ is not.
 
 - The `interrupt()` payload itself carries `reason`, `evidence_ids`, and
   `remaining_check_count`, but not `thread_id`/`run_id`/`checkpoint_id` —
-  all three `TECHNICAL_SPEC.md:264-265` names as part of the payload. All
+  all three `TECHNICAL_SPEC.md:272-273` names as part of the payload. All
   three are recoverable by any second process that already knows the
   thread id (which it must, to call `compiled.get_state(config)` at all)
   and are attached by `run_graph_investigation` when assembling
@@ -1432,7 +1441,8 @@ is not.
   label, because rejecting an escalation deliberately does not change
   either field (see above). Whether a rejected run should score
   differently is an evaluation-design question outside this unit's scope,
-  written down here so it is not silently assumed away.
+  written down here so it is not silently assumed away. **Closed in
+  Unit 2d.**
 - `EscalationReason.TOOL_UNAVAILABLE` and `ReasonCode.TOOL_UNAVAILABLE`
   share the literal `"TOOL_UNAVAILABLE"`, mandated by `TECHNICAL_SPEC.md`
   §8 for the former. Both are `StrEnum`, so they compare equal (`==`)
@@ -1659,6 +1669,13 @@ corrupt `checkpoints.db`; that translation, and the crash/idempotency
 stress tests for both stores, remain Unit 2d's, exactly as recorded when
 Unit 2a shipped.
 
+*Renamed in Unit 2d:* `ApprovalReasonCode`/`ApprovalError` became
+`CheckpointStoreReasonCode`/`CheckpointStoreError`, once `_sqlite_checkpointer`
+— used unconditionally by a plain `causalops investigate`, with no approval
+in sight — needed to raise the same type. The five members above kept their
+names and values; only the two type names changed. This paragraph is left
+under 2c's original names as an accurate record of what 2c actually shipped.
+
 **Mutation-tested, against the real tree** (`PYTHONPATH=src`, `__pycache__`
 purged before each run, each mutation reverted immediately after its
 failure was observed): `_parse_resume_decision`'s rejection of the old bare-
@@ -1701,11 +1718,19 @@ purged; `grep -rn MUTATION src tests` stayed clean throughout.
 **Known gaps, deliberately not this unit's to close:**
 
 - `cli._sqlite_checkpointer`'s bare `sqlite3.connect(...)` still has no
-  error translation — Unit 2d's, as recorded when Unit 2a shipped. This
-  unit's own new connection (`approvals.py`'s `owner_decisions` access) does
-  translate both `sqlite3.Error` and `pydantic.ValidationError` (a
-  corrupted row) into `ApprovalError(STORE_UNAVAILABLE)`, but only for that
-  connection.
+  error translation — Unit 2d's, as recorded when Unit 2a shipped.
+  **Correction, recorded in Unit 2d:** this bullet originally went on to say
+  this unit's own new connection (`cli.py`'s `owner_decisions` access) *does*
+  translate that failure, "but only for that connection." That overstated
+  what 2c actually built: 2c translated `sqlite3.Error` and
+  `pydantic.ValidationError` (a corrupted row) *inside* `approvals.py`'s
+  already-open-connection functions (`ensure_decisions_table`,
+  `read_decision_for_thread`, `record_decision_before_resume`) into
+  `ApprovalError(STORE_UNAVAILABLE)` — but the `sqlite3.connect(...)` call
+  itself, in `cli.py`, was never wrapped by 2c at all. It was exactly as
+  untranslated as `_sqlite_checkpointer`'s own, for the identical reason:
+  neither connection open had a `try`/`except` around it yet. Unit 2d closes
+  both.
 - A crash between `record_decision_before_resume` committing and
   `Command(resume=...)` ever being called is handled (the retry path
   resumes again using the already-recorded decision), but a crash between a
@@ -1741,11 +1766,203 @@ purged; `grep -rn MUTATION src tests` stayed clean throughout.
   future unit ever lets them diverge.
 - `evaluation.py:195`'s blindness to `escalation.decision`, recorded when
   Unit 2b shipped, is unchanged: an owner-rejected diagnosis still scores as
-  correct. Still open, still outside this unit's scope.
+  correct. Still open, still outside this unit's scope. **Closed in Unit
+  2d.**
 - `doctor.py`'s `ProjectPaths` still has no accessor or write-probe for
   `checkpoints.db`, and now implicitly covers `owner_decisions` too, since
   both live in the same file. Deferred alongside the error-translation gap
-  above for the same reason.
+  above for the same reason. **Closed in Unit 2d** (the `checkpoints_db`
+  accessor and `check_checkpoint_database` probe below) -- narrower than a
+  general write-probe: it reads an *existing* file, which
+  `check_writable_directories` cannot prove anything about.
+
+### Unit 2d — crash durability, the scorer, and closing the milestone
+
+Closes Milestone 2. Four items, plus the two spec amendments recorded at
+`TECHNICAL_SPEC.md` §5 and §8 above: the crash/idempotency test suite
+(`TECHNICAL_SPEC.md:186-187`'s last outstanding named deliverable), the
+`ControlCounts.unsettled` field and the `disposition_correct` rejection fix
+in `evaluation.py`, SQLite connection-open translation at both remaining
+untranslated sites plus a `checkpoints.db` doctor probe, and the
+`ApprovalError`→`CheckpointStoreError` rename.
+
+**Measured before implementing, not assumed:**
+
+- The settled-thread no-op claim `run_decision_command`'s docstring made
+  (`Command(resume=...)` against an already-settled thread returns the
+  finished state unchanged) was run directly against production entry
+  points — pause, resume once to settle, reopen a fresh `SqliteSaver`,
+  resume again — before any recovery test was written around it. Confirmed
+  true: identical report bytes, zero additional model calls. The recovery
+  path was untested, not broken.
+- `sqlite3.connect(...)`'s actual failure surface, measured directly: a
+  read-only `results/` directory with no existing `checkpoints.db` makes
+  `connect()` itself raise `OperationalError` immediately, because it has to
+  create the file. A *corrupt but already-existing* file passes `connect()`
+  (SQLite's own connect is lazy) and only raises on first `execute()` —
+  for `_sqlite_checkpointer`, that happens deep inside
+  `compiled.invoke(...)`/`.get_state(...)`, past any wrap at the connection
+  open. The connection-open translation below covers the first case only;
+  the doctor probe covers the second.
+
+**`ControlCounts` gains `unsettled`.** `count_control` counts
+`receipt.state is ReceiptState.RESERVED`, not the more cautious compound
+`policy_result is ALLOWED and state is RESERVED` it might look like it
+should be — checked against `tool_wrappers.py:142-153` (every `RESERVED`
+receipt is constructed `policy_result=ALLOWED`) and `:205-222` (`record()`,
+the only path that ever writes a `DENIED` receipt, refuses anything not
+already `SETTLED`), so no `DENIED` receipt can be `RESERVED` by construction
+and the simpler predicate is the same set, not an approximation.
+
+**`disposition_correct` accounts for `escalation.decision`.**
+`report.disposition` stays `DIAGNOSED` on a reject — rejection deliberately
+preserves the assessment — so `disposition_correct` now also checks
+`report.escalation is None or report.escalation.decision != "reject"`.
+`diagnosis_correct` (root-cause match) is deliberately left alone: it
+answers a factual question about what the model proposed, independent of
+what the owner did with it. Conflating the two would make a
+rejected-but-correct diagnosis indistinguishable from a rejected-and-wrong
+one, losing exactly the signal a diagnostic-quality evaluation needs.
+
+**SQLite translation, at both remaining connection opens, scoped
+deliberately.** `_sqlite_checkpointer` (`cli.py`) and `run_decision_command`'s
+`owner_decisions` connection (`cli.py`) both wrap their `mkdir`/`connect`
+pair in `try`/`except (OSError, sqlite3.Error)`, raising
+`CheckpointStoreError(STORE_UNAVAILABLE)`. This closes the can't-create/
+can't-open class (measured above) and does **not** claim to close the
+corrupt-but-openable-existing-file class — that residual gap is recorded
+below and is exactly what the doctor probe exists for.
+
+**The store error type, renamed.** `ApprovalError`/`ApprovalReasonCode` →
+`CheckpointStoreError`/`CheckpointStoreReasonCode`, staying in
+`approvals.py`. All five members kept their names and values. `_sqlite_
+checkpointer` is used unconditionally by a plain `causalops investigate`,
+with no approval anywhere in that path; keeping the old name once that
+caller needed the same type too would have left it wrong at half its call
+sites. Both connections open the identical physical file
+(`results/checkpoints.db`), so this is one resource's exception type, named
+for the first feature that happened to use it, not two domains needing two
+vocabularies.
+
+**The `checkpoints_db` doctor probe.** `ProjectPaths.checkpoints_db` (new
+accessor, replacing two independent literal spellings in `cli.py`) names
+`results/checkpoints.db`. `check_checkpoint_database` passes without
+touching the filesystem when the file does not exist yet (a project that
+has never run `investigate`); when it exists, opens it and runs
+`SELECT name FROM sqlite_master LIMIT 1` — not `SELECT 1`, which needs no
+page from the file at all and so does not reliably detect corruption.
+Measured directly: on the `uv`-pinned SQLite 3.53.1 this project runs on,
+`SELECT 1` happens to raise against the corrupt-file fixture too, but on
+the system's SQLite 3.46.1 it returns no error on the exact same file —
+the check's entire job, silently skipped. `sqlite_master` raises on both
+builds. Failure reports `CHECKPOINT_DATABASE_UNREADABLE` on
+`sqlite3.Error`/`OSError`; the `is_file()` existence check runs *inside*
+the same `try` as the query, not as a guard before it, since `is_file()`
+itself can raise `PermissionError` on a directory this process cannot
+stat (a root-owned `results/` from the Docker lab) — `run_doctor_command`
+runs outside `main`'s own `try`/`except`, so a raise there would have
+crashed the command whose job is reporting a broken machine without
+crashing. Inserted between `writable_directories` and `docker` in
+`run_doctor`'s check order — eight checks now, not seven.
+
+**Crash/idempotency tests, one per named transition:**
+
+| Transition | Test | Note |
+|---|---|---|
+| Tool receipt `RESERVED`→`SETTLED`, durable half | `test_a_raising_backend_leaves_a_durable_reserved_receipt` (`test_checkpointing.py`) | The in-process half has existed since 1d-1; this closes the durable half `tool_wrappers.py:24-28` promises — a fresh `SqliteSaver` connection, opened only against the file path, reads the `RESERVED` receipt back. The authorize-to-reserve window is genuinely vacuous (one synchronous call, no I/O in between, `tool_wrappers.py:130-153`) — stated in the test module rather than written as a test that would prove nothing. |
+| Approval row exists, thread never actually resumed | `test_a_retry_after_a_crash_before_resume_still_settles` (`test_approvals.py`) | Extends 2c's own `test_the_decision_is_recorded_before_the_graph_is_resumed` scaffold: after the identical crash, remove the injected fault and retry — the thread is still genuinely paused (`Command(resume=...)` was never called at all), and the retry must find the existing row, skip the redundant write, and actually resume. |
+| Approval row exists, graph settled, artifacts never written | `test_a_retry_after_a_crash_before_finalize_still_writes_artifacts` (`test_approvals.py`) | The transition deferred from 2c. `_write_investigation_artifacts` is monkeypatched to crash after a genuine resume settles the graph; a retry must rebuild the graph, resume the now-settled thread again (a measured no-op, not a docstring claim — confirmed by `_checkpoint_snapshot`'s own assertions before the retry: no `.interrupts`, `.next == ()`, a real `report` already in `.values`, the identical read `run_decision_command` itself performs to decide pending-vs-settled), and finish the write. `finalize_investigation`'s own staging-then-atomic-rename write needed no change — a crash before it completes leaves no `investigations_dir`, so a second call proceeds normally. |
+
+Both new recovery tests restore only the one `cli` attribute they patched
+(`cli.resume_graph_investigation` / `cli._write_investigation_artifacts`),
+never `monkeypatch.undo()` — that would also revert the test's own
+`monkeypatch.chdir`, which cost one round of `FAIL THREAD_NOT_FOUND`
+failures to notice.
+
+**Mutation-tested, against the real tree** (`PYTHONPATH=src`, `__pycache__`
+purged before each run, each mutation reverted immediately after its
+failure was observed):
+
+| # | Control | Mutation | Result |
+|---|---|---|---|
+| 1 | `count_control`'s `unsettled` predicate | forced to `False` | `test_control_counts_a_reserved_receipt_as_unsettled` failed (`0 == 1`) |
+| 2 | `disposition_correct`'s rejection guard | dropped `and not rejected` | `test_an_owner_rejected_diagnosis_does_not_score_as_correct_disposition` failed |
+| 3 | `check_checkpoint_database`'s `FAIL` branch | swallowed the exception, fell through to `PASS` | `test_a_corrupt_checkpoint_database_fails_with_a_stable_code` failed |
+| 4 | `check_checkpoint_database`'s existence guard | `if not db_path.is_file()` forced to `if False` | Both `test_scratch_file_leaves_nothing_behind` (pre-existing) and the new `test_a_missing_checkpoint_database_passes_without_creating_one` failed |
+| 5 | `_sqlite_checkpointer` / `run_decision_command` connection-open wraps | removed both `try`/`except` blocks | Both `test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback` and `test_approve_reports_a_locked_checkpoint_store_instead_of_a_traceback` failed with an uncaught `sqlite3.OperationalError`, exactly the pre-2d behaviour |
+| 6 | `run_decision_command`'s `investigations_dir.is_dir()` fall-through guard | forced to `True` (always take the identical-retry shortcut once a row exists) | Both new recovery tests failed with `FileNotFoundError` reading a `report.json` that was never written |
+| 7 | `ProjectPaths.checkpoints_db` | typo'd the filename | **Not caught** by the doctor probe's own tests on the first pass — every one of them builds its fixture file *through* the same accessor it then checks, so the typo renamed both sides together and passed unnoticed. Caught only indirectly, by unrelated tests elsewhere in the suite that hardcode the literal path (`test_investigate_leaves_a_checkpoint_database_in_a_fresh_project` and most of `test_approvals.py`). Added `test_checkpoints_db_names_the_file_cli_py_actually_opens`, pinned against the literal `tmp_path / "results" / "checkpoints.db"` independently of the accessor — this is the control's own dedicated catch, not a borrowed one |
+| 8 | `check_checkpoint_database`'s `is_file()` guard | moved back outside the `try` (correctness's P1-2) | `test_an_unreadable_results_directory_fails_cleanly_instead_of_raising` failed, reproducing the exact unhandled `PermissionError` traceback the review found — the command whose job is reporting a broken machine crashed instead |
+| 9 | The two crash-recovery tests' `_checkpoint_snapshot` assertions | swapped between `test_a_retry_after_a_crash_before_resume_still_settles` and `test_a_retry_after_a_crash_before_finalize_still_writes_artifacts` (correctness's P2-2) | Both failed — the paused window does not satisfy the settled assertions and vice versa, confirming the two windows are genuinely distinguished, not copy-pasted boilerplate that would pass regardless of actual state |
+| 10 | `count_control`'s `unsettled` predicate, scored against a real crashed run | forced to `False` | `test_a_real_crashed_receipt_scores_as_unsettled` (`test_graph.py`) failed (`0 == 1`) — the same predicate mutation 1 already covers against a hand-built fixture, now also covered against a production crash |
+| 11 | `check_checkpoint_database`'s query | reverted from `SELECT name FROM sqlite_master LIMIT 1` to `SELECT 1` (simplicity's P1-1, reverted to check the fix itself) | **Not caught locally.** On the `uv`-pinned SQLite 3.53.1 this project runs on, `SELECT 1` happens to raise against the corrupt-file fixture too, so `test_a_corrupt_checkpoint_database_fails_with_a_stable_code` stays green under the mutation. Verified as a real gap instead, by reproducing independently against the system's SQLite 3.46.1 (`/usr/bin/python3`, distinct from `uv`'s venv): the identical corrupt file passes `SELECT 1` with no error there and would silently `PASS`, while `sqlite_master` raises on both builds. Correctness went on to try to falsify "not locally catchable" with five further corruption shapes against the pinned 3.53.1 build — a zeroed schema page, a junk schema page, clobbered `sqlite_master` row bytes, truncation to the 100-byte header, and plain garbage — and found all five raise on `SELECT 1` too, so there is no corruption shape that discriminates locally on this build at all. Recorded here rather than left as an unexplained query: without this row, "simplify this back to `SELECT 1`" looks free to a future editor holding only this repository. |
+
+Mutation 7's first result is worth keeping on record: it is the same defect
+class this project has now found repeatedly — a test that shares the exact
+mechanism it is supposed to be checking cannot see that mechanism break.
+Mutation 11 is the opposite lesson, worth keeping beside it: some fixes are
+correct and necessary but cannot be proven locally at all, on any test, no
+matter how the fixture is built — the only honest response is to disclose
+the gap and record the out-of-repository evidence that closes it, not to
+manufacture a local catch that does not exist.
+
+**Spec citations re-grepped after the two amendments.** The §5 amendment (8
+lines) shifted the Approval idempotency-key paragraph from `:162-164` to
+`:170-172` (4 call sites updated: `approvals.py`, `cli.py`, `graph.py`,
+`test_approvals.py`) and the §8 interrupt-payload paragraph from `:264-265`
+to `:272-273` (1 call site, this file, above). `:140-142` (the `run_id`
+requirement) sits entirely above both insertion points and is unchanged.
+One citation, `graph.py:139`'s `TECHNICAL_SPEC.md:155-158` for the
+model-request idempotency key, was already one line off the paragraph it
+names (`:156-159`) before this unit touched the file — pre-existing, not
+shifted by this unit's edits, left unfixed as out of scope for a citation
+sweep triggered by this unit's own insertions.
+
+**Correction, found by correctness review:** the sweep above covered every
+*existing* citation of a moved range but missed two *new* ones this unit
+wrote. The §5 amendment landed first in the document and pushed 2c's own
+`*Amendment, Unit 2c:*` paragraph from `:166` to `:174` — so by the time
+this unit's own §8 amendment was written, further down the same file, and
+cited that paragraph as "the same structural gap `:166`'s Unit 2c amendment
+recorded" (twice, `TECHNICAL_SPEC.md:298` and `:305`), the `:166` in that
+new text was already wrong the moment it was typed, before this unit ever
+ran a citation sweep. Fixed to `:174` at both sites. The lesson `CLAUDE.md`
+already records from Unit 2c — "when an amendment moves spec content,
+re-grep every citation of the moved range" — needs one clause added: re-grep
+the text you are writing in the same edit, not only the text that already
+existed before it, since a later paragraph in the same file can cite an
+earlier one that your own earlier edit already moved.
+
+**Known gaps, deliberately not this unit's to close:**
+
+- The corrupt-but-openable-existing-`checkpoints.db` case: `sqlite3.connect`
+  succeeds against it (lazy), and the failure only surfaces once something
+  actually reads or writes it — for `_sqlite_checkpointer`, deep inside a
+  LangGraph call this unit does not wrap. The doctor probe is the intended
+  defense, proactive rather than reactive; widening the connection-open
+  translation to cover it would mean wrapping every `compiled.invoke`/
+  `.get_state` call site, materially more surface than "translate both
+  connection opens" scoped.
+- `evaluation.py:195`'s blindness to `escalation.decision`, recorded when
+  Unit 2b shipped and still open through 2c, is closed by this unit's
+  `disposition_correct` fix above.
+- `SCORER_VERSION` stays `"1"`. **Reworded, found by correctness review:**
+  the original justification here called this change "additive, existing
+  counters keep identical meaning" — true of `ControlCounts.unsettled` (a
+  new field, old counters unchanged), false of `disposition_correct` (an
+  *existing* field): the same `report`/`expected` pair can score differently
+  under this unit than it did before it, which is a behavioural change, not
+  an additive one. The actual reason the version stays put is narrower and
+  does not depend on that claim: no `evaluate` command exists yet, so no
+  evaluation record has ever been produced under version `"1"` for a later
+  one to disagree with — there is nothing to migrate, additive or not.
+  Flagged for reviewers rather than settled unilaterally — the
+  counter-argument is that `SCORER_VERSION` exists specifically to
+  distinguish scorer outputs, and a scorer that scores the same input
+  differently is arguably what it is for.
+- §8's third owner option (approve one additional check, routed to
+  `DISPATCH_TOOL`) remains deferred by this unit's own §8 amendment, not
+  built — recorded above under Milestone 2's status, not repeated here.
 
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
