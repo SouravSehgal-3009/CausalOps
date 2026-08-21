@@ -22,6 +22,8 @@ from fake_incident import (
     replay_model,
     update_json,
 )
+from langgraph.errors import GraphBubbleUp
+from langgraph.graph.state import CompiledStateGraph
 
 import causalops.graph as graph_module
 import causalops.tool_wrappers as tool_wrappers_module
@@ -435,6 +437,111 @@ def test_a_crashing_model_still_reports_the_spent_call() -> None:
     assert "provider timeout" not in result.report.model_dump_json()
 
 
+def test_a_graphbubbleup_escape_still_syncs_the_callers_recorder() -> None:
+    """`GraphBubbleUp` -- `GraphInterrupt` (raised by `interrupt()`),
+    `GraphDrained`, `ParentCommand` -- is a control-flow signal, not a
+    failure, so `run_graph_investigation` re-raises it rather than
+    converting it to a safe report. But a `raise` skips the function's
+    normal return, which is the only place the caller's `recorder` used to
+    get synced from state. Before this fix, the caller's `recorder` was left
+    holding nothing at all: the seed event goes to `seed_recorder`, not
+    `recorder`, and every node's own events live only in state.
+
+    This branch is **not** where Milestone 2b's pause lands, and this test
+    must not be read as proving it is -- confirmed twice, independently
+    (once while planning Milestone 2, once by this unit's correctness
+    review), against the installed LangGraph: a real `interrupt()` call does
+    not make `.invoke()` raise. The Pregel loop catches `GraphInterrupt`
+    itself and `.invoke()` returns *normally*, with an `__interrupt__` key
+    in the output, so 2b's pause handling has to be written against that
+    normal return, not this `except`. What this branch actually guards is a
+    `GraphBubbleUp` that genuinely escapes `.invoke()` uncaught -- this
+    codebase does not build anything that raises one today, so it is
+    presently unreached in production, but the three `except GraphBubbleUp:
+    raise` guards inside `investigate`/`dispatch_tool`/`final_assessment`
+    (one per node, not counting this function's own outer handler below,
+    which is the branch this test exercises) exist so that if one ever
+    does, it is not swallowed by those nodes' own blanket
+    `except Exception:` and misreported as a crash.
+
+    A raw `GraphBubbleUp`, raised directly from a node below rather than via
+    `interrupt()`, is a faithful stand-in for that escape: confirmed against
+    the installed LangGraph to actually propagate out of `.invoke()` (unlike
+    a real `interrupt()`, which does not), so it is enough to prove the
+    sync-before-`raise` fix without needing a scenario that makes this
+    branch reachable in production to exist yet."""
+    model = _RaisingModel(GraphBubbleUp("interrupt-like signal"))
+    registry = logs_only_registry(RecordingLogsBackend())
+    recorder = RunRecorder(StepClock())
+
+    with pytest.raises(GraphBubbleUp):
+        run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,  # type: ignore[arg-type]
+            registry,
+            recorder,
+            Budgets(),
+            StepClock(),
+        )
+
+    # The crash happens on turn 0's first model call, before `investigate`
+    # ever returns, so the only committed checkpoint is the initial state
+    # `run_graph_investigation` seeds before `.invoke()` -- one event. The
+    # point is not the count, it is that this is no longer empty.
+    names = [event.name for event in recorder.events]
+    assert names == ["investigation_started"]
+
+
+def test_a_checkpoint_read_failure_does_not_replace_the_graphbubbleup_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event-recovery read the test above exercises is I/O against the
+    same database `checkpointer` uses, so it can itself fail --
+    `compiled.get_state(config)` can raise `sqlite3.OperationalError` against
+    a locked, full, or corrupt database, or `KeyError`/`ValidationError`
+    against a malformed or partial checkpoint. Any of those replacing the
+    original `GraphBubbleUp` would turn a pause or a parent command into an
+    unhandled database error `main` cannot format into `FAIL <CODE>
+    <message>` -- confirmed missing by a reviewer's mutation that narrowed
+    the guard to `except ZeroDivisionError:` and found the exact same 316
+    tests green either way, since nothing before this test could see the
+    difference.
+
+    `caught.value.__context__ is None` is the assertion that actually proves
+    it, not merely `pytest.raises(GraphBubbleUp)` matching: Python chains a
+    new exception raised while another is being handled onto that new
+    exception's `__context__` automatically. If the read's `OSError` reached
+    the top of this `except GraphBubbleUp:` block unswallowed, it would be
+    *that* exception propagating, chained onto the `GraphBubbleUp` being
+    handled -- and `pytest.raises(GraphBubbleUp)` would not match an
+    `OSError` at all, so this test would fail two different ways depending
+    on exactly how the guard broke, not just one."""
+    model = _RaisingModel(GraphBubbleUp("interrupt-like signal"))
+    registry = logs_only_registry(RecordingLogsBackend())
+    recorder = RunRecorder(StepClock())
+
+    def broken_get_state(self: object, config: object, **kwargs: object) -> object:
+        raise OSError("simulated: database is locked")
+
+    monkeypatch.setattr(CompiledStateGraph, "get_state", broken_get_state)
+
+    with pytest.raises(GraphBubbleUp) as caught:
+        run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,  # type: ignore[arg-type]
+            registry,
+            recorder,
+            Budgets(),
+            StepClock(),
+        )
+
+    assert caught.value.__context__ is None
+
+
 # --- Unit 1d-1/1d-2: behaviours `graph.py` already implements but that, until
 # now, only `test_workflow.py` proved. Each port below asserts the same
 # *property* its loop original does, not a copied-over literal, since the two
@@ -544,8 +651,12 @@ def test_a_repair_tells_the_model_what_was_wrong() -> None:
 
 def test_a_run_with_no_repair_budget_stops_at_the_first_invalid_response() -> None:
     """`test_workflow.py::test_a_run_with_no_repair_budget_stops_at_the_first_invalid_response`,
-    ported."""
-    result, _ = investigate_via_graph(
+    ported. Also covers Unit 2a's `investigate`'s `stopped_state` -- its
+    return is the one that carries `stage_stopped`/`invalid_response` into
+    state, and no other test in this file asserts on events recorded along
+    that specific return path, so a missing `"events"` key there would not
+    otherwise be noticed."""
+    result, recorder = investigate_via_graph(
         fixture_model("malformed_output.json"), budgets=Budgets(repairs=0)
     )
 
@@ -553,6 +664,9 @@ def test_a_run_with_no_repair_budget_stops_at_the_first_invalid_response() -> No
     assert result.report.reason_code is ReasonCode.REPAIR_EXHAUSTED
     assert result.report.repairs_used == 0
     assert result.report.model_calls_used == 1
+    names = [event.name for event in recorder.events]
+    assert "invalid_response" in names
+    assert "stage_stopped" in names
 
 
 def test_a_response_that_stays_invalid_fails_safe() -> None:
@@ -601,11 +715,17 @@ def test_a_naive_window_from_the_model_still_produces_a_report(tmp_path: Path) -
 
 def test_a_cited_evidence_id_that_does_not_exist_fails_safe() -> None:
     """`test_workflow.py::test_a_cited_evidence_id_that_does_not_exist_fails_safe`,
-    ported."""
-    result, _ = investigate_via_graph(fixture_model("forged_citation.json"))
+    ported. Also covers Unit 2a's `final_assessment`'s `failed_state` -- its
+    return is the one that carries `forged_citation` into state, and no
+    other test in this file asserts on events recorded along that specific
+    return path, so a missing `"events"` key there would not otherwise be
+    noticed."""
+    result, recorder = investigate_via_graph(fixture_model("forged_citation.json"))
 
     assert result.report.disposition is Disposition.FAILED_SAFE
     assert result.report.reason_code is ReasonCode.FORGED_EVIDENCE_REFERENCE
+    names = [event.name for event in recorder.events]
+    assert "forged_citation" in names
 
 
 def test_citing_another_incidents_real_evidence_id_fails_safe(tmp_path: Path) -> None:
@@ -880,3 +1000,39 @@ def test_a_settle_then_crash_still_carries_evidence_into_the_final_graph_report(
     assert recovered[0].content_hash == only_receipt.result_digest
     names = [event.name for event in recorder.events]
     assert "backend_crashed" in names
+
+
+def test_events_stay_continuous_across_a_second_dispatch_and_normalize_pass(
+    tmp_path: Path,
+) -> None:
+    """Unit 2a moved every node's events into `state["events"]`: each node
+    rebuilds a local recorder from that list, records its own events into
+    the copy, and must return the full extended list on every one of its
+    return paths, or that node's events vanish from state the moment the
+    next node reads it. Every single-check fixture this file otherwise uses
+    only reaches `dispatch_tool`/`normalize_evidence` once, so none of them
+    can expose a gap that only shows up on a *second* pass through either
+    node. This reuses the same two-check script
+    `test_the_graph_loops_back_for_a_second_check_when_budget_allows` above
+    already uses, and checks the one thing a dropped node-local event list
+    would break: every event from both passes reaching the caller's
+    `recorder`, numbered without a gap."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [plan_json(proposal=another_logs_proposal())],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.tools_executed == 2
+    names = [event.name for event in recorder.events]
+    assert names.count("proposal_received") == 2
+    assert names.count("check_started") == 2
+    assert names.count("check_finished") == 2
+    assert names.count("evidence_normalized") == 2
+    assert names.count("stage_started") == 3
+    assert [event.sequence for event in recorder.events] == list(
+        range(1, len(recorder.events) + 1)
+    )

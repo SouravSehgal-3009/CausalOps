@@ -2,9 +2,15 @@
 
 import argparse
 import os
-from collections.abc import Sequence
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import closing, contextmanager
 from importlib.metadata import version
 from pathlib import Path
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from causalops.doctor import (
     DoctorReport,
@@ -143,8 +149,35 @@ def run_scenario_command(root: Path, arguments: argparse.Namespace) -> int:
     return 0
 
 
+@contextmanager
+def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
+    """A `SqliteSaver` connected to `db_path`, open for the caller's
+    `with` block.
+
+    Deserialization is restricted to LangGraph's built-in safe-type allowlist
+    -- the same restriction `LANGGRAPH_STRICT_MSGPACK=true` applies, set here
+    as a constructor argument instead of an environment variable so the one
+    place this database connection is opened is also the one place this
+    policy is decided, rather than adding another variable to
+    `.env.example`. `checkpoints.db` is a real file on disk for the life of
+    an investigation; a permissive serializer would import and instantiate
+    whatever class name a checkpoint blob claims, which turns write access to
+    that file into code execution on the next read. `SqliteSaver.from_conn_string`
+    doesn't expose a `serde` parameter, so the connection is opened directly,
+    matching what that classmethod does internally.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    serde = JsonPlusSerializer(allowed_msgpack_modules=None)
+    with closing(sqlite3.connect(str(db_path), check_same_thread=False)) as conn:
+        yield SqliteSaver(conn, serde=serde)
+
+
 def run_investigation(
-    incident: StoredIncident, paths: RunPaths, budgets: Budgets, recorder: RunRecorder
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    recorder: RunRecorder,
+    checkpointer: BaseCheckpointSaver[str],
 ) -> InvestigationResult:
     model = ReplayToolCallingModel(
         ReplayReasoningModel(
@@ -174,6 +207,7 @@ def run_investigation(
         recorder,
         budgets,
         utc_now,
+        checkpointer=checkpointer,
     )
 
 
@@ -190,7 +224,9 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
     )
     budgets = Budgets()
     recorder = RunRecorder(utc_now)
-    result = run_investigation(incident, paths, budgets, recorder)
+    db_path = root / "results" / "checkpoints.db"
+    with _sqlite_checkpointer(db_path) as checkpointer:
+        result = run_investigation(incident, paths, budgets, recorder, checkpointer)
     written = finalize_investigation(
         root / "results",
         result.report,

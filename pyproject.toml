@@ -11,6 +11,11 @@ dependencies = [
     # of adding them is isolated from Unit 1b's orchestration code.
     "langgraph>=0.2",
     "langchain-core>=0.3",
+    # Milestone 2's durable checkpoint backend. Pulls in `aiosqlite` and
+    # `sqlite-vec` transitively -- this package bundles an async saver and a
+    # vector-search extension neither of which CausalOps uses; only the
+    # synchronous `SqliteSaver` is called anywhere in this codebase.
+    "langgraph-checkpoint-sqlite>=3.1",
 ]
 
 [project.scripts]
