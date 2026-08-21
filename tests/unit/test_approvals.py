@@ -17,7 +17,6 @@ is inert and exercises the real production code path rather than a stub.
 """
 
 import json
-import os
 import sqlite3
 from contextlib import closing
 from datetime import timedelta
@@ -453,23 +452,29 @@ def test_approve_reports_a_locked_checkpoint_store_instead_of_a_traceback(
     """Unit 2d: `run_decision_command`'s own `mkdir`/`sqlite3.connect` pair
     (`cli.py`, the connection `owner_decisions` lives behind) was the other
     untranslated connection open -- reached before any thread lookup, so no
-    incident or paused thread is needed to exercise it, only a `results/`
-    directory this process cannot write into."""
+    incident or paused thread is needed to exercise it, only a database
+    path this process cannot open as a file.
+
+    A read-only `results/` directory (via `os.chmod`) proved the same
+    connect-time wrap in an earlier version of this test, but only on
+    POSIX -- Windows ignores `os.chmod` for directories entirely, which is
+    why that version passed CI on Ubuntu and went uncaught on Windows.
+    Occupying `checkpoints.db`'s own path with a directory instead reaches
+    the identical `sqlite3.connect()` call on every platform: SQLite's own
+    file-open logic refuses a directory the same way everywhere, unlike an
+    OS permission bit."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    os.chmod(results_dir, 0o500)
-    assert not os.access(results_dir, os.W_OK), (
-        "chmod did not make results/ read-only on this filesystem -- "
+    (results_dir / "checkpoints.db").mkdir()
+    assert (results_dir / "checkpoints.db").is_dir(), (
+        "setup did not leave a directory at checkpoints.db's path -- "
         "this test cannot prove anything here"
     )
 
-    try:
-        exit_status = cli.main(["approve", "any-thread-id"])
-    finally:
-        os.chmod(results_dir, 0o700)
+    exit_status = cli.main(["approve", "any-thread-id"])
 
     assert exit_status == 1
     assert "FAIL STORE_UNAVAILABLE" in capsys.readouterr().out
