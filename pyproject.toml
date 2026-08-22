@@ -16,6 +16,19 @@ dependencies = [
     # vector-search extension neither of which CausalOps uses; only the
     # synchronous `SqliteSaver` is called anywhere in this codebase.
     "langgraph-checkpoint-sqlite>=3.1",
+    # Unit 3b-2's live Claude adapter. Pulls in `anthropic`, `httpx`,
+    # `docstring-parser`, and `jiter` transitively -- audited for network
+    # activity at import time. `tests/security/test_no_tracing.py`'s
+    # `test_importing_causalops_cli_never_sends_a_tracing_request` proves
+    # this directly, in a fresh subprocess with the refusal monkeypatches
+    # installed *before* `causalops.cli` is ever imported. That file's two
+    # `..._through_the_cli_entry_point` tests prove a narrower, separate
+    # claim -- that *running* a replay investigation through `cli.main`
+    # sends nothing either -- since `from causalops import cli` there runs
+    # at collection time, before either test's own monkeypatch installs;
+    # the import itself stays safe only because `tests/conftest.py`'s
+    # network guard is already active for the whole pytest session by then.
+    "langchain-anthropic>=1.6.1",
 ]
 
 [project.scripts]

@@ -234,22 +234,28 @@ def test_missing_docker_fails(tmp_path: Path) -> None:
     assert check.reason_code is DoctorReasonCode.DOCKER_UNAVAILABLE
 
 
-def test_missing_api_key_fails(tmp_path: Path) -> None:
+def test_missing_api_key_warns_but_does_not_fail(tmp_path: Path) -> None:
+    # Unit 3b-2, owner-ruled: FAIL -> WARN. `replay` runs entirely without
+    # this key, so its absence is surfaced but no longer fails `doctor`
+    # outright -- `test_doctor_report_with_no_failures_is_ok` (below) is the
+    # confinement test proving a report with only this WARN still reports
+    # `doctor: OK`.
     report = run_doctor(ProjectPaths(root=tmp_path), FakeProbe(), {})
 
     check = check_named(report, "api_key")
-    assert check.status is CheckStatus.FAIL
+    assert check.status is CheckStatus.WARN
     assert check.reason_code is DoctorReasonCode.MISSING_API_KEY
+    assert not report.failures
 
 
-def test_blank_api_key_fails(tmp_path: Path) -> None:
+def test_blank_api_key_warns(tmp_path: Path) -> None:
     report = run_doctor(
         ProjectPaths(root=tmp_path), FakeProbe(), {"ANTHROPIC_API_KEY": "   "}
     )
 
-    assert check_named(report, "api_key").reason_code is (
-        DoctorReasonCode.MISSING_API_KEY
-    )
+    check = check_named(report, "api_key")
+    assert check.status is CheckStatus.WARN
+    assert check.reason_code is DoctorReasonCode.MISSING_API_KEY
 
 
 def test_api_key_value_never_appears_in_the_report(tmp_path: Path) -> None:
@@ -419,13 +425,19 @@ def test_every_failure_is_reported_together(tmp_path: Path) -> None:
 
     report = run_doctor(ProjectPaths(root=tmp_path), probe, {})
 
+    # `MISSING_API_KEY` is deliberately absent here (Unit 3b-2, owner-ruled
+    # FAIL -> WARN): `report.failures` counts `FAIL` only, and the missing
+    # key still shows up as a `WARN`, asserted separately below.
     assert {check.reason_code for check in report.failures} == {
         DoctorReasonCode.UNSUPPORTED_OS,
         DoctorReasonCode.INSUFFICIENT_TOTAL_MEMORY,
         DoctorReasonCode.INSUFFICIENT_FREE_DISK,
         DoctorReasonCode.DOCKER_UNAVAILABLE,
-        DoctorReasonCode.MISSING_API_KEY,
     }
+    warnings = {
+        check.reason_code for check in report.checks if check.status is CheckStatus.WARN
+    }
+    assert DoctorReasonCode.MISSING_API_KEY in warnings
 
 
 def test_find_project_root_walks_up_to_pyproject(tmp_path: Path) -> None:

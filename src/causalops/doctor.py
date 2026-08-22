@@ -367,7 +367,13 @@ def check_api_key(environment: Mapping[str, str]) -> CheckResult:
         )
     return CheckResult(
         name="api_key",
-        status=CheckStatus.FAIL,
+        # Unit 3b-2, owner-ruled: FAIL -> WARN. `replay` runs entirely
+        # without this key -- `causalops investigate --model replay` was
+        # never actually blocked by its absence, so treating it as a hard
+        # `doctor` failure overstated what was wrong. It is still surfaced,
+        # with the same reason code and an unchanged message: only
+        # `exit_code`'s pass/fail verdict (`CheckStatus.FAIL`-only) softens.
+        status=CheckStatus.WARN,
         reason_code=DoctorReasonCode.MISSING_API_KEY,
         message=f"Set {API_KEY_VARIABLE} in the environment before a live run.",
     )

@@ -10,6 +10,8 @@ shell. This file only has to document that recommendation accurately.
 
 from pathlib import Path
 
+from causalops.cli import DEFAULT_LIVE_EVALUATION_MAX_USD
+
 ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
 
 
@@ -26,6 +28,17 @@ def parsed_env_example() -> dict[str, str]:
 
 def test_env_example_documents_the_anthropic_api_key() -> None:
     assert "ANTHROPIC_API_KEY" in parsed_env_example()
+
+
+def test_env_example_documents_the_live_evaluation_cost_ceiling() -> None:
+    # Unit 3b-2, S-P2-1. This used to compare against a hardcoded "2.00"
+    # literal -- a comment claiming a drift guard the test did not actually
+    # provide, the same defect class as P1-1's tautological pricing test.
+    # Importing the real constant means a changed default in `cli.py`
+    # without a matching `.env.example` edit fails here, not silently.
+    pairs = parsed_env_example()
+
+    assert pairs["LIVE_EVALUATION_MAX_USD"] == f"{DEFAULT_LIVE_EVALUATION_MAX_USD:.2f}"
 
 
 def test_both_langsmith_tracing_variables_default_off() -> None:
