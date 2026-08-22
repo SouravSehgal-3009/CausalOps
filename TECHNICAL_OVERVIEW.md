@@ -237,8 +237,13 @@ hand, not in CI).
 
 ## Phase 3 — never started
 
+**Superseded, and partly overtaken:** the bullets below record the state at
+the time of this audit. Milestone 3 has since landed a live adapter,
+`--model claude`, and a cost ledger (`ecbf174`, merged `9ca9c2b`) — see
+Part III. Only the paired evaluation remains unbuilt.
+
 Nothing under this heading has landed. No commit, source file, or test
-implements any of it. Specifically absent from the repository today:
+implements any of it. Specifically absent at the time of this audit:
 
 - A live model adapter (`ClaudeReasoningModel` or equivalent). The only
   reasoning-model *adapter* class in `models.py` is `ReplayReasoningModel`; a
@@ -2232,9 +2237,9 @@ anything new this unit built:
   report flagged as expected to move, and here is where it moves.
 - The rendered markdown report, labelled with the real model
   (`live_model.MODEL_NAME`, `"claude-sonnet-5"`), not `"replay"` —
-  `cli.py:531`'s fix, provable end to end only by an actual live run,
-  since no replay-backed test ever exercises the resume-path label bug this
-  closes.
+  `_resolve_thread_incident_and_model`'s fix, provable end to end only by
+  an actual live run, since no replay-backed test ever exercises the
+  resume-path label bug this closes.
 - `results/investigations/<investigation-id>/events.jsonl` — the ordinary
   `RunEvent` stream, unchanged in shape from a replay run.
 - `results/checkpoints.db`'s `cost_ledger` table: **exactly one row per
@@ -2294,6 +2299,29 @@ the billed count, that is real evidence the two unmodelled contributions
 above (the provider's tool-use system prompt, message-envelope overhead)
 are large enough to matter, and `PESSIMISTIC_CHARS_PER_TOKEN` needs to
 move — with this measurement as the reason, not a guess.
+
+**What an escalated run looks like — a normal outcome, not a failure.**
+The graph can pause for owner approval on an ordinary `investigate` run
+(Milestone 2's escalation interrupt), and a live model's plan is not
+scripted the way a replay fixture is, so this is a real, reachable outcome
+of the smoke call, not a hypothetical. Escalation is only reachable from
+`final_assessment`, so two to four model calls — and their settled
+`cost_ledger` rows — exist by the time it can fire. `run_investigate_command`
+(`cli.py:465-476`) never calls `finalize_investigation` on this path — no
+`report.json` and no `events.jsonl` exist yet. Instead the command prints
+`ESCALATED <reason> <thread_id>` and `remaining checks: N`, and exits `3`
+(`EXIT_ESCALATED`), distinct from the `0`/`1` of a settled run. **The
+`cost_ledger` rows for the model calls already made are `SETTLED` at this
+point — the money is spent** before the pause, since settlement happens
+per model call, inside the graph, before the escalation interrupt runs.
+Run `causalops approve <thread_id>` to accept the paused diagnosis, or
+`causalops reject <thread_id> "<reason>"` to reject it; either produces
+the terminal `report.json` and `events.jsonl` this section describes
+above. Resuming spends nothing further: `escalation_interrupt` routes
+straight to `final_report`, so neither `approve` nor `reject` makes
+another model call, and neither needs `ANTHROPIC_API_KEY` set. Seeing exit
+code 3 after this call means the gate paused for a decision it is designed
+to require, not that anything broke.
 
 **What a refused run looks like — the gate working, not broken:**
 
