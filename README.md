@@ -10,12 +10,14 @@ only points at them; it does not define behavior.
 
 Phases 1 and 2 are complete: the synthetic lab, Prometheus and JSONL
 telemetry, all four incident families, the four read-only tool backends,
-policy, budgets, run records, and scoring. Milestone 1 is complete pending
-final dual review and commit: `causalops investigate <incident-id> --model
-replay` runs an incident end to end through the LangGraph `StateGraph`
-orchestrator — see `TECHNICAL_OVERVIEW.md` Part III for what it currently
-supports. There is no live Claude adapter yet — see `TECHNICAL_OVERVIEW.md`
-Part I, "Phase 3 — never started."
+policy, budgets, run records, and scoring. Milestones 1 and 2 are complete:
+`causalops investigate <incident-id> --model replay` runs an incident end to
+end through the LangGraph `StateGraph` orchestrator, including the
+escalation interrupt and owner approval/rejection — see
+`TECHNICAL_OVERVIEW.md` Part III for what it currently supports. Milestone 3
+is in progress: FTS5 runbook retrieval and the live Claude adapter
+(`--model claude`) have landed; only the paired evaluation under the cost
+cap remains.
 
 ## Check this machine
 
@@ -26,12 +28,11 @@ uv run causalops doctor
 
 The same commands run from a POSIX shell on Linux x86-64.
 
-`doctor` checks the operating system, total and available RAM, free disk on the
-project drive, that `runs/` and `results/` are writable, that
-`results/checkpoints.db` is readable if it already exists, that Docker
-answers, and that `ANTHROPIC_API_KEY` is set. It exits 0 when every hard
-check passes and 1 otherwise, printing a stable reason code for each
-problem.
+The operating system, total RAM, free disk, writable directories,
+checkpoint database, and Docker checks are hard failures. Low available RAM
+and a missing `ANTHROPIC_API_KEY` warn without failing — `--model replay`
+needs neither. `doctor` exits 0 unless a hard check fails, printing a
+stable reason code for each problem.
 
 The authenticated `claude-sonnet-5` metadata request described in
 `TECHNICAL_OVERVIEW.md`'s CLI contract section is not implemented yet.
@@ -42,3 +43,13 @@ PowerShell before a live command:
 ```powershell
 $env:ANTHROPIC_API_KEY = "<your key>"
 ```
+
+## Running a live investigation
+
+`causalops investigate <incident-id> --model claude` sends a real, billed
+request to Anthropic. `--model replay` sends nothing to Anthropic — it
+reads a checked-in fixture, and the only network traffic either mode makes
+on its own account is to the local lab. Before running `--model claude`,
+follow `TECHNICAL_OVERVIEW.md`'s "Unit 3b-2 — running the live smoke call"
+section for the exact command sequence, the preconditions, and what a
+successful, escalated, or refused run's artifacts look like.
