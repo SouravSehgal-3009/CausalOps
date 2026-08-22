@@ -315,6 +315,32 @@ class StoredIncident(BaseModel):
 
     Investigator-visible only: an opaque scope, the answer-neutral packet, and the
     packet's own evidence. Expected outcomes live elsewhere.
+
+    Post-freeze review, P1. Three fields carry an `incident_id`, and this
+    validator is what confirms all three actually agree -- an auditable
+    list, the same discipline `live_model.py`'s `_RATIONALE_PROPERTIES`
+    and `test_live_model.py`'s `KNOWN_PROSE_ONLY_CONTRACTS` already use
+    elsewhere in this codebase for "here is exactly what is covered, and
+    where":
+
+    - `scope.incident_id` -- the reference every other field is checked
+      against, by `check_identity_agrees` below.
+    - `packet.incident_id` -- checked against `scope.incident_id` by
+      `check_identity_agrees` below.
+    - `evidence[i].incident_id`, for every item -- checked against
+      `scope.incident_id` by `check_identity_agrees` below (this is the
+      same rule `evidence.EvidenceStore.add`'s own `ValueError` enforces
+      at insertion time for a run already in progress; this validator is
+      what enforces it at LOAD time, before a stored artifact from disk
+      ever reaches that far).
+
+    `cli.py`'s `run_investigate_command`/`run_decision_command` check a
+    FOURTH identity fact this validator cannot: that `scope.incident_id`
+    matches the `runs/<incident_id>/` DIRECTORY NAME the artifact was
+    loaded from. That is not a fact about the artifact's own internal
+    consistency (what this validator checks) but about the artifact
+    against its filesystem location, which only a caller holding both can
+    verify.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -323,6 +349,38 @@ class StoredIncident(BaseModel):
     scope: IncidentScope
     packet: InitialAlertPacket
     evidence: tuple[Evidence, ...]
+
+    @model_validator(mode="after")
+    def check_identity_agrees(self) -> Self:
+        """Unit 3b-4 addendum's post-freeze review, P1. Correctness traced
+        a real safe-failure breakage from a mismatched artifact: `graph.py`'s
+        `_rebuild_store` raises `ValueError` on an `evidence[i].incident_id`
+        mismatch, and that function is called from BOTH the normal
+        `_build_report` path and the outer crash-containment path that
+        exists to catch exactly this kind of failure -- a mismatched
+        artifact that got past loading would raise the identical error a
+        second time, from inside the handler meant to catch the first one,
+        and escape `main()`'s `(LabError, RunRecordError,
+        CheckpointStoreError)` catch entirely. Checking identity HERE, at
+        load time (`_load_stored_artifact` in `cli.py` already converts a
+        `ValidationError` into a clean `LabError(CORRUPT_ARTIFACT)`, no new
+        error handling needed), closes the gap before either graph path
+        ever sees the artifact -- `EvidenceStore.add`'s own `ValueError`
+        stays exactly as it is, an internal invariant guard for a run
+        already in progress, not the thing fixed here."""
+        if self.packet.incident_id != self.scope.incident_id:
+            raise ValueError(
+                f"packet.incident_id {self.packet.incident_id!r} does not "
+                f"match scope.incident_id {self.scope.incident_id!r}"
+            )
+        for item in self.evidence:
+            if item.incident_id != self.scope.incident_id:
+                raise ValueError(
+                    f"evidence {item.evidence_id} has incident_id "
+                    f"{item.incident_id!r}, not scope.incident_id "
+                    f"{self.scope.incident_id!r}"
+                )
+        return self
 
 
 class Hypothesis(BaseModel):

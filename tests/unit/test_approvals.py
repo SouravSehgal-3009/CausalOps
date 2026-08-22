@@ -307,10 +307,20 @@ def test_approve_refuses_cleanly_when_the_stored_incident_no_longer_matches(
 
     original_scope = incident_scope()
     paths = cli.RunPaths(root=tmp_path / "runs" / original_scope.incident_id)
+    # Every field must agree with the OTHERS (`StoredIncident.check_
+    # identity_agrees`, `domain.py`, added by this same post-freeze review)
+    # for this to even construct -- the drift under test here is against
+    # the DIRECTORY NAME the thread's checkpoint actually points at, not
+    # an internal inconsistency inside the artifact itself, which is now a
+    # separate, already-refused shape covered by `test_domain.py`.
+    drifted_id = "adriftedincidentid00"
     drifted_incident = StoredIncident(
-        scope=original_scope.model_copy(update={"incident_id": "adriftedincidentid00"}),
-        packet=alert_packet(),
-        evidence=packet_evidence(),
+        scope=original_scope.model_copy(update={"incident_id": drifted_id}),
+        packet=alert_packet().model_copy(update={"incident_id": drifted_id}),
+        evidence=tuple(
+            item.model_copy(update={"incident_id": drifted_id})
+            for item in packet_evidence()
+        ),
     )
     paths.incident_file.write_text(drifted_incident.model_dump_json(), encoding="utf-8")
 
@@ -319,7 +329,7 @@ def test_approve_refuses_cleanly_when_the_stored_incident_no_longer_matches(
     assert exit_status == 1
     printed = capsys.readouterr().out
     assert "FAIL INCIDENT_NOT_FOUND" in printed
-    assert "adriftedincidentid00" in printed
+    assert drifted_id in printed
     assert original_scope.incident_id in printed
 
 

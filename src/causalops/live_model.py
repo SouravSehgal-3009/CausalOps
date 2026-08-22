@@ -632,19 +632,25 @@ class LiveClaudeModel:
             raise InputTooLarge(estimated_input_tokens)
         # Unit 3b-2, P1-1. The reservation must price what actually goes out
         # on the wire: prose *plus* the tool schema `bind_tools` sends on
-        # every call, roughly 7,020 tokens of fixed, per-stage tool
-        # definitions (Unit 3b-4 addendum's figure, after item 6 stripped
-        # ~1.2K characters of maintainer-only schema/`$defs` docstrings and
-        # A1/A2 then added back ~293 characters stating two fields' 300-char
-        # bounds and a 4-word "exactly once" -- `test_live_model.py` pins
-        # the exact figure, so this comment cannot drift from the real
-        # payload the way an earlier version of it already did, three
-        # times). `MAX_INPUT_
-        # TOKENS`'s cap above deliberately stays prose-only -- see
-        # `InputTooLarge`'s docstring for why folding tools into the cap is
-        # the wrong fix -- but a dollar reservation that omits real, billed
-        # tokens is not conservative, and `TECHNICAL_OVERVIEW.md` promises
-        # the owner `actual_usd <= reserved_usd` on every settled row.
+        # every call -- this `tools` list differs by caller, so the fixed
+        # payload size differs by STAGE, not one shared figure: `propose()`
+        # binds `_plan_tool_definition()` plus the five `_domain_tool_
+        # definitions()`, ~7,020 tokens (Unit 3b-4 addendum's figure, after
+        # item 6 stripped ~1.2K characters of maintainer-only schema/
+        # `$defs` docstrings and A1/A2 then added back ~293 characters
+        # stating two fields' 300-char bounds and a 4-word "exactly once");
+        # `respond()` binds only `_final_assessment_tool_definition()`,
+        # ~2,261 tokens (post-freeze review, N1 -- unpinned until then).
+        # `test_live_model.py` pins both figures separately, so this
+        # comment cannot drift from either real payload the way an earlier
+        # version of the `propose()` figure already did, three times, and
+        # the `respond()` figure did once by simply never being measured.
+        # `MAX_INPUT_TOKENS`'s cap above deliberately stays prose-only --
+        # see `InputTooLarge`'s docstring for why folding tools into the
+        # cap is the wrong fix -- but a dollar reservation that omits real,
+        # billed tokens is not conservative, and `TECHNICAL_OVERVIEW.md`
+        # promises the owner `actual_usd <= reserved_usd` on every settled
+        # row.
         tool_definition_tokens = estimate_input_tokens(json.dumps(tools))
         reserved_usd = self._pricing.reservation_usd(
             estimated_input_tokens + tool_definition_tokens
@@ -727,19 +733,34 @@ class LiveClaudeModel:
             for call in message.tool_calls
             if call["name"] == RECORD_FINAL_ASSESSMENT_TOOL_NAME
         ]
-        if len(matching_calls) != 1 or message.invalid_tool_calls:
-            # No error channel on `ModelResponse` -- an empty `content`
-            # dict fails `FinalAssessment`'s own required-field validation
-            # for a genuine, informative reason (`disposition`/`root_cause`
-            # missing) rather than this module fabricating one. Unit 3b-4
-            # addendum, C4: this used to take the FIRST matching call via
-            # `next(...)`, silently discarding a second, possibly
-            # conflicting one instead of refusing the turn -- the same
-            # shape `propose()`'s own `record_plan` duplicate check
-            # (`len(plan_calls) > 1`, above) already refuses on the
-            # proposal side. Zero matches and two-or-more matches are
-            # refused the same way, through the same repair path, rather
-            # than the codebase silently picking a winner either time.
+        # No error channel on `ModelResponse` -- an empty `content` dict
+        # fails `FinalAssessment`'s own required-field validation for a
+        # genuine, informative reason (`disposition`/`root_cause` missing)
+        # rather than this module fabricating one. Unit 3b-4 addendum, C4:
+        # this used to take the FIRST matching call via `next(...)`,
+        # silently discarding a second, possibly conflicting, call NAMED
+        # `record_final_assessment` -- the same shape `propose()`'s own
+        # `record_plan` duplicate check (`len(plan_calls) > 1`, above)
+        # already refuses on the proposal side. Zero or two-or-more
+        # MATCHING calls are refused the same way, through the same repair
+        # path, rather than the codebase silently picking a winner.
+        #
+        # Post-freeze review, Finding 3: C4's own fix above checked only
+        # the matching-name count, still missing a turn that sends exactly
+        # one `record_final_assessment` call ALONGSIDE some other,
+        # unbound tool name -- `len(matching_calls) == 1` alone would pass
+        # that turn through, silently dropping the extra call the same way
+        # C4 was built to stop happening. `message.tool_calls`'s installed
+        # client (`langchain-anthropic==1.6.1`, confirmed by reading
+        # `output_parsers.py:80-92`) copies whatever tool name the
+        # provider sends with no validation against the bound list, so
+        # this is not proven reachable offline -- but nothing rules it
+        # out either, and the fix costs one more length check.
+        if (
+            len(message.tool_calls) != 1
+            or len(matching_calls) != 1
+            or message.invalid_tool_calls
+        ):
             return ModelResponse(content={}, usage=usage)
         return ModelResponse(content=matching_calls[0]["args"], usage=usage)
 

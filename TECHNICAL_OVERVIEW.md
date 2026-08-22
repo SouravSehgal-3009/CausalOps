@@ -2751,6 +2751,134 @@ two observed live-run failures.**
 `anyOf` schema encoding, raising or truncating the 300-character bound, and the
 GitHub Actions Node 20 deprecation.
 
+### Second dual review on `a44bf57` — P1, a live_model.py batch, and cleanup
+
+**Both reviewers re-verified the pushed WIP export (`a44bf57`) independently.** Correctness
+confirmed all four of codex's own findings from that pass (one worse than reported, one
+disputed to a better fix) plus found four more of its own; simplicity found the readability
+root cause underneath two of them. The owner disposed of every finding; this section records
+what landed.
+
+**P1 — `StoredIncident` identity validation, the serious one.** Correctness traced this past
+"a mismatched artifact produces a raw traceback" to something worse: it defeats the
+safe-failure guarantee entirely. `graph.py`'s `_rebuild_store` raises `ValueError` on a
+mismatched `evidence[i].incident_id`, and that function is called from BOTH the normal
+`_build_report` path and the outer crash-containment path meant to catch exactly this kind of
+failure — a mismatched artifact that got past loading raises the identical error a SECOND
+time, from inside the handler built to catch the first one, and escapes `main()`'s
+`(LabError, RunRecordError, CheckpointStoreError)` catch entirely. `StoredIncident.
+check_identity_agrees` (`domain.py`, a `model_validator(mode="after")`) now confirms
+`scope.incident_id`, `packet.incident_id`, and every `evidence[i].incident_id` agree at LOAD
+time, before either graph path ever sees the artifact — composes for free with
+`_load_stored_artifact`'s existing `ValidationError` → `LabError(CORRUPT_ARTIFACT)`
+translation, no new error handling needed. `EvidenceStore.add`'s own `ValueError` stays
+exactly as it is, an internal invariant guard for a run already in progress, not the thing
+this fix targets — correctness was explicit that converting it would fix the symptom, not
+the cause, since the new validator makes it unreachable from the load path anyway.
+`StoredIncident`'s own class docstring now lists all three identity-bearing fields and where
+each is checked, the same auditable-list discipline `_RATIONALE_PROPERTIES` and
+`KNOWN_PROSE_ONLY_CONTRACTS` already use elsewhere; `cli.py`'s own identity-check comment
+(which overclaimed a whole-artifact guarantee while checking only `scope.incident_id`
+against the directory name) is now precise about what it checks directly versus what the new
+validator already guarantees transitively. Tests: `test_domain.py` pins a packet-mismatch
+refusal, an evidence-mismatch refusal, and the positive self-consistent case; `test_
+approvals.py`'s existing directory-drift test was rebuilt to construct a SELF-consistent
+drifted artifact (the old version could no longer even construct its fixture once the new
+validator landed — a good sign, not a broken test).
+
+**Open gap, recorded not fixed (post-freeze review):** `graph.py`'s `_rebuild_receipts` does
+not check `ToolReceipt.incident_id` against `state["incident_id"]` the way `_rebuild_store`
+now indirectly benefits from checking evidence identity. Checkpoint-sourced, not loaded from
+a potentially-tampered file the way `StoredIncident` is, so lower stakes — not fixed this
+round.
+
+**The `live_model.py` batch — Finding 3, N1, N2, taken together.**
+
+- **Finding 3.** `respond()` checked "exactly one call is named `record_final_assessment`"
+  but never checked the TOTAL call count — a turn with exactly one matching call plus some
+  OTHER, unbound tool name would have passed through, silently dropping the extra call the
+  same way C4 (the previous round) was built to stop happening for a second MATCHING call.
+  Correctness read the installed `langchain-anthropic==1.6.1` source directly
+  (`output_parsers.py:80-92`) and confirmed the client copies tool names verbatim with zero
+  validation against the bound list — not provably reachable offline, but nothing rules it
+  out. Fixed with the exact shape codex proposed:
+  `if len(message.tool_calls) != 1 or len(matching_calls) != 1 or message.invalid_tool_calls`.
+- **N1.** `test_the_tool_payload_size_matches_what_pricingpy_assumes` pins only `propose()`'s
+  payload (`_plan_tool_definition()` plus the five `_domain_tool_definitions()`) —
+  `_final_assessment_tool_definition()` was never in that binding, so `respond()`'s own
+  payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
+  unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
+  assumes`, now pins it at **2,261 characters/tokens**. `_send`'s own comment, which called
+  7,020 "the per-stage figure" while only one of the two real stage payloads was ever
+  measured, now names both figures separately.
+- **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
+  mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
+  prose actually EXISTS. Correctness proved the gap with a mutation: deleting
+  `FinalAssessment.disposition`'s `Field(description=...)` in `domain.py` — the exact prose
+  one registry entry names — left all 529 tests green. N1 is the mechanism that let this
+  hide: the only test that could have noticed was measuring the wrong payload. A new
+  `_WIRE_VISIBLE_PROSE_PROOF` mapping in `test_live_model.py` pairs each contract with the
+  exact tool, the exact property path in its REAL emitted schema, and a literal substring of
+  that property's CURRENT description; `test_the_registrys_pointed_at_descriptions_are_
+  actually_present` checks it directly against the schema, not the free-text pointer.
+  Mutation-verified against correctness's own exact demonstration (deleting `disposition`'s
+  description now fails this test, naming the missing substring) and independently against a
+  second field (`stop_reason`).
+- **Readability fold-in.** `respond()`'s own comment made the same shape of overclaim as the
+  `StoredIncident` one above — "Zero matches and two-or-more matches are refused the same
+  way ... rather than the codebase silently picking a winner either time" read as exhaustive
+  when it covered only the matching-name count. Narrowed to say plainly what C4's fix checks
+  (matching-name count) versus what Finding 3 adds (total call count), each in its own
+  paragraph.
+
+**The two pre-trim summary counts.** `run_metric_check` (`prometheus.py`) and
+`run_topology_check` (`telemetry.py`) both had the identical bug already fixed twice in the
+base round for `run_logs_check`/`run_changes_check`: the summary string read a PRE-trim local
+variable (`len(kept)`, `len(edge_list)`) instead of the payload's own post-trim count field.
+`prometheus.py`'s case was a same-round regression — `count_key="sample_count"` was added in
+the very diff that also left the summary string unfixed four lines below. Both now read
+`payload['sample_count']`/`payload['edge_count']`. The topology case was reproducible with
+real data (many long edge strings genuinely exceed the byte budget); the metric case is not
+reachable through this suite's real data shape (`MetricSample.at`/`.value` are both floats,
+always small) and is tested instead by monkeypatching `trim_to_bytes` to simulate what a
+larger future row shape would trigger.
+
+**The services-list 12KiB fix.** Correctness disputed codex's severity and fix shape: an
+oversized `services` list in `run_topology_check` really does produce an over-budget payload
+(34,863 bytes measured against the 12,288-byte cap) but is not reachable through any of the
+four shipped lab topologies (all under 100 bytes total) — **P3, not P2** — and correctness
+enumerated every `trim_to_bytes` caller and every non-row payload field in the codebase to
+confirm `services` is the ONLY non-string, non-row field anywhere that needs its own bounding
+pass. A general recursive "bound every list/dict field" mechanism was explicitly rejected as
+solving a class of problem with exactly one member; the actual fix is a second `trim_to_bytes`
+call treating `services` as its own row list with its own `service_count`. **A real
+composition bug was found and fixed during this fix's OWN mutation testing**, not shipped:
+seeding `services`/`service_count` into the payload while leaving `edges` to be added later
+by its own `trim_to_bytes` call meant a payload that had already converged to fit (services
+trimmed against a payload with no `"edges"` key yet) could go back over budget the instant
+`"edges": []` was added afterward, with nothing left to pop and no string field for the
+scalar fallback to reach (a list is invisible to it). Both `"services"` and `"edges"` are now
+seeded into the payload BEFORE either `trim_to_bytes` call runs, so each call's own `fits()`
+checks see the true combined size from their first iteration.
+
+**Record only, this round:**
+
+- **N3.** `cli.py`'s `run_decision_command` builds `investigations_dir = root / "results" /
+  "investigations" / thread_id` from an unvalidated positional `thread_id` argument — the
+  same class of gap C1 fixed for `incident_id`, on a third call site C1 never covered.
+  Correctness tested `approve ../../decoy` and `approve ..` directly: both refuse cleanly
+  with `THREAD_NOT_FOUND`, since reaching `investigations_dir` in any dangerous way requires
+  a PRE-EXISTING `owner_decisions` row keyed by a real, internally-minted thread id — a
+  traversal string cannot forge one. Not exploitable today; recorded, not fixed.
+- **N4.** `schema_accepts`/item 5's cross-check (`test_live_model.py`) structurally cannot
+  detect any rule spanning more than one tool schema or more than one call in a turn —
+  `record_plan` setting `stop_reason` while also proposing a check, two domain calls in one
+  turn, and the forged-citation refusal (which needs a live evidence store, not any one
+  schema) are all real prose-only contracts this mechanism can never express, let alone list
+  in the registry. The module-level comment above `schema_accepts` now names this explicitly
+  as a boundary on what the mechanism CAN see, not an incomplete audit of what it has looked
+  at. Docstring-only; no code change.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

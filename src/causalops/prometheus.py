@@ -191,11 +191,19 @@ def run_metric_check(
         "truncated": len(fetched) > len(kept),
     }
     payload = trim_to_bytes(payload, "samples", rows, "sample_count")
+    # Post-freeze review. `count_key="sample_count"` was added in this
+    # same round to keep the PAYLOAD honest post-trim (Unit 3b-4 addendum,
+    # C3's fix, applied here too) -- but this summary string kept reading
+    # `len(kept)`, the PRE-trim count, four lines below where the payload
+    # was already fixed. Reproduced live: payload said `sample_count: 371`
+    # while this string still said "900 samples." Same bug, same fix
+    # pattern already applied twice this round (`run_logs_check`,
+    # `run_changes_check`).
     return executed_check(
         EvidenceKind.METRIC,
         source,
         f"{arguments.template.value} for {arguments.service}: "
-        f"{len(kept)} samples, peak {payload['max_value']}",
+        f"{payload['sample_count']} samples, peak {payload['max_value']}",
         payload,
         started,
     )

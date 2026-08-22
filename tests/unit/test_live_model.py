@@ -371,6 +371,39 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     assert estimate_input_tokens(payload) == 7_020
 
 
+def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
+    conn: sqlite3.Connection,
+) -> None:
+    """Post-freeze review, N1. The test above pins ONLY `propose()`'s
+    payload (`_plan_tool_definition()` plus the five `_domain_tool_
+    definitions()`) -- `_final_assessment_tool_definition()` is never in
+    that binding (confirmed by reading `propose()`/`respond()` directly:
+    they bind two disjoint tool lists). `_send`'s own comment calls
+    7,020 "the per-stage figure" while only ONE of the two stages was
+    ever actually pinned; `respond()`'s payload, priced by `reservation_
+    usd` on every FINAL_ASSESSMENT turn exactly the way `propose()`'s is
+    on every INVESTIGATE turn, had no test noticing if it drifted."""
+    call = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "not enough evidence",
+            "next_step": "check the gateway logs",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    model, fake = make_model(conn, [message([call])])
+
+    model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    (tools,) = fake.bound_tools
+    payload = json.dumps(tools)
+    assert len(payload) == 2_261
+    assert estimate_input_tokens(payload) == 2_261
+
+
 def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
     conn: sqlite3.Connection,
 ) -> None:
@@ -821,6 +854,42 @@ def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
     assert response.content == {}
 
 
+def test_respond_refuses_a_matching_call_alongside_an_unbound_extra_call(
+    conn: sqlite3.Connection,
+) -> None:
+    """Post-freeze review, Finding 3. C4's own fix above checked only
+    `len(matching_calls) != 1` -- a turn with exactly one `record_final_
+    assessment` call AND some other tool name `respond()` never bound
+    (`_final_assessment_tool_definition()` is the only tool offered) would
+    have passed that check, silently dropping the extra call the same way
+    C4 was built to stop happening for a second MATCHING call. Not proven
+    reachable against a real provider offline, per the installed
+    `langchain-anthropic` source correctness read -- but the fix costs one
+    more length check, so it is applied regardless."""
+    matching = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "u",
+            "next_step": "n",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    unbound_extra = ToolCall(
+        name="some_other_tool",
+        args={"anything": "at all"},
+        id="extra-1",
+        type="tool_call",
+    )
+    model, _ = make_model(conn, [message([matching, unbound_extra])])
+
+    response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    assert response.content == {}
+
+
 # --- the refusal path: as tested as the success path ---------------------
 
 
@@ -1135,6 +1204,28 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
 # the prose that actually carries the rule -- `test_an_undocumented_prose_
 # only_contract_fails_the_check` demonstrates what happens to one that
 # is not.
+#
+# A NAMED LIMIT, post-freeze review, N4: this mechanism checks ONE tool's
+# schema against ONE payload for that same tool -- it structurally cannot
+# express, and so cannot detect, any rule that spans more than one schema
+# or more than one call in a turn. None of these are expressible through
+# `schema_accepts`, and none can ever appear in `KNOWN_PROSE_ONLY_
+# CONTRACTS` via this mechanism, no matter how thoroughly the registry is
+# audited:
+# - `record_plan` setting `stop_reason` to a non-null value WHILE also
+#   proposing a domain-tool check in the same turn ("propose a check or
+#   stop, not both") -- a rule about the RELATIONSHIP between two separate
+#   tool calls, not either one's own schema.
+# - Two domain-tool calls proposed in one turn (`select_single_tool_call`'s
+#   own refusal) -- same shape, a cross-call count, not a single payload.
+# - A forged evidence-id citation (`ReasonCode.FORGED_EVIDENCE_REFERENCE`)
+#   -- refused by cross-referencing a live evidence STORE built from the
+#   run so far, external to any tool's own schema entirely.
+# This is a boundary on what the mechanism CAN see, not an incomplete
+# audit of what it has looked at -- a future engineer should not read the
+# five (now four, item 1 closed one) known contracts as the exhaustive
+# list of every prose-only gap this codebase could ever have, only the
+# ones expressible as one schema's own single-payload shape.
 
 
 def resolve_schema_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
@@ -1343,6 +1434,91 @@ KNOWN_PROSE_ONLY_CONTRACTS: dict[str, str] = {
         "root_cause's own description."
     ),
 }
+
+
+# Post-freeze review, N2 -- proves the open #27 finding for real.
+# `KNOWN_PROSE_ONLY_CONTRACTS` above only ever pointed at where the
+# documentation prose LIVES, in free text a human reads; nothing ever
+# verified the prose actually EXISTS. Correctness proved the gap with a
+# mutation: deleting `FinalAssessment.disposition`'s `Field(description=
+# ...)` in `domain.py` left all 529 tests green, because the only test
+# that could have noticed (`test_the_tool_payload_size_matches_what_
+# pricingpy_assumes`) measures total payload characters, not any one
+# field's content -- and that test measures `propose()`'s payload only
+# (N1, above), which does not even contain `record_final_assessment`'s
+# schema.
+#
+# Each entry below names the SAME contract from `KNOWN_PROSE_ONLY_
+# CONTRACTS`, paired with the exact tool name, the exact property path in
+# its emitted schema, and a literal substring of that property's CURRENT
+# `description` -- checked directly against the real emitted schema by
+# the test below, never inferred from the free-text pointer above (which
+# stays free text for a human to read; this is its machine-checkable
+# other half).
+_WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "record_plan: stop_reason explicitly null, no check proposed": (
+        RECORD_PLAN_TOOL_NAME,
+        ("stop_reason",),
+        "Use null only when you are also calling a check tool this turn.",
+    ),
+    "record_final_assessment: DIAGNOSED, no supporting_evidence_ids": (
+        RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        ("supporting_evidence_ids",),
+        "A DIAGNOSED assessment must cite at least one entry here.",
+    ),
+    "record_final_assessment: DIAGNOSED + root_cause UNDETERMINED": (
+        RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        ("disposition",),
+        "DIAGNOSED requires a root_cause other than UNDETERMINED",
+    ),
+    "record_final_assessment: INSUFFICIENT_EVIDENCE + a real root cause": (
+        RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        ("root_cause",),
+        "UNDETERMINED when disposition is INSUFFICIENT_EVIDENCE",
+    ),
+}
+
+
+def test_wire_visible_prose_proof_only_names_registered_contracts() -> None:
+    """Guards `_WIRE_VISIBLE_PROSE_PROOF` itself against drifting out of
+    sync with the registry it is meant to verify -- every label it names
+    must actually be in `KNOWN_PROSE_ONLY_CONTRACTS`."""
+    assert set(_WIRE_VISIBLE_PROSE_PROOF) <= set(KNOWN_PROSE_ONLY_CONTRACTS)
+
+
+def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
+    """The N2 fix itself. For each known prose-only contract that claims a
+    specific field's own description carries the rule, this looks up the
+    REAL emitted schema for that tool, navigates to the named field, and
+    asserts the expected substring is actually present in its
+    `description` -- not merely that a `description` key exists (empty or
+    unrelated text would pass a weaker check, and would not have caught
+    correctness's demonstration). Mutation-verified separately: deleting
+    `FinalAssessment.disposition`'s `description=...` in `domain.py` (the
+    exact gap correctness demonstrated survives today) makes this test
+    fail, naming the missing substring."""
+    tools = {
+        tool["name"]: tool["input_schema"]
+        for tool in (
+            *_domain_tool_definitions(),
+            _plan_tool_definition(),
+            _final_assessment_tool_definition(),
+        )
+    }
+    for label, (
+        tool_name,
+        field_path,
+        expected_substring,
+    ) in _WIRE_VISIBLE_PROSE_PROOF.items():
+        node = tools[tool_name]
+        for field_name in field_path:
+            node = node["properties"][field_name]
+        description = node.get("description", "")
+        assert expected_substring in description, (
+            f"{label!r}: expected {'.'.join(field_path)!r} in {tool_name!r}'s "
+            f"schema to carry {expected_substring!r} in its description, "
+            f"found {description!r}"
+        )
 
 
 def assert_documented_prose_only_contract(

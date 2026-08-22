@@ -18,6 +18,7 @@ from fake_incident import (
     prometheus_body,
     write_log,
 )
+from pydantic import JsonValue
 
 from causalops.domain import (
     EvidenceKind,
@@ -111,6 +112,53 @@ def test_a_metric_query_returns_bounded_samples(
     assert outcome.payload["sample_count"] == MAX_METRIC_SAMPLES
     assert outcome.payload["truncated"] is True
     assert outcome.payload["max_value"] == (MAX_METRIC_SAMPLES - 1) * 0.5
+    assert f"{MAX_METRIC_SAMPLES} samples" in outcome.summary
+
+
+def test_a_metric_summary_reports_the_post_trim_count_not_the_pre_trim_one(
+    monkeypatch: pytest.MonkeyPatch, fake_prometheus: RecordingPrometheus
+) -> None:
+    """Post-freeze review. `run_metric_check`'s summary string used to read
+    `len(kept)` (the PRE-trim count) instead of `payload['sample_count']`
+    (kept honest post-trim by `trim_to_bytes`, Unit 3b-4 addendum's C3)
+    four lines below where the payload was already fixed -- reproduced
+    live by correctness (payload said `sample_count: 371`, the summary
+    still said "900 samples"). Unreachable through this function's own
+    REAL data shape in this test suite: `MetricSample.at`/`.value` are
+    both floats, always small, so `trim_to_bytes`'s byte-level popping
+    never actually fires below the `MAX_METRIC_SAMPLES` count cap already
+    applied earlier in the function. Monkeypatching `trim_to_bytes` to
+    additionally drop one sample (simulating what a future, larger row
+    shape would trigger) forces `payload['sample_count']` and the
+    pre-trim `len(kept)` to genuinely differ, proving the summary string
+    reads the field the payload itself reports, not a stale local
+    variable, regardless of whether today's data can reach the
+    difference."""
+    import causalops.prometheus as prometheus_module
+
+    real_trim_to_bytes = prometheus_module.trim_to_bytes
+
+    def shrinking_trim_to_bytes(
+        payload: dict[str, JsonValue],
+        rows_key: str,
+        rows: list[JsonValue],
+        count_key: str,
+    ) -> dict[str, JsonValue]:
+        result = real_trim_to_bytes(payload, rows_key, rows, count_key)
+        current_count = result[count_key]
+        assert isinstance(current_count, int)
+        result[count_key] = current_count - 1
+        return result
+
+    monkeypatch.setattr(prometheus_module, "trim_to_bytes", shrinking_trim_to_bytes)
+
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), fake_prometheus.url, 5
+    )
+
+    assert outcome.payload["sample_count"] == MAX_METRIC_SAMPLES - 1
+    assert f"{MAX_METRIC_SAMPLES - 1} samples" in outcome.summary
+    assert f"{MAX_METRIC_SAMPLES} samples" not in outcome.summary
 
 
 def test_a_metric_query_against_nothing_is_unavailable() -> None:
@@ -364,6 +412,59 @@ def test_topology_reads_the_run_manifest(tmp_path: Path) -> None:
 
     assert outcome.outcome is ToolOutcome.EXECUTED
     assert outcome.payload["edge_count"] == 1
+    assert "1 service edges" in outcome.summary
+
+
+def test_topology_summary_reports_the_post_trim_edge_count(tmp_path: Path) -> None:
+    """Post-freeze review. `run_topology_check`'s summary string used to
+    read `len(edge_list)` (the PRE-trim count) instead of
+    `payload['edge_count']` (kept honest post-trim by `trim_to_bytes`,
+    Unit 3b-4 addendum's C3) -- the same bug already fixed this round in
+    `run_logs_check`/`run_changes_check`/`run_metric_check`. Unlike the
+    metric case, this one is genuinely reachable with real data: many
+    long edge strings really do exceed the byte budget without needing a
+    monkeypatch."""
+    paths = RunPaths(root=tmp_path)
+    edges = [f"service-{i}>service-{i + 1}" for i in range(600)]
+    paths.topology_file.write_text(
+        json.dumps({"services": [], "edges": edges}), encoding="utf-8"
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert outcome.payload["truncated"] is True
+    kept_edge_count = outcome.payload["edge_count"]
+    assert isinstance(kept_edge_count, int)
+    assert kept_edge_count < len(edges)
+    assert f"{kept_edge_count} service edges" in outcome.summary
+    assert f"{len(edges)} service edges" not in outcome.summary
+
+
+def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) -> None:
+    """The services-list fix. `services` is a LIST, not the string-valued
+    scalar `trim_to_bytes`'s own fallback (C3) can shrink, and it is not
+    `edges`, the row list `run_topology_check`'s other `trim_to_bytes`
+    call already bounds -- before this fix, an oversized `services` list
+    would pass through both mechanisms untouched and blow the byte
+    budget. Reachable with real data, same as the edges case above: many
+    long service names really do exceed it. Not reachable through any of
+    the four shipped lab topologies (all under 100 bytes total) -- this
+    is a defensive bound, not a scenario this project's own lab can
+    trigger, per the owner's P3 severity ruling."""
+    paths = RunPaths(root=tmp_path)
+    services = [f"service-with-a-long-descriptive-name-{i}" for i in range(400)]
+    paths.topology_file.write_text(
+        json.dumps({"services": services, "edges": []}), encoding="utf-8"
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert outcome.payload["truncated"] is True
+    kept_service_count = outcome.payload["service_count"]
+    assert isinstance(kept_service_count, int)
+    assert kept_service_count < len(services)
+    assert kept_service_count == len(outcome.payload["services"])  # type: ignore[arg-type]
 
 
 def test_a_missing_manifest_is_unavailable_rather_than_a_crash(tmp_path: Path) -> None:

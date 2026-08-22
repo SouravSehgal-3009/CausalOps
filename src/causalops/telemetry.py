@@ -250,16 +250,55 @@ def run_topology_check(
         )
     edges = loaded.get("edges")
     edge_list: list[JsonValue] = edges if isinstance(edges, list) else []
+    services_field = loaded.get("services")
+    service_list: list[JsonValue] = (
+        services_field if isinstance(services_field, list) else []
+    )
+    # Post-freeze review. `services` is a LIST, not the string-valued
+    # scalar `trim_to_bytes`'s own fallback (Unit 3b-4 addendum, C3) can
+    # shrink, and it is not `edges`, the ROW list this function's other
+    # `trim_to_bytes` call below already bounds -- an oversized `services`
+    # list would pass through both mechanisms untouched. Correctness
+    # measured this concretely (34,863 bytes against the 12,288-byte cap,
+    # not reachable through any of the four shipped lab topologies, all
+    # under 100 bytes total -- P3, not P2) and confirmed `services` is the
+    # ONLY non-string, non-row field anywhere in this codebase's `trim_to_
+    # bytes` callers that needs its own bounding pass: not evidence for a
+    # general recursive mechanism over arbitrary payload shapes, which
+    # would be solving a class of problem this codebase has exactly one
+    # instance of. A second `trim_to_bytes` call, treating `services` as
+    # its own row list with its own `service_count`, reuses the identical
+    # byte-bounding logic `edges` already gets below rather than inventing
+    # a second one.
+    #
+    # Both `"services"` and `"edges"` are seeded into `payload` BEFORE
+    # either `trim_to_bytes` call, full and untrimmed -- caught by this
+    # function's own mutation testing: seeding only `"services"` up front
+    # and letting the `"edges"` call add its OWN key for the first time,
+    # the way this function used to before `services` needed bounding too,
+    # let a payload that had already converged to fit (services trimmed
+    # down against a payload with no `"edges"` key yet) go back over
+    # budget the moment `"edges": []` was added afterward -- with nothing
+    # left to pop (`edge_list` was already empty) and no STRING field for
+    # the scalar fallback to shrink (`services`, a list, is invisible to
+    # it), that state could never re-converge. Seeding both up front means
+    # each call's own `fits()` checks always see the TRUE combined size
+    # from its first iteration, so trimming one list already accounts for
+    # the other's full weight -- order between the two calls does not
+    # matter for the final result.
     payload: dict[str, JsonValue] = {
-        "services": loaded.get("services", []),
+        "services": service_list,
+        "service_count": len(service_list),
+        "edges": edge_list,
         "edge_count": len(edge_list),
         "truncated": False,
     }
+    payload = trim_to_bytes(payload, "services", service_list, "service_count")
     payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
     return executed_check(
         EvidenceKind.TOPOLOGY,
         source,
-        f"{len(edge_list)} service edges in this incident",
+        f"{payload['edge_count']} service edges in this incident",
         payload,
         started,
     )

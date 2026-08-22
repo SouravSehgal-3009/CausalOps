@@ -520,14 +520,22 @@ def _load_verified_incident(
             LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
         )
     incident = _load_stored_artifact(StoredIncident, paths.incident_file)
-    # Confirms `runs/<incident_id>/incident.json` actually describes the
-    # incident its own directory name claims -- nothing else in this
-    # codebase checks that the two ever agree, and a manual copy or a
-    # future code path could let them drift silently. Refused with the
-    # same reason code the directory-not-found case above uses: from an
-    # owner's point of view, "there is no valid incident under this id" is
-    # one outcome, whether the cause is a missing directory or a directory
-    # whose contents belong to a different incident.
+    # Post-freeze review, P1: this check alone compares only
+    # `scope.incident_id` against the directory name -- but
+    # `StoredIncident.check_identity_agrees` (`domain.py`) already ran
+    # inside `_load_stored_artifact` just above, and guarantees
+    # `packet.incident_id` and every `evidence[i].incident_id` equal
+    # `scope.incident_id`. Together, that transitively confirms the WHOLE
+    # loaded artifact -- scope, packet, and every evidence record --
+    # describes the incident its own directory name claims, not just the
+    # one field compared directly here. A manual copy or a future code
+    # path could still let the directory name itself drift from a
+    # perfectly self-consistent artifact; that is what this comparison
+    # catches. Refused with the same reason code the directory-not-found
+    # case above uses: from an owner's point of view, "there is no valid
+    # incident under this id" is one outcome, whether the cause is a
+    # missing directory or a directory whose contents belong to a
+    # different incident.
     if incident.scope.incident_id != incident_id:
         raise LabError(
             LabReasonCode.INCIDENT_NOT_FOUND,

@@ -7,6 +7,7 @@ from fake_incident import (
     hypotheses,
     incident_scope,
     metric_proposal,
+    packet_evidence,
 )
 from pydantic import ValidationError
 
@@ -28,6 +29,7 @@ from causalops.domain import (
     ReasonCode,
     ReceiptState,
     RootCauseCode,
+    StoredIncident,
     ToolOutcome,
     ToolReceipt,
     Versions,
@@ -171,6 +173,59 @@ def test_an_incident_window_must_end_after_it_starts() -> None:
             ended_at=WINDOW_START,
             endpoint="/api/orders",
         )
+
+
+def test_stored_incident_refuses_a_packet_incident_id_mismatch() -> None:
+    """Post-freeze review, P1. Correctness traced a real safe-failure
+    breakage from exactly this shape reaching `graph.py`'s
+    `_rebuild_store`: it raises `ValueError` on a mismatched
+    `evidence[i].incident_id`, and that function runs from BOTH the
+    normal report-building path and the crash-containment path meant to
+    catch failures like it -- a second identical raise from inside the
+    handler escapes `main()`'s catch tuple entirely. `StoredIncident.
+    check_identity_agrees` now refuses this at load time instead."""
+    scope = incident_scope()
+    mismatched_packet = alert_packet().model_copy(
+        update={"incident_id": "not-the-scope-incident"}
+    )
+
+    with pytest.raises(ValidationError, match="packet.incident_id"):
+        StoredIncident(
+            scope=scope, packet=mismatched_packet, evidence=packet_evidence()
+        )
+
+
+def test_stored_incident_refuses_an_evidence_incident_id_mismatch() -> None:
+    """Sibling of the packet-mismatch test above, for the third
+    identity-bearing field `StoredIncident.check_identity_agrees` checks --
+    a single mismatched evidence record among several is still refused,
+    not just a wholesale-wrong tuple."""
+    scope = incident_scope()
+    packet = alert_packet()
+    one_evidence, other_evidence = packet_evidence()
+    mismatched_evidence = (
+        one_evidence.model_copy(update={"incident_id": "not-the-scope-incident"}),
+        other_evidence,
+    )
+
+    with pytest.raises(ValidationError, match="evidence"):
+        StoredIncident(scope=scope, packet=packet, evidence=mismatched_evidence)
+
+
+def test_stored_incident_accepts_a_fully_self_consistent_artifact() -> None:
+    """The positive case, deliberately pinned alongside the two refusals
+    above -- every fixture this suite already relies on (`_write_incident`
+    in `test_approvals.py`/`test_cli.py`, `packet_evidence()` here) must
+    keep passing `check_identity_agrees` unchanged, since none of them
+    were built with this validator in mind."""
+    scope = incident_scope()
+    packet = alert_packet()
+    evidence = packet_evidence()
+
+    incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+
+    assert incident.scope.incident_id == packet.incident_id
+    assert all(item.incident_id == scope.incident_id for item in evidence)
 
 
 def test_contracts_are_frozen() -> None:
