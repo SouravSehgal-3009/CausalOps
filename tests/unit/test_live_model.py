@@ -24,11 +24,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from fake_incident import alert_packet, incident_scope
 from langchain_core.messages import AIMessage
 from langchain_core.messages.tool import ToolCall, invalid_tool_call
 
 from causalops.cost_ledger import CostCeilingExceeded, ensure_cost_ledger_table
-from causalops.domain import FinalAssessment, HypothesisUpdate, InitialPlan
+from causalops.domain import (
+    Budgets,
+    FinalAssessment,
+    HypothesisUpdate,
+    InitialPlan,
+    RetrievalMode,
+    RunbookPassage,
+)
 from causalops.live_model import (
     RECORD_FINAL_ASSESSMENT_TOOL_NAME,
     RECORD_PLAN_TOOL_NAME,
@@ -46,6 +54,7 @@ from causalops.pricing import (
     PricingSnapshot,
     estimate_input_tokens,
 )
+from causalops.prompts import STAGE_INSTRUCTIONS, SYSTEM_TEXT, render_context
 from causalops.tool_calls import select_single_tool_call
 from causalops.tools import ToolName
 
@@ -215,12 +224,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the ~2,580-token tool schema `bind_tools`
+    against prose alone, never the ~7,595-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~2,580" restates
+    the pinned, directly-measured figure this comment's "~7,595" restates
     in prose."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
@@ -286,19 +295,183 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     """Post-freeze review's stale-figure finding: `pricing.py`'s
     `InputTooLarge` docstring and `live_model.py`'s own comment on `_send`
     both cite this payload's size in prose, and the cited figure has
-    already gone stale once (8,329 chars, before P2-5 shrank the payload by
-    stripping `PlanRecord`'s docstring and `FinalAssessment`'s
-    `schema_version`/`description`) without a test noticing. This pins the
-    real, measured figure so a third silent drift fails a test instead of
-    only a docstring."""
+    already gone stale twice without a test noticing -- once at 8,329
+    chars (before P2-5 shrank the payload by stripping `PlanRecord`'s
+    docstring and `FinalAssessment`'s `schema_version`/`description`), and
+    again at 7,738 chars / 2,580 tokens (before Unit 3b-3's discriminator
+    fix dropped the stale `"default"` key from every domain tool's `tool`
+    property, and before that same unit's ratio replan changed how many
+    tokens the same characters estimate to). This pins the real, measured
+    figure so a fourth silent drift fails a test instead of only a
+    docstring."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 7_738
-    assert estimate_input_tokens(payload) == 2_580
+    assert len(payload) == 7_595
+    # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
+    # makes the token estimate equal the character count exactly -- this
+    # is the real behaviour, not a coincidence to simplify away.
+    assert estimate_input_tokens(payload) == 7_595
+
+
+def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
+    conn: sqlite3.Connection,
+) -> None:
+    """Unit 3b-3's discriminator fix, tested directly against the emitted
+    wire schema rather than inferred from a passing `propose()` call. The
+    owner's first live run omitted `tool` from its arguments on both the
+    original call and the repair; `tool` was confirmed (by set
+    comprehension, not inspection) to be the ONLY property across all five
+    domain tool schemas carrying pydantic's own `"default"` key alongside
+    `"const"` on the same required field -- a required field that also
+    names its own default reads as omittable. This asserts the fix without
+    weakening the discriminator: `"const"` (the fixed value Claude must
+    send) and `tool`'s membership in `"required"` are still present; only
+    `"default"` is gone. `test_tool_calls.py`'s `test_a_call_missing_the_
+    tool_discriminator_is_refused` proves `parse_tool_call` still demands
+    the field regardless of what pydantic's own model default would have
+    supplied -- this test and that one together are the whole claim: we
+    changed what we ASK Claude to send, not how we VALIDATE what it sends."""
+    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+
+    model.propose(make_request(), InitialPlan)
+
+    (tools,) = fake.bound_tools
+    domain_tools = [tool for tool in tools if tool["name"] != RECORD_PLAN_TOOL_NAME]
+    assert len(domain_tools) == 5
+    for tool in domain_tools:
+        tool_property = tool["input_schema"]["properties"]["tool"]
+        assert "default" not in tool_property
+        assert "const" in tool_property
+        assert "tool" in tool["input_schema"]["required"]
+
+
+def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes() -> (
+    None
+):
+    """`InputTooLarge`'s docstring and the "Default limits" table both cite
+    how large a FINAL_ASSESSMENT turn's prose gets with no evidence added,
+    to argue folding the tool schema into `MAX_INPUT_TOKENS` would refuse
+    ordinary runs. Unit 3b-2's version of that figure ("512 tokens") was
+    never pinned by a test, and Unit 3b-3's review could not reproduce it
+    from the real `render_context`/`Budgets` call site `graph.py`'s
+    `_render_stage_request` actually uses -- the closest reconstruction,
+    at the OLD 3.0 ratio, was 427 tokens, not a match. Rather than carry
+    the unreproducible number forward, this computes the real figure
+    directly from the same inputs `_render_stage_request` builds (`_model_
+    calls_left` is `budgets.model_calls - model_calls_used`; `_tools_left`
+    on zero receipts is `budgets.executed_tools`, since nothing has been
+    reserved from that ledger yet) against this repo's own smallest
+    checked-in scenario (`tests/unit/fake_incident.py`), one INITIAL_PLAN
+    turn already spent and stopped, no evidence added -- and pins it, so
+    the two docstrings that cite it can point at a test instead of a
+    number carried by hand a third time."""
+    scope = incident_scope()
+    packet = alert_packet()
+    budgets = Budgets()
+    model_calls_used = 1  # the INITIAL_PLAN turn that stopped immediately
+
+    context = render_context(
+        packet,
+        scope,
+        evidence=[],
+        markers=[],
+        model_calls_left=budgets.model_calls - model_calls_used,
+        checks_left=budgets.executed_tools,
+        passages=(),
+    )
+    context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
+    total = SYSTEM_TEXT + context_text
+
+    assert len(total) == 1_280
+    # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
+    # count -- the real behaviour, asserted directly rather than derived.
+    assert estimate_input_tokens(total) == 1_280
+
+
+def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap() -> (
+    None
+):
+    """P2-1's correction. The claim this docstring's sibling test measured
+    (1,280 tokens of FINAL_ASSESSMENT prose with zero evidence, against a
+    ~2,005-token folded headroom) does NOT support "folding tools into the
+    cap would refuse ordinary runs" -- 1,280 < 2,005 is an ADMITTED request,
+    and an earlier version of this argument (in `TECHNICAL_OVERVIEW.md` and,
+    before it, in Unit 3b-2's own unpinned "512 tokens" claim) drew the
+    opposite conclusion from its own numbers. This test measures the
+    example that actually supports the conclusion: `Budgets.
+    runbook_passages` (5) retrieved passages at `RunbookPassage.content`'s
+    own `max_length` (800), still present in a FINAL_ASSESSMENT turn's
+    context because `graph.py`'s `_make_final_assessment` rebuilds and
+    re-renders passages from state on every stage, not just the stage that
+    retrieved them. Five max-length passages is not a contrived worst
+    case -- it is `search_runbooks`'s own schema ceiling
+    (`SearchRunbooksArguments.limit`, `le=20`) clipped to what policy
+    actually allows through in one call (`Budgets.runbook_passages`)."""
+    scope = incident_scope()
+    packet = alert_packet()
+    budgets = Budgets()
+    model_calls_used = 1
+    passages = tuple(
+        RunbookPassage(
+            passage_id=f"runbook-{i}",
+            content="x" * 800,
+            source_version="v1",
+            content_hash="hash",
+            score=1.0,
+            retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+        )
+        for i in range(budgets.runbook_passages)
+    )
+
+    context = render_context(
+        packet,
+        scope,
+        evidence=[],
+        markers=[],
+        model_calls_left=budgets.model_calls - model_calls_used,
+        checks_left=budgets.executed_tools,
+        passages=passages,
+    )
+    context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
+    total = SYSTEM_TEXT + context_text
+    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_595  # 7,595: the measured
+    # tool-definition payload pinned by test_the_tool_payload_size_matches_
+    # what_pricingpy_assumes above -- restated, not re-measured, here.
+
+    assert len(total) == 5_465
+    assert estimate_input_tokens(total) == 5_465
+    assert estimate_input_tokens(total) > folded_headroom_tokens
+
+
+def test_a_request_at_the_intended_9600_character_budget_is_not_refused(
+    conn: sqlite3.Connection,
+) -> None:
+    """The end-to-end sibling of `test_pricing.py`'s cap-preserves-the-
+    budget sentinel: proves the admitted side of the boundary through a
+    real `propose()` call, not just the arithmetic. A system+context
+    request at exactly the owner-approved 9,600-character prose budget
+    must still be accepted -- if a future change to `PESSIMISTIC_CHARS_
+    PER_TOKEN` or `MAX_INPUT_TOKENS` alone silently shrinks the effective
+    character budget, an ordinary-sized request starts refusing here."""
+    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    at_budget = ModelRequest(
+        stage=Stage.INITIAL_PLAN,
+        system_text="x" * 9_600,
+        context_text="",
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+    )
+
+    turn = model.propose(at_budget, InitialPlan)
+
+    assert turn.parsed is not None
+    assert fake.sent != []
 
 
 # --- propose(): the valid shapes -----------------------------------------

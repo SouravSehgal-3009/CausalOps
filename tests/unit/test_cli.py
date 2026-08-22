@@ -212,13 +212,13 @@ def test_live_evaluation_ceiling_falls_back_on_a_non_finite_value() -> None:
 
 
 def test_live_evaluation_ceiling_honours_a_well_formed_typo() -> None:
-    """The boundary P3-4 does *not* move: `200` typed for `2.00` is a
-    well-formed positive, finite number and is honoured as written, same as
-    any other config value -- guarding against a fat-fingered magnitude is
-    the owner's job, not this parser's. This test exists so the boundary is
-    documented, not implied."""
-    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "200"}) == (
-        200.0
+    """The boundary P3-4 does *not* move: `500` typed for `5.00` (Unit
+    3b-3's default, raised from 2.00) is a well-formed positive, finite
+    number and is honoured as written, same as any other config value --
+    guarding against a fat-fingered magnitude is the owner's job, not this
+    parser's. This test exists so the boundary is documented, not implied."""
+    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "500"}) == (
+        500.0
     )
 
 

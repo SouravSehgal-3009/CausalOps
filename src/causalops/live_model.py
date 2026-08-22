@@ -194,11 +194,32 @@ _RATIONALE_PROPERTIES: dict[str, JsonValue] = {
 def _domain_tool_definitions() -> list[dict[str, Any]]:
     """Anthropic-format tool definitions for the five registered checks,
     derived from `ToolArguments`'s own member schemas -- never a second,
-    hand-written list of what arguments each tool takes."""
+    hand-written list of what arguments each tool takes.
+
+    Unit 3b-3, the smoke-call blocker: `tools.py`'s `tool` field carries a
+    Python-level default (`= ToolName.X`) for every *other* caller's
+    convenience -- ~30 existing call sites across this repo's tests
+    construct these argument objects without passing `tool=`. That default
+    leaks into `model_json_schema()`'s output as a `"default"` key sitting
+    beside `"const"` on the same required field -- confirmed to be the
+    *only* property, across all five schemas, that carries one. The first
+    live run omitted `tool` from its arguments on both the original call
+    and the repair; a required field that also names its own default reads
+    as omittable, and stripping the wire-schema-only `"default"` below is
+    the targeted fix. `"const"` and the forced membership in `required`
+    just below are untouched, so `parse_tool_call`'s confused-deputy check
+    (`tool_calls.py`: `call.name != arguments.tool.value`) still compares
+    two independently-validated values -- this never injects `tool` from
+    `call.name`, which would make that check unable to ever observe a
+    disagreement again. Only this function's *output* changes; `tools.py`'s
+    own model keeps its default, so none of those ~30 call sites move."""
     definitions: list[dict[str, Any]] = []
     for arguments_cls, tool_name, description in _DOMAIN_TOOL_SPECS:
         schema = arguments_cls.model_json_schema()
         properties = dict(schema.get("properties", {}))
+        tool_property = dict(properties["tool"])
+        tool_property.pop("default", None)
+        properties["tool"] = tool_property
         properties.update(_RATIONALE_PROPERTIES)
         schema["properties"] = properties
         required = list(schema.get("required", []))
@@ -491,7 +512,7 @@ class LiveClaudeModel:
             raise InputTooLarge(estimated_input_tokens)
         # Unit 3b-2, P1-1. The reservation must price what actually goes out
         # on the wire: prose *plus* the tool schema `bind_tools` sends on
-        # every call, roughly 2,580 tokens of fixed, per-stage tool
+        # every call, roughly 7,595 tokens of fixed, per-stage tool
         # definitions this unit measured (`test_live_model.py` pins the
         # exact figure, so this comment cannot drift from the real payload
         # the way an earlier version of it already did once). `MAX_INPUT_

@@ -11,7 +11,7 @@ only points at them; it does not define behavior.
 Phases 1 and 2 are complete: the synthetic lab, Prometheus and JSONL
 telemetry, all four incident families, the four read-only tool backends,
 policy, budgets, run records, and scoring. Milestones 1 and 2 are complete:
-`causalops investigate <incident-id> --model replay` runs an incident end to
+`uv run causalops investigate <incident-id> --model replay` runs an incident end to
 end through the LangGraph `StateGraph` orchestrator, including the
 escalation interrupt and owner approval/rejection — see
 `TECHNICAL_OVERVIEW.md` Part III for what it currently supports. Milestone 3
@@ -46,7 +46,7 @@ $env:ANTHROPIC_API_KEY = "<your key>"
 
 ## Running a live investigation
 
-`causalops investigate <incident-id> --model claude` sends a real, billed
+`uv run causalops investigate <incident-id> --model claude` sends a real, billed
 request to Anthropic. `--model replay` sends nothing to Anthropic — it
 reads a checked-in fixture, and the only network traffic either mode makes
 on its own account is to the local lab. Before running `--model claude`,
