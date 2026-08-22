@@ -547,24 +547,22 @@ remaining call budget permits a safe alternative or assessment.
 | Limit | Default | Status |
 |---|---:|---|
 | Investigation wall clock | 360 seconds | built — `Budgets.wall_clock_seconds` |
-| Model call | 90 seconds | specified, not enforced — `Budgets` has no per-call timeout field |
+| Model call | 90 seconds | built, Unit 3b-2 — `pricing.MAX_REQUEST_SECONDS`, passed as `live_model.LiveClaudeModel`'s `ChatAnthropic(..., timeout=...)` |
 | Tool execution | 10 seconds | built — `Budgets.tool_timeout_seconds` |
 | Model calls, including repair | 4 | built — `Budgets.model_calls` |
 | Executed diagnostic tools | 2 | built — `Budgets.executed_tools` |
 | Structured-output repairs | 1 | built — `Budgets.repairs` |
-| Maximum counted input per model call | 3,200 tokens | specified, not enforced — no token counting exists in `src/` |
-| Claude `max_tokens` | 1,600 tokens | specified for the live adapter, not yet built |
-| Claude adaptive-thinking effort | `medium` | specified for the live adapter, not yet built |
+| Maximum counted input per model call | 3,200 tokens | built, Unit 3b-2 — `pricing.MAX_INPUT_TOKENS`/`estimate_input_tokens`/`InputTooLarge`; counts request prose (`system_text` plus the rendered human message, correction header included on a repair turn) only, not the ~2,580-token fixed tool schema every call also sends (7,738 characters, measured directly and pinned by a `test_live_model.py` test) — folding tools into the cap would leave only ~620 tokens of prose headroom, and a FINAL_ASSESSMENT turn on this project's own smallest checked-in scenario already renders to 512 tokens of prose with no evidence added, so folding tools in would refuse ordinary runs, not just unusually large ones. A pessimistic character-per-token estimate, not a real tokenizer (deliberately, see `pricing.py`'s docstring). The dollar *reservation* below (`Unbounded provider spend`) is not scoped this way — it counts the tool schema too, since a reservation that ignores real, billed tokens is not conservative |
+| Claude `max_tokens` | 1,600 tokens | built, Unit 3b-2 — `pricing.MAX_OUTPUT_TOKENS`, `live_model.LiveClaudeModel`'s `ChatAnthropic` construction |
+| Claude adaptive-thinking effort | `medium` | built, Unit 3b-2 — `live_model.LiveClaudeModel`'s `ChatAnthropic(..., thinking={"type": "adaptive"}, effort="medium")` |
 | Log result | 40 rows and 12 KB | built — `Budgets.log_rows`, `evidence.MAX_RESULT_BYTES` |
 | Metric result | 60 samples and 12 KB | built — `prometheus.MAX_METRIC_SAMPLES`, `evidence.MAX_RESULT_BYTES` |
 | Automatic retries | 0 | built — no retry logic exists anywhere in `src/` |
 
-Every row marked `built` is enforced today by the cited constant. The two
-rows marked `specified, not enforced` (model-call timeout, input token
-counting) and the two Claude-specific rows are live-adapter design, not yet
-implemented — see Part I, Phase 3, and Part III. Cost caps are recorded in
-`TECHNICAL_SPEC.md` §10 (superseding the v1 figures — see Part III) rather
-than here, since they apply only once a live adapter exists.
+Every row above is enforced today by the cited constant. Cost caps are
+recorded in `TECHNICAL_SPEC.md` §10 (superseding the v1 figures — see
+Part III) rather than here, since they bound application-wide dollar
+spend rather than one request's shape.
 
 All limits are application-owned and visible to the model as immutable status.
 Context construction uses an injected clock, stable evidence ordering, fixed
@@ -771,9 +769,9 @@ integrity, evaluator ground truth, secrets, and the host environment.
 Attacker-controlled inputs include model output, logs, metric labels, alert
 text, and change descriptions.
 
-Rows below marked **built** are proven today by a cited Phase 1/2 test. Rows
-marked **Phase 3** describe a control that only applies once the live Claude
-adapter exists and cannot be tested until it does.
+Rows below marked **built** are proven today by a cited test — Phase 1/2
+tests for most rows, Unit 3b-2's for the three that needed the live Claude
+adapter to exist first. Every row in this table is built; none is deferred.
 
 | Threat | Required control | Status |
 |---|---|---|
@@ -782,12 +780,12 @@ adapter exists and cannot be tested until it does.
 | Arbitrary query execution | Template enums only; reject raw PromQL, shell, SQL, URL, and path input | built — `tests/unit/test_policy.py`, `test_tools.py` |
 | Scope escape | Incident-labelled backends and allowlists; deny cross-run service, time, file, and evidence access | built — `tests/unit/test_telemetry.py`, `test_policy.py` |
 | Forged citations | Resolve opaque evidence IDs from active store; reject missing and cross-incident IDs | built — `tests/unit/test_policy.py`, `src/causalops/replay_fixtures/forged_citation.json` |
-| Resource exhaustion | Enforce call, time, row, sample, and byte limits, and per-kind context quotas (`evidence.CONTEXT_QUOTAS`) — distinct from the unbuilt token-counted input cap, see "Default limits" above | built — `tests/unit/test_graph.py`, `test_telemetry.py` |
+| Resource exhaustion | Enforce call, time, row, sample, and byte limits, and per-kind context quotas (`evidence.CONTEXT_QUOTAS`) — distinct from the token-counted input cap, see "Default limits" above | built — `tests/unit/test_graph.py`, `test_telemetry.py`; the input cap itself is `tests/unit/test_live_model.py`'s `test_an_oversized_request_refuses_before_reserving_or_sending` |
 | Scenario contamination | Reset volumes/state and assert health and empty run scope before the next scenario | built — `tests/integration/test_scenario_reset_isolation.py` |
 | Model/tool failure | Timeout and malformed-output fixtures produce deterministic terminal states | built — `tests/unit/test_graph.py`, `test_tool_wrappers.py` |
-| Credential leakage | Environment-only API key plus redaction; verify it never reaches CLI text, config, artifacts, logs, reports, receipts, or errors | Phase 3 — no code path reads or handles an API key yet |
-| Provider data leakage | Send only bounded synthetic incident context; verify requests exclude secrets, evaluator ground truth, and host paths | Phase 3 — no provider request exists yet |
-| Unbounded provider spend | Durably flushed write-ahead reservations plus settled/outstanding accounting; verify both caps, crash behavior, and no request after denial | Phase 3 — no cost ledger exists yet; caps superseded, see Part III |
+| Credential leakage | Environment-only API key plus redaction; verify it never reaches CLI text, config, artifacts, logs, reports, receipts, or errors | built, Unit 3b-2 — `live_model.py`'s `LiveClaudeModel` never reads the key itself (`ChatAnthropic()` resolves it internally); `tests/security/test_credential_isolation.py` proves the module neither imports `os` nor names the variable in code. Not exercised with a real key — every test uses a fake transport |
+| Provider data leakage | Send only bounded synthetic incident context; verify requests exclude secrets, evaluator ground truth, and host paths | built, inherited — the live adapter sends exactly `ModelRequest.system_text`/`context_text`, the same rendered context `tests/security/test_ground_truth_isolation.py`/`test_prompt_injection.py` already constrain; Unit 3b-2 adds no new context source |
+| Unbounded provider spend | Durably flushed write-ahead reservations plus settled/outstanding accounting; verify both caps, crash behavior, and no request after denial | built, Unit 3b-2 — `cost_ledger.py`'s reserve-before-send gate, exactly-once settlement, and ceiling refusal; `tests/unit/test_cost_ledger.py`, `test_live_model.py` |
 
 ### Tests already proving Phase 1/2 behavior
 
@@ -826,45 +824,75 @@ Windows support above is proven by continuous integration on
 with all required containers, is run by hand and produces no committed
 artifact — it is a process step, not a test this repository can cite.
 
-### Tests specified for the live Claude adapter — not yet built
+### Tests specified for the live Claude adapter
 
-These describe required behavior once Phase 3 (or a later v2 milestone) adds
-a live model adapter. None of them exist today because none of the code they
-would test exists today:
+Unit 3b-2 built the adapter and several of these; the rest still describe
+required behavior with no code behind it yet.
+
+**Built, Unit 3b-2** (`tests/unit/test_live_model.py`,
+`test_cost_ledger.py`, `tests/security/test_credential_isolation.py`,
+unless noted):
+
+- Exact Claude request shape: required `claude-sonnet-5`, adaptive thinking,
+  `medium` effort, `max_tokens=1600`, no `temperature`/`top_p`/`top_k` —
+  `live_model.MODEL_NAME`/`pricing.MAX_OUTPUT_TOKENS`, asserted by
+  inspecting the fake client's captured `ChatAnthropic` construction.
+- Synchronous SDK construction with `max_retries=0` and one concurrent
+  request — no async client anywhere in `live_model.py`, no retry logic
+  (project-wide: `src/` has none anywhere).
+- Token counting over the rendered request text; refusal, not deterministic
+  trimming, above the input cap (`pricing.estimate_input_tokens`,
+  `InputTooLarge`) — a deliberate deviation from the original "trimming and
+  recounting" framing: silently cutting context is a value lost where no
+  assertion downstream could ever see it happened, so this refuses instead.
+- Cost-cap gates, the reservation formula, and durable reservation/
+  settlement ordering (`cost_ledger.py`). Unique logical request IDs are the
+  amended §5 four-part key (`run_id + graph_phase + model_turn +
+  context_digest`), not a separately minted ID. (The v1 figures — USD 0.15
+  standalone, USD 1.75 for 24 runs — remain superseded; see Part III.)
+- Crash/timeout and missing-usage fixtures retaining the full reservation
+  (`test_a_failed_send_leaves_the_reservation_reserved`,
+  `test_missing_usage_metadata_leaves_the_reservation_reserved`).
+- API-key redaction: the adapter never reads, stores, or forwards the key
+  itself (`ChatAnthropic()` resolves it from the environment internally).
+
+**Still not built:**
 
 - Authenticated `GET /v1/models/claude-sonnet-5` metadata check and exact
-  required-model mismatch handling.
-- Exact Claude request shape: required `claude-sonnet-5`, adaptive thinking,
-  `medium` effort, `max_tokens=1600`, no `temperature`/`top_p`/`top_k`, and one
-  concurrent request.
-- Synchronous SDK construction with `max_retries=0`; per-operation timeout
-  behavior; exactly one inspected HTTP attempt per logical operation.
-- Token counting over system text, messages, schema, and evidence;
-  deterministic trimming and recounting above the input cap.
-- Cost-cap gates, the reservation formula, unique logical request IDs, and
-  durable reservation/usage/settlement ordering. (The v1 figures — USD 0.15
-  standalone, USD 1.75 for 24 runs — are superseded; see Part III.)
-- Crash, timeout, missing-usage, and ambiguous-response fixtures retaining
-  the full reservation, and resume never repeating an outstanding request.
-- `end_turn` content validation and repair, and the distinct no-repair
-  `FAILED_SAFE` result for every other documented provider stop reason.
+  required-model mismatch handling. Deliberately deferred, not forgotten
+  (`cli.py`'s `MODEL_CHECK_NOTE`): a second routine network call from
+  `doctor`, a command run far more casually than a live `investigate`, was
+  judged not worth adding in the same unit that exists to make the one
+  deliberate network call safe.
+- Per-operation timeout behavior beyond the SDK's own default, and exactly
+  one *inspected* HTTP attempt per logical operation (this unit proves zero
+  retries; it does not inspect the wire-level HTTP attempt count).
+- A per-`stop_reason` matrix (`end_turn`/`tool_use` handled; every other
+  documented provider stop reason — `refusal`, `max_tokens`, `pause_turn` —
+  currently falls through to ordinary invalid-output handling, not a
+  distinct no-repair path each with its own fixture).
 - A billed-refusal fixture proving usage settles before failure handling.
-- Missing-credential, authentication, rate-limit, network, timeout, and
-  cost-denial failures producing stable `FAILED_SAFE` records.
-- API-key redaction and proof that provider thinking blocks are never
-  retained.
-- Sequential and resumed benchmark runs, including proof a completed run key
-  is never executed or recorded twice.
-- Clean/dirty commit provenance blocking publication of a non-reproducible
-  score.
+- Resume never repeating an outstanding request: not reachable today, since
+  `graph.py`'s resume path never calls the model at all (see this
+  document's Unit 3b-2 review-gap notes above).
+- Proof that provider thinking blocks are never retained: true by
+  construction today (nothing in `live_model.py` extracts or stores a
+  `thinking` content block from the response), but not pinned by a test.
+- Sequential and resumed benchmark runs, and clean/dirty commit provenance
+  blocking publication of a non-reproducible score — Unit 3c's job, the
+  paired evaluation, not this one.
 
 Normal CI runs on `windows-latest` and `ubuntu-latest` using replay fixtures
 and disposable local test data. Network access is allowed only while
 installing locked dependencies; after that, formatting, linting, strict
 typing, unit tests, security tests, and replay conformance make no external
-calls and require no credentials. Outside CI, no command in this repository
-today sends an authenticated request to Anthropic — that capability does not
-exist yet.
+calls and require no credentials — CI never invokes `causalops` at all, only
+`pytest`/`ruff`/`mypy`. As of Unit 3b-2, `causalops investigate --model
+claude` does send an authenticated request to Anthropic, but only that one
+command, only when a person types it by hand: `--model` has no default,
+`--model claude` is not scripted anywhere in this repository, and
+`tests/conftest.py`'s loopback-only network guard covers the whole `pytest`
+process regardless.
 
 # Part III — v2 in progress
 
@@ -2160,6 +2188,139 @@ it is written.
   proposed," identical to today's behaviour (the node never reads
   `parsed.proposal` directly) — not a new gap, but 3b-2's adapter design
   must resolve it for a live provider.
+
+### Unit 3b-2 — running the live smoke call
+
+**This is the owner's runbook, not code.** Every code path it exercises is
+already covered by `tests/unit/test_live_model.py` and `test_cost_ledger.py`
+against a fake transport — no test in this repository ever contacts
+Anthropic (`tests/conftest.py`'s network guard is process-wide, and every
+test constructs `LiveClaudeModel` with `client=FakeChatAnthropic(...)`, its
+own test seam). The smoke call is the one deliberate exception, and it is
+never a `pytest` invocation: it is the real `causalops investigate` command,
+run once by hand, in a process the guard was never installed in because it
+never imports `tests/conftest.py`. See Unit 3b-2's pre-edit report for the
+full argument for why this is safe; this section is only the "how," for
+whoever actually runs it.
+
+**Preconditions.** `ANTHROPIC_API_KEY` set in the environment (`causalops
+doctor` warns, does not fail, if it is not — a replay run needs no key, so
+`doctor` cannot use its absence to refuse a command that might not need it).
+`LIVE_EVALUATION_MAX_USD` optionally set (`.env.example`'s documented
+default, `2.00`, applies if not). The local Docker lab running.
+
+**The exact command sequence:**
+
+```bash
+causalops lab up
+causalops scenario start configuration_change --seed development
+# prints an opaque incident id, e.g. a1b2c3d4e5f6...
+causalops investigate a1b2c3d4e5f6... --model claude
+```
+
+`--model claude` is the only thing that distinguishes this from an ordinary
+replay run. Nothing else about the command changes.
+
+**What a successful run's artifact contains** — all of it produced by the
+same `finalize_investigation` path an ordinary replay run already uses, not
+anything new this unit built:
+
+- `results/investigations/<investigation-id>/report.json` — the
+  `InvestigationReport`. `usage` is populated (unlike every replay run's
+  `usage: null`), so `limitations` will *not* contain "this model reports no
+  token usage" — the one frozen-literal difference this unit's pre-edit
+  report flagged as expected to move, and here is where it moves.
+- The rendered markdown report, labelled with the real model
+  (`live_model.MODEL_NAME`, `"claude-sonnet-5"`), not `"replay"` —
+  `cli.py:531`'s fix, provable end to end only by an actual live run,
+  since no replay-backed test ever exercises the resume-path label bug this
+  closes.
+- `results/investigations/<investigation-id>/events.jsonl` — the ordinary
+  `RunEvent` stream, unchanged in shape from a replay run.
+- `results/checkpoints.db`'s `cost_ledger` table: **exactly one row per
+  model call this run made** (`SELECT * FROM cost_ledger WHERE run_id =
+  '<run-id>'` — `run_id` is internal, not printed by the CLI; the simplest
+  way to find it is `SELECT * FROM cost_ledger ORDER BY reserved_at DESC
+  LIMIT <model-calls-used>` right after the run). Each row's `state` is
+  `SETTLED` (a row still `RESERVED` after the process exits means a crash
+  or timeout interrupted that specific request — see below),
+  `reserved_usd` is the pessimistic upper bound charged against the
+  ceiling — priced off prose *and* the fixed tool-definition schema every
+  call sends (`live_model.py`'s `_send`; the input-token *cap* in "Default
+  limits" above stays prose-only, a deliberately different scope) —
+  `actual_usd` is what the request really cost from the provider's own
+  reported `input_tokens`/`output_tokens`, and `actual_usd` must be
+  `<= reserved_usd` on every row. `test_pricing.py`'s
+  `test_a_settled_request_never_costs_more_than_its_own_reservation` pins
+  this as a property of the pricing math itself, not just something that
+  happened to hold this run; `test_live_model.py`'s
+  `test_propose_reserves_at_least_the_full_wire_payload` additionally pins
+  that a real `propose()` call's reservation genuinely counts the tool
+  payload, not just prose — the P1-1 bug this unit fixed shipped past an
+  earlier version of the `test_pricing.py` assertion that priced both
+  sides off the identical number and so could never observe the omission.
+
+  This invariant holds whenever the pessimistic estimate
+  (`pricing.estimate_input_tokens`) actually bounds the tokens the
+  provider bills — every case measured so far. It is not a structural
+  guarantee: `estimate_input_tokens` cannot see the provider's own
+  tool-use system prompt (injected server-side once tools are bound,
+  invisible to `json.dumps(tools)`) or ordinary message-envelope
+  overhead, and has not yet been checked against a real billed request
+  (see "record the estimate beside the settled row" below). If a row
+  ever does show `actual_usd > reserved_usd`, suspect those two
+  unmodelled contributions first, and treat it as **a signal to
+  re-derive `PESSIMISTIC_CHARS_PER_TOKEN`, not an incident**: the
+  violation is bounded to a fraction of a cent per row (the estimate
+  would have to be wrong by whole tokens to matter at these rates), and
+  the application-wide ceiling still counts the *reserved* amount
+  against `LIVE_EVALUATION_MAX_USD` regardless — a mispriced row does not
+  let spend run away, it only means this one row under-priced itself.
+
+**Record the estimate beside the settled row — this smoke call is the
+calibration `pricing.py`'s own docstring asks for.** The call is
+happening anyway, its prompt is known, and its settled `cost_ledger` row
+carries the provider's own `input_tokens`. Before running it, compute
+`estimate_input_tokens(system_text + content)` plus
+`estimate_input_tokens(json.dumps(tools))` for the turn you are about to
+send (`system_text`/`content` are what `_send` actually estimates;
+`tools` is whatever `propose`/`respond` bound for that stage). After the
+run settles, compare that sum against the row's real `input_tokens`. If
+the estimate is still `>=` the billed count, this is now a *checked*
+empirical bound, not just a documented judgment call — `pricing.py`'s own
+docstring on `PESSIMISTIC_CHARS_PER_TOKEN` names exactly this as what
+would justify tightening the constant. If the estimate comes in *below*
+the billed count, that is real evidence the two unmodelled contributions
+above (the provider's tool-use system prompt, message-envelope overhead)
+are large enough to matter, and `PESSIMISTIC_CHARS_PER_TOKEN` needs to
+move — with this measurement as the reason, not a guess.
+
+**What a refused run looks like — the gate working, not broken:**
+
+- **Cost ceiling refused.** `causalops investigate` prints `FAILED_SAFE
+  <root-cause>`, the investigation's `report.json` has
+  `reason_code: COST_CEILING_EXCEEDED`, and **no new `cost_ledger` row
+  exists for the refused request** — `record_reservation_before_request`
+  raises before any insert (`cost_ledger.py`, `test_cost_ledger.py`'s
+  `test_a_refused_reservation_writes_nothing`). If this run was meant to
+  proceed, either raise `LIVE_EVALUATION_MAX_USD` (after checking why the
+  running total is where it is — `SELECT SUM(reserved_usd) FROM
+  cost_ledger`) or accept that the ceiling did its job.
+- **Input too large.** `reason_code: INPUT_TOKEN_CAP_EXCEEDED` — the
+  rendered context exceeded the 3,200-token pessimistic estimate. Nothing
+  was sent, nothing was reserved. This should not happen on the checked-in
+  scenarios at their default budgets; if it does, that is worth
+  investigating on its own before re-running.
+- **A crash or timeout mid-request.** The run reports `FAILED_SAFE`/
+  `INTERNAL_ERROR`, and the `cost_ledger` row for that specific request is
+  left `state = 'RESERVED'` — visible, not silently dropped, per
+  `TECHNICAL_SPEC.md` section 5's "the reservation left visible for
+  accounting" rule. This is expected, not a bug to chase, unless it
+  recurs.
+- **A malformed model turn.** Consumes the one repair
+  (`Budgets.repairs`), same as replay; a second consecutive failure ends
+  the run at `REPAIR_EXHAUSTED`/`MODEL_OUTPUT_INVALID`, same reason codes
+  replay already produces.
 
 ## Superseded v1 evaluation design
 

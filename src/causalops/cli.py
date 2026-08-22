@@ -1,12 +1,14 @@
 """Command line entry point for CausalOps."""
 
 import argparse
+import math
 import os
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from importlib.metadata import version
 from pathlib import Path
+from typing import Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -22,7 +24,9 @@ from causalops.approvals import (
     read_decision_for_thread,
     record_decision_before_resume,
 )
+from causalops.cost_ledger import ensure_cost_ledger_table
 from causalops.doctor import (
+    API_KEY_VARIABLE,
     DoctorReport,
     ProjectPaths,
     find_project_root,
@@ -30,6 +34,7 @@ from causalops.doctor import (
     run_doctor,
 )
 from causalops.domain import (
+    REPLAY_MODEL_NAME,
     Budgets,
     Disposition,
     EscalatedInvestigation,
@@ -43,6 +48,8 @@ from causalops.graph import (
     resume_graph_investigation,
     run_graph_investigation,
 )
+from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
+from causalops.live_model import LiveClaudeModel
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
@@ -70,21 +77,24 @@ from causalops.telemetry import (
 from causalops.tool_wrappers import ToolWrapper, dispatch_registry
 from causalops.tools import ToolName
 
-# Every caller of `run_investigation`/`resume_graph_investigation` in this
-# file supplies this literally -- `--model` only ever accepts `"replay"`
-# (`build_parser` below), and `approve`/`reject` never took a `--model` flag
-# at all, since resuming re-opens the same investigation the original
-# `investigate` call started. Named here so both call sites read the same
-# constant instead of two independent string literals that could drift.
-REPLAY_MODEL_NAME = "replay"
+# Unit 3b-2 moved this constant to `domain.py` (imported above): `graph.py`'s
+# `run_graph_investigation` needed it too, as `GraphState["model_name"]`'s
+# default for every caller that predates a live model, and `graph.py`
+# cannot import from `cli.py` without a cycle. See `domain.py`'s own
+# docstring on the constant for the full reasoning.
 
-# Phase 1 step 1 implements only the local checks. TECHNICAL_OVERVIEW.md's
-# Tests specified for the live Claude adapter section describes the
-# authenticated model-metadata request this still lacks; it arrives with the
-# live Claude adapter, not yet scheduled to a specific v2 unit.
+# Unit 3b-2 builds the live adapter but deliberately not this specific
+# check: the authenticated `GET /v1/models/claude-sonnet-5` metadata request
+# `TECHNICAL_OVERVIEW.md`'s "Tests specified for the live Claude adapter"
+# section describes is a second, routine network call from a command
+# (`doctor`) an owner runs far more casually than `investigate --model
+# claude` -- adding it here would give this project a second, easy-to-trip
+# path to the network beyond the one deliberate smoke call 3b-2 exists to
+# make safe. Deferred, not forgotten; not yet scheduled to a specific unit.
 MODEL_CHECK_NOTE = (
-    "Not checked yet: the authenticated claude-sonnet-5 metadata request "
-    "arrives in a later step."
+    "Not checked: causalops doctor never calls the network. The "
+    "authenticated claude-sonnet-5 metadata request is deliberately not "
+    "part of any command yet."
 )
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
@@ -130,7 +140,21 @@ def build_parser() -> argparse.ArgumentParser:
         "investigate", help="Investigate one opaque incident ID."
     )
     investigation.add_argument("incident_id")
-    investigation.add_argument("--model", choices=("replay",), required=True)
+    # Unit 3b-2. No default, still `required=True`: a live run is never
+    # accidental. `"claude"` is a CLI-facing dispatch keyword, not the real
+    # model name -- `_build_model_and_registry` maps it to
+    # `live_model.MODEL_NAME` ("claude-sonnet-5") for the report/artifact
+    # label, the same distinction `--seed` above draws between an owner-facing
+    # word and what the code actually does with it.
+    investigation.add_argument(
+        "--model",
+        choices=("replay", "claude"),
+        required=True,
+        help=(
+            "'claude' sends a live, billed request to Anthropic; see "
+            "TECHNICAL_OVERVIEW.md before using it."
+        ),
+    )
 
     approve = subcommands.add_parser(
         "approve", help="Accept a paused investigation's diagnosis or abstention."
@@ -243,25 +267,70 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
         yield SqliteSaver(conn, serde=serde)
 
 
-def _build_model_and_registry(
-    incident: StoredIncident, paths: RunPaths, budgets: Budgets
-) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper]]:
-    """The model and tool registry one incident needs, built the same way
-    for a fresh `investigate` and for Unit 2c's `approve`/`reject` resume --
-    both need the exact same wiring `build_graph` requires, even though a
-    plain accept/reject resume never actually calls the model or a tool
-    again (`escalation_interrupt` routes straight to `final_report`)."""
-    model = ReplayToolCallingModel(
-        ReplayReasoningModel(
-            REPLAY_FIXTURE,
-            substitutions={
-                "incident_id": incident.scope.incident_id,
-                "window_start": incident.scope.started_at.isoformat(),
-                "window_end": incident.scope.ended_at.isoformat(),
-                "symptom_evidence_id": incident.packet.symptom_evidence_id,
-            },
-        )
+# Unit 3b-2. `.env.example`-documented, application-wide, covering standalone
+# and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). This falls
+# back to the default, rather than raising, for exactly three shapes: unset
+# or blank, unparseable (`float()` raises), and non-positive or non-finite
+# (`<= 0`, `inf`, `-inf`, or `nan` -- `math.isfinite` catches the two
+# infinities `> 0` alone would let through, since `inf > 0` is `True` and an
+# infinite ceiling is not a ceiling at all; `nan` already fails every
+# comparison, including `> 0`, so it was already covered, but P3-4's fix
+# pins that explicitly rather than leaving it to a comparison's incidental
+# behaviour a future refactor could change without noticing). Each of those
+# three is the *smallest* plausible ceiling to fall back to, so silently
+# defaulting on them can only make the gate stricter than the value
+# suggested, never more permissive. What this fallback does *not* catch: a
+# well-formed positive number that is simply the wrong one -- `200` typed
+# for `2.00` parses cleanly and is honoured as written, the same as any
+# other config value. Guarding against a fat-fingered magnitude is the
+# owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
+# intent.
+DEFAULT_LIVE_EVALUATION_MAX_USD = 2.00
+LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
+
+
+def _live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
+    raw = environment.get(LIVE_EVALUATION_MAX_USD_VARIABLE, "").strip()
+    if not raw:
+        return DEFAULT_LIVE_EVALUATION_MAX_USD
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LIVE_EVALUATION_MAX_USD
+    return (
+        value if math.isfinite(value) and value > 0 else DEFAULT_LIVE_EVALUATION_MAX_USD
     )
+
+
+def _build_model_and_registry(
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    model_choice: Literal["replay", "claude"],
+    db_path: Path,
+) -> tuple[
+    ToolCallingModel, Mapping[ToolName, ToolWrapper], str, sqlite3.Connection | None
+]:
+    """The model, tool registry, display model name, and (for a live model
+    only) the cost-ledger connection one incident needs -- built the same
+    way for a fresh `investigate` and for Unit 2c's `approve`/`reject`
+    resume, both of which need the exact same wiring `build_graph` requires,
+    even though a plain accept/reject resume never actually calls the model
+    or a tool again (`escalation_interrupt` routes straight to
+    `final_report`).
+
+    The cost-ledger connection is `_build_model_and_registry`'s own concern,
+    not `_sqlite_checkpointer`'s: it is a second, independent connection to
+    the same `checkpoints.db` file, matching `run_decision_command`'s own
+    `decisions_connection` pattern below rather than reusing the
+    checkpointer's connection -- `SqliteSaver`'s own transaction handling
+    around a node's execution is not part of any contract this module can
+    rely on, and a second connection is exactly how this project already
+    isolates one concern's SQLite transactions from another's on the same
+    file. Returned to the caller (`None` for replay) so its lifetime is the
+    caller's to close, the same ownership `_sqlite_checkpointer`'s `with`
+    block already has for the checkpoint connection.
+    """
     # A fresh in-memory index per call -- the corpus is small and read-only,
     # so rebuilding it costs nothing measurable, and it keeps this function's
     # "everything an incident needs, built fresh" contract intact rather
@@ -279,7 +348,34 @@ def _build_model_and_registry(
             arguments, runbook_index
         ),
     )
-    return model, registry
+    if model_choice == "replay":
+        replay_model = ReplayToolCallingModel(
+            ReplayReasoningModel(
+                REPLAY_FIXTURE,
+                substitutions={
+                    "incident_id": incident.scope.incident_id,
+                    "window_start": incident.scope.started_at.isoformat(),
+                    "window_end": incident.scope.ended_at.isoformat(),
+                    "symptom_evidence_id": incident.packet.symptom_evidence_id,
+                },
+            )
+        )
+        return replay_model, registry, REPLAY_MODEL_NAME, None
+    ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    ensure_cost_ledger_table(ledger_conn)
+    # Unit 3b-2, P3-3. Presence only, mirroring `doctor.check_api_key`'s own
+    # check -- the value itself never leaves this line. `LiveClaudeModel`
+    # never reads `ANTHROPIC_API_KEY` itself (`live_model.MissingCredential`'s
+    # docstring; `tests/security/test_credential_isolation.py` proves the
+    # module neither imports `os` nor names the variable in code), so this
+    # `bool` is the only thing that crosses that boundary.
+    credential_present = bool(os.environ.get(API_KEY_VARIABLE, "").strip())
+    live_model = LiveClaudeModel(
+        ledger_conn,
+        ceiling_usd=_live_evaluation_ceiling_usd(os.environ),
+        credential_present=credential_present,
+    )
+    return live_model, registry, LIVE_MODEL_NAME, ledger_conn
 
 
 def run_investigation(
@@ -288,19 +384,33 @@ def run_investigation(
     budgets: Budgets,
     recorder: RunRecorder,
     checkpointer: BaseCheckpointSaver[str],
-) -> InvestigationResult | EscalatedInvestigation:
-    model, registry = _build_model_and_registry(incident, paths, budgets)
-    return run_graph_investigation(
-        incident.scope,
-        incident.packet,
-        incident.evidence,
-        model,
-        registry,
-        recorder,
-        budgets,
-        utc_now,
-        checkpointer=checkpointer,
+    model_choice: Literal["replay", "claude"],
+    db_path: Path,
+) -> tuple[InvestigationResult | EscalatedInvestigation, str]:
+    """Returns the settled/escalated result *and* the display model name
+    (`REPLAY_MODEL_NAME` or `live_model.MODEL_NAME`) this run actually used
+    -- `run_investigate_command` needs that name for the artifact label, and
+    `_build_model_and_registry` is the one place that knows it."""
+    model, registry, model_name, ledger_conn = _build_model_and_registry(
+        incident, paths, budgets, model_choice, db_path
     )
+    try:
+        result = run_graph_investigation(
+            incident.scope,
+            incident.packet,
+            incident.evidence,
+            model,
+            registry,
+            recorder,
+            budgets,
+            utc_now,
+            checkpointer=checkpointer,
+            model_name=model_name,
+        )
+    finally:
+        if ledger_conn is not None:
+            ledger_conn.close()
+    return result, model_name
 
 
 def _write_investigation_artifacts(
@@ -330,8 +440,13 @@ def _report_exit(report: InvestigationReport, artifact_path: Path) -> int:
 
 
 # Loads the incident and writes the investigation's result -- the CLI's one
-# job for `investigate`.
-def run_investigate_command(root: Path, incident_id: str, model_name: str) -> int:
+# job for `investigate`. `model_choice` is `arguments.model` verbatim
+# (`"replay"` or `"claude"`, `build_parser`'s own choices) -- the CLI-facing
+# dispatch keyword, not the display name that ends up in the artifact; see
+# `_build_model_and_registry`'s docstring for that distinction.
+def run_investigate_command(
+    root: Path, incident_id: str, model_choice: Literal["replay", "claude"]
+) -> int:
     paths = RunPaths(root=root / "runs" / incident_id)
     if not paths.incident_file.is_file():
         raise LabError(
@@ -344,7 +459,9 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
     recorder = RunRecorder(utc_now)
     db_path = ProjectPaths(root=root).checkpoints_db
     with _sqlite_checkpointer(db_path) as checkpointer:
-        result = run_investigation(incident, paths, budgets, recorder, checkpointer)
+        result, model_name = run_investigation(
+            incident, paths, budgets, recorder, checkpointer, model_choice, db_path
+        )
     if isinstance(result, EscalatedInvestigation):
         # No terminal report exists yet for a paused run -- print what the
         # owner needs to resume it (`causalops approve`/`reject`, Unit 2c)
@@ -361,13 +478,26 @@ def run_investigate_command(root: Path, incident_id: str, model_name: str) -> in
     return _report_exit(result.report, written)
 
 
-def _resolve_thread_incident_id(checkpointer: SqliteSaver, thread_id: str) -> str:
+def _resolve_thread_incident_and_model(
+    checkpointer: SqliteSaver, thread_id: str
+) -> tuple[str, Literal["replay", "claude"]]:
     """The only durable link from a bare thread id to its incident: nothing
     on disk maps one to the other outside the checkpoint itself --
     `investigation_id` is a fresh `uuid4().hex` and `results/investigations/
     <id>/` does not exist yet for a paused run. Reads with no graph built,
     the same pattern `test_a_second_connection_reads_back_the_finished_run`
-    established in Unit 2a."""
+    established in Unit 2a.
+
+    Unit 3b-2 also resolves which model this thread's original `investigate`
+    call used, from the same checkpoint read: `GraphState["model_name"]`
+    round-trips through `channel_values` exactly the way `incident_id`
+    already does. This is the fix for the bug 3b-1's handoff recorded at
+    `cli.py:531` -- a resumed live run used to be relabelled `"replay"` in
+    its own artifact because nothing durable said otherwise. A checkpoint
+    written before this field existed has no `model_name` key at all and
+    defaults to `REPLAY_MODEL_NAME`: it can only ever have been a replay
+    run, since no other kind existed yet.
+    """
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     checkpoint = checkpointer.get_tuple(config)
     if checkpoint is None:
@@ -375,13 +505,18 @@ def _resolve_thread_incident_id(checkpointer: SqliteSaver, thread_id: str) -> st
             CheckpointStoreReasonCode.THREAD_NOT_FOUND,
             f"no checkpoint for thread {thread_id}",
         )
-    incident_id = checkpoint.checkpoint["channel_values"].get("incident_id")
+    channel_values = checkpoint.checkpoint["channel_values"]
+    incident_id = channel_values.get("incident_id")
     if not isinstance(incident_id, str):
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.THREAD_NOT_FOUND,
             f"thread {thread_id} has no recorded incident_id",
         )
-    return incident_id
+    model_name = channel_values.get("model_name")
+    model_choice: Literal["replay", "claude"] = (
+        "claude" if model_name == LIVE_MODEL_NAME else "replay"
+    )
+    return incident_id, model_choice
 
 
 def run_decision_command(
@@ -477,7 +612,9 @@ def run_decision_command(
             return _report_exit(report, investigations_dir)
 
         with _sqlite_checkpointer(db_path) as checkpointer:
-            incident_id = _resolve_thread_incident_id(checkpointer, thread_id)
+            incident_id, model_choice = _resolve_thread_incident_and_model(
+                checkpointer, thread_id
+            )
             paths = RunPaths(root=root / "runs" / incident_id)
             if not paths.incident_file.is_file():
                 raise LabError(
@@ -488,48 +625,58 @@ def run_decision_command(
                 paths.incident_file.read_text(encoding="utf-8")
             )
             budgets = Budgets()
-            model, registry = _build_model_and_registry(incident, paths, budgets)
-            config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-            snapshot = build_graph(
-                incident.scope,
-                incident.packet,
-                budgets,
-                utc_now,
-                model,
-                registry,
-                checkpointer,
-                event_clock=utc_now,
-            ).get_state(config)
-
-            if existing is None:
-                if not snapshot.interrupts:
-                    raise CheckpointStoreError(
-                        CheckpointStoreReasonCode.NO_PENDING_INTERRUPT,
-                        f"{thread_id} has no pending approval to decide",
-                    )
-                checkpoint_id = str(snapshot.config["configurable"]["checkpoint_id"])
-                record_decision_before_resume(
-                    decisions_conn, thread_id, checkpoint_id, owner_decision, utc_now()
-                )
-
-            recorder = RunRecorder(utc_now)
-            result = resume_graph_investigation(
-                thread_id,
-                checkpointer,
-                incident.scope,
-                incident.packet,
-                model,
-                registry,
-                recorder,
-                owner_decision.decision,
-                owner_decision.rejection_note,
-                budgets,
-                utc_now,
+            model, registry, model_name, ledger_conn = _build_model_and_registry(
+                incident, paths, budgets, model_choice, db_path
             )
+            try:
+                config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+                snapshot = build_graph(
+                    incident.scope,
+                    incident.packet,
+                    budgets,
+                    utc_now,
+                    model,
+                    registry,
+                    checkpointer,
+                    event_clock=utc_now,
+                ).get_state(config)
 
-        written = _write_investigation_artifacts(
-            root, result, recorder, REPLAY_MODEL_NAME
-        )
+                if existing is None:
+                    if not snapshot.interrupts:
+                        raise CheckpointStoreError(
+                            CheckpointStoreReasonCode.NO_PENDING_INTERRUPT,
+                            f"{thread_id} has no pending approval to decide",
+                        )
+                    checkpoint_id = str(
+                        snapshot.config["configurable"]["checkpoint_id"]
+                    )
+                    record_decision_before_resume(
+                        decisions_conn,
+                        thread_id,
+                        checkpoint_id,
+                        owner_decision,
+                        utc_now(),
+                    )
+
+                recorder = RunRecorder(utc_now)
+                result = resume_graph_investigation(
+                    thread_id,
+                    checkpointer,
+                    incident.scope,
+                    incident.packet,
+                    model,
+                    registry,
+                    recorder,
+                    owner_decision.decision,
+                    owner_decision.rejection_note,
+                    budgets,
+                    utc_now,
+                )
+            finally:
+                if ledger_conn is not None:
+                    ledger_conn.close()
+
+        written = _write_investigation_artifacts(root, result, recorder, model_name)
         return _report_exit(result.report, written)
 
 

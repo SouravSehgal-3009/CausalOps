@@ -35,6 +35,7 @@ from langgraph.types import Command
 
 import causalops.graph as graph_module
 import causalops.tool_wrappers as tool_wrappers_module
+from causalops.cost_ledger import CostCeilingExceeded
 from causalops.domain import (
     Budgets,
     CheckOutcome,
@@ -66,6 +67,7 @@ from causalops.models import (
     ReplayToolCallingModel,
     ToolCallingModel,
 )
+from causalops.pricing import InputTooLarge
 from causalops.report import render_report
 from causalops.run_records import RunRecorder
 from causalops.runbooks import RunbookIndex, run_runbook_search
@@ -502,6 +504,87 @@ def test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash() -
     result, _ = investigate_via_graph(_RaisingModel(RuntimeError("provider timeout")))
     assert result.report.disposition is Disposition.FAILED_SAFE
     assert result.report.reason_code is ReasonCode.INTERNAL_ERROR
+
+
+def test_a_cost_ceiling_refusal_reports_its_own_reason_not_internal_error() -> None:
+    """Unit 3b-2. `graph.py`'s `investigate` node catches `CostCeilingExceeded`
+    ahead of its blanket `except Exception:`, the same "specific, actionable
+    reason before the generic catch-all" shape
+    `test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash`
+    already proves for `NetworkAccessRefused`, applied here to a refusal
+    that is caught (not left to propagate) but must still not be
+    misreported as an ordinary crash. `live_model.py`'s own tests prove the
+    adapter *raises* this before sending; this proves the graph node
+    routes it to the right place once raised."""
+    model = _RaisingModel(CostCeilingExceeded(reservation_usd=1.0, remaining_usd=0.1))
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.COST_CEILING_EXCEEDED
+    assert result.report.model_calls_used == 1
+    assert result.report.repairs_used == 0
+    names = [event.name for event in recorder.events]
+    assert "internal_error" not in names
+    assert "stage_stopped" in names
+
+
+def test_an_oversized_request_refusal_reports_its_own_reason_not_internal_error() -> (
+    None
+):
+    """Same shape as the cost-ceiling test above, for the other refuse-
+    before-sending exception `live_model.py` can raise."""
+    model = _RaisingModel(InputTooLarge(estimated_tokens=9999))
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
+    assert result.report.repairs_used == 0
+    names = [event.name for event in recorder.events]
+    assert "internal_error" not in names
+
+
+class _RaisesOnlyOnFinalAssessment:
+    """Wraps a real `ReplayToolCallingModel`, forwarding every `propose`
+    call unchanged (so INVESTIGATE proceeds normally, and completes, all
+    the way to FINAL_ASSESSMENT) but raising on `respond` -- the only way
+    to reach P2-2's FINAL_ASSESSMENT-specific exception-tuple catch
+    (`graph.py`'s `final_assessment` node, `except (CostCeilingExceeded,
+    InputTooLarge)`). `_RaisingModel` above cannot reach that code path: it
+    raises on `propose` too, so the run never gets past INVESTIGATE's own
+    turn 0 to reach FINAL_ASSESSMENT at all."""
+
+    def __init__(self, inner: ToolCallingModel, error: BaseException) -> None:
+        self.inner = inner
+        self.error = error
+
+    def propose(self, request: Any, schema: Any) -> Any:
+        return self.inner.propose(request, schema)
+
+    def respond(self, request: Any) -> NoReturn:
+        raise self.error
+
+
+def test_a_cost_ceiling_refusal_at_final_assessment_reports_its_own_reason() -> None:
+    """P2-2's regression test. Mutation-proven: changing `final_assessment`'s
+    `except (CostCeilingExceeded, InputTooLarge)` tuple to
+    `(ZeroDivisionError,)` left the full suite green before this test
+    existed -- the INVESTIGATE-side test above cannot catch that mutation,
+    since a raise on turn 0's `propose` never lets the run reach
+    FINAL_ASSESSMENT's own handler in the first place."""
+    model = _RaisesOnlyOnFinalAssessment(
+        graph_replay_model(),
+        CostCeilingExceeded(reservation_usd=1.0, remaining_usd=0.1),
+    )
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.COST_CEILING_EXCEEDED
+    names = [event.name for event in recorder.events]
+    assert "internal_error" not in names
+    assert "stage_stopped" in names
 
 
 class _TwoToolCallsModel:

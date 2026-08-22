@@ -20,9 +20,26 @@ FIXTURES = (
 )
 
 
+def make_request(
+    stage: Stage, system_text: str = "system", context_text: str = "context"
+) -> ModelRequest:
+    """`run_id`/`graph_phase`/`model_turn`/`context_digest` (Unit 3b-2) are
+    inert to `ReplayReasoningModel.respond`, which matches fixtures on
+    `request.stage` alone -- placeholder values below, not meaningful ones,
+    present only because the fields are required."""
+    return ModelRequest(
+        stage=stage,
+        system_text=system_text,
+        context_text=context_text,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest",
+    )
+
+
 def ask(model: ReplayReasoningModel, stage: Stage) -> dict[str, object]:
-    request = ModelRequest(stage=stage, system_text="system", context_text="context")
-    return dict(model.respond(request).content)
+    return dict(model.respond(make_request(stage)).content)
 
 
 def test_every_checked_in_fixture_loads() -> None:
@@ -115,11 +132,7 @@ def test_a_script_can_cite_evidence_it_only_saw_in_the_context(tmp_path: Path) -
         ]
     )
 
-    response = model.respond(
-        ModelRequest(
-            stage=Stage.FINAL_ASSESSMENT, system_text="s", context_text=context
-        )
-    )
+    response = model.respond(make_request(Stage.FINAL_ASSESSMENT, context_text=context))
 
     assert response.content == {"cite": "from-check-1"}
 
@@ -142,11 +155,7 @@ def test_citing_a_check_that_never_ran_fails_loudly(tmp_path: Path) -> None:
     context = "- packet-1 [SYMPTOM] 2026-08-16T10:00:00+00:00 from alert: errors"
 
     with pytest.raises(ReplayFixtureError, match="no check evidence"):
-        model.respond(
-            ModelRequest(
-                stage=Stage.FINAL_ASSESSMENT, system_text="s", context_text=context
-            )
-        )
+        model.respond(make_request(Stage.FINAL_ASSESSMENT, context_text=context))
 
 
 def test_fixture_names_describe_the_script_not_the_cause() -> None:

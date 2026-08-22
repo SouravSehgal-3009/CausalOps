@@ -64,8 +64,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 from pydantic import JsonValue
 
+from causalops.cost_ledger import CostCeilingExceeded
 from causalops.domain import (
     DEFAULT_BUDGETS,
+    REPLAY_MODEL_NAME,
     Budgets,
     Clock,
     Disposition,
@@ -98,6 +100,7 @@ from causalops.domain import (
 from causalops.evidence import EvidenceStore, digest_text, new_opaque_id
 from causalops.models import ModelRequest, Stage, ToolCallingModel, parse_response
 from causalops.policy import POLICY_VERSION
+from causalops.pricing import InputTooLarge
 from causalops.prompts import (
     PROMPT_VERSION,
     STAGE_INSTRUCTIONS,
@@ -141,6 +144,19 @@ class GraphState(TypedDict):
     # that key has something stable to name.
     run_id: str
     incident_id: str
+    # Unit 3b-2. Set once, in `run_graph_investigation`'s `initial_state`,
+    # from a caller-supplied name (or `REPLAY_MODEL_NAME` if the caller does
+    # not pass one -- every pre-3b-2 test call site). Never written by any
+    # node after that. This is what fixes `cli.py`'s resume path: a resumed
+    # thread used to relabel its own artifact `REPLAY_MODEL_NAME`
+    # unconditionally, because nothing durable said which model actually
+    # produced the original investigation. `cli.py` reads this back from the
+    # checkpoint's `channel_values` the same way it already reads
+    # `incident_id` back (`_resolve_thread_incident_id`), with a
+    # `REPLAY_MODEL_NAME` default so a checkpoint written before this field
+    # existed still resumes and is labelled correctly (it can only ever have
+    # been a replay run).
+    model_name: str
     phase: str
     model_turn: int
     model_calls_used: int
@@ -484,6 +500,10 @@ def _render_stage_request(
     stage: Stage,
     repair_errors: str | None,
     passages: Sequence[RunbookPassage] = (),
+    *,
+    run_id: str,
+    graph_phase: str,
+    model_turn: int,
 ) -> tuple[ModelRequest, str]:
     """The context-render-and-digest step every model call needs, identical
     for `INVESTIGATE` and `FINAL_ASSESSMENT`. While `workflow.py` still ran,
@@ -496,6 +516,18 @@ def _render_stage_request(
     copy to drift from, and `test_graph_frozen_reports.py` (`test_parity.py`,
     renamed) is a plain regression pin on this file's own behaviour, not a
     two-orchestrator drift guard.
+
+    `run_id`/`graph_phase`/`model_turn` (Unit 3b-2) are keyword-only and
+    required, not defaulted: every caller already has all three in scope
+    (`state["run_id"]`, the node's own `GraphPhase`, and either `turn_index`
+    or `state["model_turn"]`), and a silent default here would let a future
+    call site mint a `ModelRequest` with a wrong or stale idempotency key
+    without mypy or a test ever noticing. The digest is computed *before*
+    `ModelRequest` is constructed, not after as before this unit, because
+    `context_digest` is now one of the object's own frozen fields -- the
+    formula itself (system text + context text + repair errors) is
+    unchanged, so replay's requests and every existing digest-based
+    assertion are unaffected.
     """
     evidence, markers = store.context_evidence()
     context = render_context(
@@ -507,14 +539,18 @@ def _render_stage_request(
         _tools_left(receipts, budgets),
         passages,
     )
+    system_text = SYSTEM_TEXT
+    context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}"
+    digest = digest_text(system_text + context_text + (repair_errors or ""))
     request = ModelRequest(
         stage=stage,
-        system_text=SYSTEM_TEXT,
-        context_text=f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}",
+        system_text=system_text,
+        context_text=context_text,
         repair_errors=repair_errors,
-    )
-    digest = digest_text(
-        request.system_text + request.context_text + (request.repair_errors or "")
+        run_id=run_id,
+        graph_phase=graph_phase,
+        model_turn=model_turn,
+        context_digest=digest,
     )
     return request, digest
 
@@ -616,6 +652,9 @@ def _make_investigate(
                 stage,
                 repair_errors,
                 passages,
+                run_id=state["run_id"],
+                graph_phase=GraphPhase.INVESTIGATE.value,
+                model_turn=turn_index,
             )
             counters.record_call(digest)
             turn = model.propose(request, schema)
@@ -706,6 +745,29 @@ def _make_investigate(
             }
         except GraphBubbleUp:
             raise
+        except (CostCeilingExceeded, InputTooLarge) as refusal:
+            # Unit 3b-2. `LiveClaudeModel` raises one of these *before
+            # sending* -- the cost gate or the input-token cap refused the
+            # request, so no request was made and no money was spent.
+            # Caught ahead of the blanket `except Exception` below on
+            # purpose: that handler exists for a crash mid-attempt, and this
+            # is not one -- it is a policy refusal with a specific,
+            # actionable reason, the same "name the actual outcome"
+            # reasoning `_ask_with_repair`'s other stop reasons already get.
+            # Neither is retried as a repair: appending a correction message
+            # to an over-large request only makes it larger, and a refused
+            # reservation is not something rephrasing the request fixes.
+            # `stopped_state` reused as-is, including its turn-0-vs-turn>=1
+            # rule: a refusal on the second INVESTIGATE turn still lets the
+            # run reach FINAL_ASSESSMENT with whatever evidence it has,
+            # exactly like `MODEL_CALL_BUDGET_EXHAUSTED` does today.
+            reason_code = (
+                ReasonCode.COST_CEILING_EXCEEDED
+                if isinstance(refusal, CostCeilingExceeded)
+                else ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
+            )
+            log_stop(reason_code)
+            return stopped_state(reason_code)
         except Exception as error:
             # A model call already counted by `counters.record_call` before
             # this point must not vanish with this node's frame -- the same
@@ -955,6 +1017,9 @@ def _make_final_assessment(
                 Stage.FINAL_ASSESSMENT,
                 repair_errors,
                 passages,
+                run_id=state["run_id"],
+                graph_phase=GraphPhase.FINAL_ASSESSMENT.value,
+                model_turn=state["model_turn"],
             )
             counters.record_call(digest)
             response = model.respond(request)
@@ -1024,6 +1089,18 @@ def _make_final_assessment(
             }
         except GraphBubbleUp:
             raise
+        except (CostCeilingExceeded, InputTooLarge) as refusal:
+            # Unit 3b-2. Same reasoning as `investigate`'s handler: a
+            # refused-before-sending request is not a crash, so it is caught
+            # ahead of the blanket handler below and reported with its own
+            # actionable reason code rather than `INTERNAL_ERROR`.
+            reason_code = (
+                ReasonCode.COST_CEILING_EXCEEDED
+                if isinstance(refusal, CostCeilingExceeded)
+                else ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
+            )
+            log_stop(reason_code)
+            return failed_state(reason_code)
         except Exception as error:
             # Same hazard, same fix as `investigate`'s handler above: a
             # crash here always ends the run (unlike a normal `None` return,
@@ -1585,6 +1662,7 @@ def run_graph_investigation(
     *,
     investigation_id: str | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
+    model_name: str = REPLAY_MODEL_NAME,
 ) -> InvestigationResult | EscalatedInvestigation:
     """Run one investigation to completion, or to its first pause.
 
@@ -1593,6 +1671,13 @@ def run_graph_investigation(
     minting a fresh one is what every existing caller already gets -- and
     becomes a real input once Milestone 2's resume path needs to reopen a
     specific thread rather than start a new one.
+
+    `model_name` (Unit 3b-2) is defaulted, not required: it exists so
+    `GraphState["model_name"]` carries the label a resumed thread's artifact
+    should use, and every one of the ~28 test call sites across this
+    project predates that need and passes a `ReplayToolCallingModel` -- the
+    default keeps every one of them behaviourally unchanged. Only `cli.py`'s
+    real `investigate` dispatch passes a real value.
 
     This function takes no `resume` argument. It always starts a fresh run
     from `initial_state` below; resuming a paused thread is
@@ -1640,6 +1725,7 @@ def run_graph_investigation(
         "investigation_id": investigation_id,
         "run_id": run_id,
         "incident_id": scope.incident_id,
+        "model_name": model_name,
         "phase": GraphPhase.CREATED.value,
         "model_turn": 0,
         "model_calls_used": 0,

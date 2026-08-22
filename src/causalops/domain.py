@@ -16,6 +16,17 @@ from causalops.tools import ToolArguments, ToolName, UtcDatetime
 
 SCHEMA_VERSION = "1"
 
+# The `model_name` label a report/artifact carries for a replay-backed
+# investigation. Lives here, not in `cli.py` (where it originated) or
+# `graph.py` (which now needs it too), because Unit 3b-2 gave it a second
+# reader: `graph.py`'s `run_graph_investigation` seeds it into
+# `GraphState["model_name"]` as the default for every caller that does not
+# pass a live model's own name, and `cli.py` reads it back on a resumed
+# thread instead of hardcoding it a second time -- one shared constant, not
+# two independent string literals that could drift, the same reasoning that
+# named it in the first place (see git history, Unit 2c).
+REPLAY_MODEL_NAME = "replay"
+
 
 class RootCauseCode(StrEnum):
     CONFIG_CHANGE = "CONFIG_CHANGE"
@@ -110,6 +121,29 @@ class ReasonCode(StrEnum):
     WALL_CLOCK_EXPIRED = "WALL_CLOCK_EXPIRED"
     FORGED_EVIDENCE_REFERENCE = "FORGED_EVIDENCE_REFERENCE"
     RESULT_ALREADY_FINALIZED = "RESULT_ALREADY_FINALIZED"
+    # Unit 3b-2. A live model call the cost gate refused *before sending*,
+    # because the reservation it would need would exceed
+    # `LIVE_EVALUATION_MAX_USD`'s remaining balance. Deliberately its own
+    # code, not `BUDGET_EXHAUSTED`: that code already means "the *count*
+    # budget this investigation itself tracks is spent" (model calls, tool
+    # slots, repairs -- all in `Budgets`, all per-investigation). The cost
+    # ceiling is an *application-wide* dollar balance no single investigation
+    # owns, so conflating the two would make a report say "this investigation
+    # ran out of turns" when what actually happened is "a wholly separate
+    # concern -- money across every run this app has ever made -- ran out."
+    # An owner reading `reason_code` needs to tell those apart to know
+    # whether raising `Budgets.model_calls` would even help (it would not).
+    COST_CEILING_EXCEEDED = "COST_CEILING_EXCEEDED"
+    # Unit 3b-2. The rendered request's pessimistic token estimate exceeded
+    # the 3,200-token input cap (`pricing.MAX_INPUT_TOKENS`,
+    # `TECHNICAL_OVERVIEW.md`'s "Default limits" table). Its own code, not
+    # `COST_CEILING_EXCEEDED`: one is about a dollar balance across every
+    # run this application has made, the other is about one request's shape
+    # regardless of what anything has ever cost -- an owner reading
+    # `reason_code` needs to tell "we are out of money" apart from "this one
+    # request was too big" (the second is fixable by trimming context; the
+    # first is not, no matter how small the next request is).
+    INPUT_TOKEN_CAP_EXCEEDED = "INPUT_TOKEN_CAP_EXCEEDED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 

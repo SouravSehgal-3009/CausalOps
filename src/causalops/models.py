@@ -25,12 +25,32 @@ class Stage(StrEnum):
 
 
 class ModelRequest(BaseModel):
+    """One stage's full ask.
+
+    `run_id`/`graph_phase`/`model_turn`/`context_digest` (Unit 3b-2) are
+    `TECHNICAL_SPEC.md` §5's amended model-request idempotency key --
+    `run_id + graph_phase + model_turn + context_digest` -- carried on the
+    request itself rather than threaded through `ToolCallingModel.propose`/
+    `.respond` as extra parameters, so a live adapter can persist its own
+    `PENDING` reservation record from the one object it already has, exactly
+    where the spec says that record belongs ("the live adapter persist this
+    record before sending a request"). Both the replay adapter and every
+    existing test construct a `ModelRequest` only through
+    `graph.py`'s `_render_stage_request`, so this is one call site to widen,
+    not many -- and `ReplayReasoningModel.respond` matches fixtures on
+    `request.stage` alone, so these four fields are inert to replay.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     stage: Stage
     system_text: str
     context_text: str
     repair_errors: str | None = None
+    run_id: str
+    graph_phase: str
+    model_turn: int
+    context_digest: str
 
 
 class ModelResponse(BaseModel):

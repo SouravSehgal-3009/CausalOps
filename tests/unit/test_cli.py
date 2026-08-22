@@ -1,20 +1,45 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fake_incident import (
+    RecordingLogsBackend,
     alert_packet,
+    assessment_json,
     change_row,
     incident_scope,
+    logs_only_registry,
     packet_evidence,
+    plan_json,
+    replay_model,
     write_changes,
 )
 from fake_machine import FAKE_API_KEY, FakeProbe
+from langchain_core.runnables import RunnableConfig
 
 from causalops import cli
-from causalops.cli import MODEL_CHECK_NOTE, build_parser, exit_code, render_report
+from causalops.cli import (
+    DEFAULT_LIVE_EVALUATION_MAX_USD,
+    LIVE_EVALUATION_MAX_USD_VARIABLE,
+    MODEL_CHECK_NOTE,
+    _live_evaluation_ceiling_usd,
+    build_parser,
+    exit_code,
+    render_report,
+)
 from causalops.doctor import CheckResult, CheckStatus, DoctorReasonCode, DoctorReport
-from causalops.domain import StoredIncident, ToolOutcome, ToolReceipt
+from causalops.domain import (
+    Budgets,
+    InvestigationResult,
+    StoredIncident,
+    ToolOutcome,
+    ToolReceipt,
+    utc_now,
+)
+from causalops.graph import run_graph_investigation
+from causalops.models import ReplayToolCallingModel
+from causalops.run_records import RunRecorder
 from causalops.scenario_control import LabError, LabReasonCode
 from causalops.telemetry import RunPaths
 
@@ -115,10 +140,86 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
     parsed = parser.parse_args(["investigate", "abc", "--model", "replay"])
     assert (parsed.incident_id, parsed.model) == ("abc", "replay")
 
+    # Unit 3b-2. `--model claude` is now a real dispatch choice -- see
+    # `_build_model_and_registry`'s docstring -- so this parses instead of
+    # exiting, unlike before this unit; only a genuinely unknown model name
+    # is still refused.
+    parsed = parser.parse_args(["investigate", "abc", "--model", "claude"])
+    assert (parsed.incident_id, parsed.model) == ("abc", "claude")
+
     with pytest.raises(SystemExit):
-        parser.parse_args(["investigate", "abc", "--model", "claude"])
+        parser.parse_args(["investigate", "abc", "--model", "gpt4"])
     with pytest.raises(SystemExit):
         parser.parse_args(["scenario", "start", "a_family"])
+
+
+def test_live_evaluation_ceiling_reads_a_valid_value() -> None:
+    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "0.50"}) == (
+        0.50
+    )
+
+
+def test_live_evaluation_ceiling_defaults_when_absent() -> None:
+    assert _live_evaluation_ceiling_usd({}) == DEFAULT_LIVE_EVALUATION_MAX_USD
+
+
+def test_live_evaluation_ceiling_falls_back_on_a_malformed_value() -> None:
+    """Deliberately silent, unlike most malformed-input handling in this
+    project: the fallback (`DEFAULT_LIVE_EVALUATION_MAX_USD`) is the
+    *smallest* plausible ceiling, so defaulting here can only make the gate
+    stricter than a typo intended, never more permissive -- see
+    `cli.py`'s own comment on `DEFAULT_LIVE_EVALUATION_MAX_USD`."""
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "not-a-number"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+
+
+def test_live_evaluation_ceiling_falls_back_on_a_non_positive_value() -> None:
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "-1"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "0"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+
+
+def test_live_evaluation_ceiling_falls_back_on_a_non_finite_value() -> None:
+    """P3-4's regression test. `float("inf")` passes `> 0` (`inf > 0` is
+    `True`), so before this fix `LIVE_EVALUATION_MAX_USD=inf` disabled the
+    cost ceiling entirely rather than falling back to the smallest plausible
+    default -- mutation-verified below. `-inf` is covered by the same
+    `math.isfinite` guard, not by `> 0` (`-inf > 0` is already `False`), so
+    it is asserted here too rather than left to the other branch's luck.
+    `nan` already fails `> 0` (every comparison against `nan` is `False`),
+    so it was already covered before this fix -- pinned here explicitly so
+    a future refactor that touches the comparison cannot silently drop that
+    coverage without a test noticing."""
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "inf"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "-inf"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+    assert (
+        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "nan"})
+        == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+
+
+def test_live_evaluation_ceiling_honours_a_well_formed_typo() -> None:
+    """The boundary P3-4 does *not* move: `200` typed for `2.00` is a
+    well-formed positive, finite number and is honoured as written, same as
+    any other config value -- guarding against a fat-fingered magnitude is
+    the owner's job, not this parser's. This test exists so the boundary is
+    documented, not implied."""
+    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "200"}) == (
+        200.0
+    )
 
 
 def test_a_lab_command_reports_a_refusal_with_its_code(
@@ -172,15 +273,19 @@ def test_main_returns_zero_for_a_healthy_machine(
     assert FAKE_API_KEY not in output
 
 
-def test_main_returns_one_and_prints_the_reason_code(
+def test_a_missing_api_key_warns_but_doctor_still_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Unit 3b-2, owner-ruled: FAIL -> WARN. Renamed from
+    # `test_main_returns_one_and_prints_the_reason_code` -- a missing key no
+    # longer fails `doctor` (`replay` runs entirely without one), but the
+    # reason code still prints, so an attentive owner still sees it.
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "SystemProbe", FakeProbe)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert cli.main(["doctor"]) == 1
+    assert cli.main(["doctor"]) == 0
     assert "MISSING_API_KEY" in capsys.readouterr().out
 
 
@@ -370,3 +475,134 @@ def test_investigate_pauses_and_reports_escalation_without_finalizing(
     assert "ESCALATED TOOL_UNAVAILABLE" in printed
     assert "remaining checks:" in printed
     assert not (tmp_path / "results" / "investigations").exists()
+
+
+def _settle_a_replay_investigation(
+    tmp_path: Path, thread_id: str, model_name: str | None = None
+) -> InvestigationResult:
+    """Runs one complete, non-escalating investigation against a real
+    `SqliteSaver`-backed `checkpoints.db` under `tmp_path`, for
+    `_resolve_thread_incident_and_model`'s tests below -- replay-only, on
+    purpose: the `model_name` field this function threads through is a
+    plain string label, independent of which model actually ran, so there
+    is no need to touch `LiveClaudeModel` (and its real network guard) to
+    prove the label round-trips."""
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    with cli._sqlite_checkpointer(tmp_path / "checkpoints.db") as checkpointer:
+        kwargs = {} if model_name is None else {"model_name": model_name}
+        result = run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,
+            logs_only_registry(RecordingLogsBackend()),
+            RunRecorder(utc_now),
+            Budgets(),
+            utc_now,
+            investigation_id=thread_id,
+            checkpointer=checkpointer,
+            **kwargs,
+        )
+        assert isinstance(result, InvestigationResult), (
+            "setup escalated instead of settling -- this helper's script "
+            "must reach FINAL_ASSESSMENT cleanly for the tests below to "
+            "have a checkpoint to read"
+        )
+    return result
+
+
+def test_model_name_round_trips_through_a_stored_checkpoint(tmp_path: Path) -> None:
+    """P2-1's regression test. This is the fix for the bug 3b-1's handoff
+    recorded at `cli.py:531`: a resumed live run used to be relabelled
+    "replay" in its own artifact because nothing durable said which model
+    actually produced it. `_resolve_thread_incident_and_model` is currently
+    protected only by prose -- mutation-proven: hardcoding its second
+    return value to `"replay"` still leaves 476 passed without this test."""
+    thread_id = "thread-live"
+    _settle_a_replay_investigation(tmp_path, thread_id, model_name=cli.LIVE_MODEL_NAME)
+
+    with cli._sqlite_checkpointer(tmp_path / "checkpoints.db") as checkpointer:
+        incident_id, model_choice = cli._resolve_thread_incident_and_model(
+            checkpointer, thread_id
+        )
+
+    assert (incident_id, model_choice) == (incident_scope().incident_id, "claude")
+
+
+def test_model_name_defaults_to_replay_for_a_pre_3b2_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The compatibility half of P2-1's fix. `cli.py`'s own docstring on
+    `_resolve_thread_incident_and_model`: a checkpoint written before Unit
+    3b-2's `model_name` field existed has no such key in `channel_values`
+    at all -- it can only ever have been a replay run, since no other kind
+    existed yet -- so this must default to `REPLAY_MODEL_NAME`/`"replay"`,
+    not raise on a missing key."""
+    thread_id = "thread-legacy"
+    _settle_a_replay_investigation(tmp_path, thread_id)
+
+    with cli._sqlite_checkpointer(tmp_path / "checkpoints.db") as checkpointer:
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        checkpoint_tuple = checkpointer.get_tuple(config)
+        assert checkpoint_tuple is not None
+        checkpoint = dict(checkpoint_tuple.checkpoint)
+        channel_values = dict(checkpoint["channel_values"])
+        assert "model_name" in channel_values  # sanity: the field is really there
+        del channel_values["model_name"]
+        checkpoint["channel_values"] = channel_values
+
+        checkpoint_type, payload = checkpointer.serde.dumps_typed(checkpoint)
+        checkpoint_id = checkpoint_tuple.config["configurable"]["checkpoint_id"]
+        checkpointer.conn.execute(
+            "UPDATE checkpoints SET checkpoint = ?, type = ? "
+            "WHERE thread_id = ? AND checkpoint_id = ?",
+            (payload, checkpoint_type, thread_id, checkpoint_id),
+        )
+        checkpointer.conn.commit()
+
+        incident_id, model_choice = cli._resolve_thread_incident_and_model(
+            checkpointer, thread_id
+        )
+
+    assert (incident_id, model_choice) == (incident_scope().incident_id, "replay")
+
+
+def test_a_missing_credential_fails_the_live_run_safe_before_reserving_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3-3's end-to-end regression test, through the real CLI entry point
+    -- not the `live_model.py` test seam -- proving what the rejected
+    review finding assumed wrong: `ChatAnthropic()` does not raise at
+    construction even with no key, so this drives all the way through a
+    real `LiveClaudeModel` construction and into `propose()`'s `_send`,
+    which must refuse (`MissingCredential`) before ever calling `.invoke()`
+    -- the network guard in `tests/conftest.py` would otherwise turn a
+    reverted fix into an uncaught `NetworkAccessRefused`, not a clean
+    `FAILED_SAFE`. `causalops.__main__`'s existing blanket node-level
+    `except Exception` is what turns the refusal into `FAILED_SAFE`, the
+    same path an ordinary crash already takes -- this test's own job is
+    only the new part: zero `cost_ledger` rows survive the attempt."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    scope = incident_scope()
+    packet = alert_packet()
+    incident = StoredIncident(scope=scope, packet=packet, evidence=packet_evidence())
+    paths = RunPaths(root=tmp_path / "runs" / scope.incident_id)
+    paths.root.mkdir(parents=True)
+    paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+
+    exit_status = cli.main(["investigate", scope.incident_id, "--model", "claude"])
+
+    assert exit_status == 1
+    printed = capsys.readouterr().out
+    assert "FAILED_SAFE" in printed
+
+    with sqlite3.connect(str(tmp_path / "results" / "checkpoints.db")) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()[0]
+    assert rows == 0

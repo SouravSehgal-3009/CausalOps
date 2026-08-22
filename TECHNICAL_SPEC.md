@@ -149,14 +149,23 @@ CREATED
 - SQLite stores graph checkpoints and approval/audit records only. Existing
   JSONL evidence and results remain the canonical investigation artifacts.
 
+  *Amendment, Unit 3b-2:* SQLite's scope also admits the application-wide
+  cost ledger (`cost_ledger` table, `checkpoints.db`). Not a checkpoint --
+  it outlives any one graph's state -- and not an approval record -- it is
+  never an owner's decision. `LIVE_EVALUATION_MAX_USD` is a single ceiling
+  spanning every standalone and paired-evaluation run this application ever
+  makes (§10), so it needs a store that persists across runs and processes
+  the same way `checkpoints.db` already does, not one scoped to a single
+  investigation's JSONL artifacts.
+
 ### Durable-operation rules
 
 Every externally observable operation has a deterministic idempotency key:
 
-- Model request: `run_id + graph_phase + model_turn`. Persist a `PENDING`
-  request record before sending it. A timeout, crash, or missing provider usage
-  never reissues that key; it produces `FAILED_SAFE` with the reservation left
-  visible for accounting.
+- Model request: `run_id + graph_phase + model_turn + context_digest`.
+  Persist a `PENDING` request record before sending it. A timeout, crash, or
+  missing provider usage never reissues that key; it produces `FAILED_SAFE`
+  with the reservation left visible for accounting.
 
   *Amendment, Unit 2d:* the `PENDING` request record defers to the live Claude
   adapter unit, not built here. Every condition it guards -- a provider
@@ -165,6 +174,25 @@ Every externally observable operation has a deterministic idempotency key:
   written against it here would assert against a fake rather than the real
   failure mode. What did not change: the key itself, or the requirement that
   the live adapter persist this record before sending a request.
+
+  *Amendment, Unit 3b-2:* the key gains `context_digest` as a fourth
+  component. Without it, a stage's original ask and its one repair collide:
+  both share the same `run_id`, `graph_phase`, and `model_turn` (`model_turn`
+  advances only once per successful `INVESTIGATE` turn, not per model call
+  within it), so a three-component key cannot tell a repair apart from the
+  request it repairs. `context_digest` already differs between them --
+  `repair_errors` is part of what it hashes -- so adding it as a fourth
+  component resolves the collision without inventing a new value. The `cost_
+  ledger` table (`checkpoints.db`, see the SQLite-scope amendment above) uses
+  this same four-part key as its primary key: one row is simultaneously the
+  `PENDING` request record and the reservation it guards, because a
+  reservation only ever exists in the context of one specific model request.
+  The table's own `state` column spells this concrete value `RESERVED`, not
+  `PENDING` -- `cost_ledger.py`'s vocabulary, matching `tool_wrappers.py`'s
+  existing `ReceiptState.RESERVED`/`SETTLED` pair for the analogous tool
+  receipt lifecycle rather than inventing a second naming scheme for the
+  same idea. `PENDING` above names the durable-operation *rule* this key
+  serves; `RESERVED` is what a reader will actually find in the column.
 - Tool call: normalized proposal fingerprint. Its `PENDING` receipt reserves
   budget before dispatch; the result updates that receipt exactly once.
 - Approval: `thread_id + proposal_fingerprint + checkpoint_id`. Store one
