@@ -256,7 +256,15 @@ def test_approve_refuses_cleanly_when_the_finalized_report_is_corrupted(
 ) -> None:
     """The identical-retry short-circuit reads `report.json` back off disk
     without ever touching the graph -- a corrupted artifact there must also
-    refuse cleanly rather than raising an unhandled `ValidationError`."""
+    refuse cleanly rather than raising an unhandled `ValidationError`.
+
+    Unit 3b-4 addendum, C5: this used to refuse as `STORE_UNAVAILABLE`
+    (the same code a broken checkpoint STORE gets), even though nothing
+    about the store itself was wrong here -- only `report.json`'s own
+    contents were. `_load_stored_artifact` (`cli.py`) now reports
+    `CORRUPT_ARTIFACT` instead, a more accurate code for "this specific
+    file is broken" than "the store is unavailable."
+    """
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_incident(tmp_path)
@@ -275,7 +283,44 @@ def test_approve_refuses_cleanly_when_the_finalized_report_is_corrupted(
     exit_status = cli.main(["approve", "corrupted-report-thread"])
 
     assert exit_status == 1
-    assert "FAIL STORE_UNAVAILABLE" in capsys.readouterr().out
+    assert "FAIL CORRUPT_ARTIFACT" in capsys.readouterr().out
+
+
+def test_approve_refuses_cleanly_when_the_stored_incident_no_longer_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Post-freeze review, P2-3. `run_decision_command` (the resume path
+    behind `causalops approve`/`reject`) used to build `RunPaths` directly
+    from the checkpoint's own recorded `incident_id`, with no check that
+    `runs/<incident_id>/incident.json` still describes that same incident
+    -- C1's identity check landed on `run_investigate_command` only. This
+    simulates `incident.json` diverging from its own directory name AFTER
+    a thread has already paused against it (a manual copy, a future code
+    path, or a bug), the same shape
+    `test_investigating_an_incident_id_mismatched_with_its_stored_scope_
+    is_refused` (`test_cli.py`) already covers on the fresh-investigation
+    path."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _write_incident(tmp_path)
+    _pause_a_thread(tmp_path, "drifted-incident-thread")
+
+    original_scope = incident_scope()
+    paths = cli.RunPaths(root=tmp_path / "runs" / original_scope.incident_id)
+    drifted_incident = StoredIncident(
+        scope=original_scope.model_copy(update={"incident_id": "adriftedincidentid00"}),
+        packet=alert_packet(),
+        evidence=packet_evidence(),
+    )
+    paths.incident_file.write_text(drifted_incident.model_dump_json(), encoding="utf-8")
+
+    exit_status = cli.main(["approve", "drifted-incident-thread"])
+
+    assert exit_status == 1
+    printed = capsys.readouterr().out
+    assert "FAIL INCIDENT_NOT_FOUND" in printed
+    assert "adriftedincidentid00" in printed
+    assert original_scope.incident_id in printed
 
 
 def test_read_decision_for_thread_returns_the_most_recent_row(tmp_path: Path) -> None:

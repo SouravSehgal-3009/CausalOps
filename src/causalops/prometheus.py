@@ -190,7 +190,7 @@ def run_metric_check(
         "max_value": max((sample.value for sample in kept), default=0.0),
         "truncated": len(fetched) > len(kept),
     }
-    payload = trim_to_bytes(payload, "samples", rows)
+    payload = trim_to_bytes(payload, "samples", rows, "sample_count")
     return executed_check(
         EvidenceKind.METRIC,
         source,

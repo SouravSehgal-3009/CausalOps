@@ -144,6 +144,25 @@ class ReasonCode(StrEnum):
     # request was too big" (the second is fixable by trimming context; the
     # first is not, no matter how small the next request is).
     INPUT_TOKEN_CAP_EXCEEDED = "INPUT_TOKEN_CAP_EXCEEDED"
+    # Unit 3b-4 addendum, Group B. `cost_ledger.record_reservation_before_
+    # request` found a reservation already on file for this exact request
+    # key (`run_id`, `graph_phase`, `model_turn`, `context_digest`) -- this
+    # attempt did not create a new one. `live_model.py`'s `_send` refuses to
+    # invoke the provider under a pre-existing reservation rather than
+    # assume a retry is safe: a `RESERVED` existing row means an earlier
+    # attempt at this exact request may already be in flight or may have
+    # crashed after paying but before this process learned about it: this
+    # module cannot tell those apart, so it refuses to send a second real
+    # request rather than guess; a `SETTLED` one means an earlier attempt
+    # already completed and this module has no way to recover the original
+    # response to return instead (`CostLedgerRow` stores only cost and token
+    # counts, not response content) -- either way, resending is the one
+    # option guaranteed to risk paying twice for a single logical request.
+    # Its own code, not `COST_CEILING_EXCEEDED`: that code means "no money is
+    # left"; this one means "money may already be spent on this exact
+    # request" -- an owner reading `reason_code` needs to know a retry with
+    # a smaller budget would not help here, unlike a ceiling refusal.
+    AMBIGUOUS_MODEL_REQUEST = "AMBIGUOUS_MODEL_REQUEST"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -315,7 +334,20 @@ class Hypothesis(BaseModel):
     rank: int = Field(ge=1)
     supporting_evidence_ids: tuple[str, ...] = ()
     contrary_evidence_ids: tuple[str, ...] = ()
-    missing_evidence: str = Field(max_length=300)
+    # Unit 3b-4, item 3: `maxLength: 300` is a schema keyword Anthropic's
+    # structured outputs do not enforce server-side (confirmed by the
+    # correctness reviewer against the live adapter's own second run, which
+    # exceeded an equivalent bound on `FinalAssessment.uncertainty` on its
+    # first, uncorrected attempt) -- prose stating the bound in words is the
+    # only mechanism that can actually keep a model under it, so the limit
+    # is named here rather than left to the schema alone.
+    missing_evidence: str = Field(
+        max_length=300,
+        description=(
+            "The open question that would settle this hypothesis, in 300 "
+            "characters or fewer."
+        ),
+    )
 
 
 class ToolProposal(BaseModel):
@@ -419,10 +451,69 @@ class FinalAssessment(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: str = SCHEMA_VERSION
-    disposition: ModelDisposition
-    root_cause: RootCauseCode
-    supporting_evidence_ids: tuple[str, ...] = ()
-    contrary_evidence_ids: tuple[str, ...] = ()
+    # Unit 3b-4, item 2: `check_terminal_invariants` below enforces a rule
+    # invisible to both the emitted schema and a one-line tool description --
+    # a `model_validator(mode="after")` cannot appear in `model_json_schema()`
+    # 's output, so nothing in the wire schema told Claude that a DIAGNOSED
+    # assessment needs both a real root cause and cited evidence, or that an
+    # abstention needs UNDETERMINED. These three field descriptions state the
+    # same terminal-disposition rule the validator enforces, so a model
+    # reading the tool schema sees the invariant before it is refused for
+    # missing it, not only after.
+    #
+    # Addendum, A5: this and `root_cause`'s description below restate the
+    # SAME rule `_final_assessment_tool_definition`'s hand-written tool-level
+    # description already states in `live_model.py`. Verified deliberate,
+    # not accidental duplication to "simplify away": the tool-level
+    # description is redundant WITH these two exactly because a model reads
+    # both, and it is unconfirmed whether Anthropic's parser honours a
+    # `description` sibling to a property's own `$ref` the way it honours
+    # the tool's own top-level description -- collapsing to one copy risks
+    # losing the guidance entirely if the sibling form is ever silently
+    # ignored. Load-bearing redundancy, not duplication to prune.
+    disposition: ModelDisposition = Field(
+        description=(
+            "DIAGNOSED requires a root_cause other than UNDETERMINED and at "
+            "least one supporting_evidence_ids entry. Use "
+            "INSUFFICIENT_EVIDENCE with root_cause UNDETERMINED to abstain "
+            "instead of guessing."
+        )
+    )
+    root_cause: RootCauseCode = Field(
+        description=(
+            "UNDETERMINED when disposition is INSUFFICIENT_EVIDENCE; a "
+            "specific cause other than UNDETERMINED when disposition is "
+            "DIAGNOSED."
+        )
+    )
+    # Unit 3b-4, item 4 (and its own follow-up): `graph.py`'s
+    # `store.unknown_ids(cited)` check runs after the model's response is
+    # parsed, so a forged or mistyped id in EITHER field below is terminal
+    # with no repair (`ReasonCode.FORGED_EVIDENCE_REFERENCE`) -- unlike a
+    # malformed shape, there is no second chance to fix a wrong id, so the
+    # instruction has to land on the first attempt. `contrary_evidence_ids`
+    # was missed in item 4's first pass -- `graph.py:1069`'s
+    # `cited = parsed.supporting_evidence_ids + parsed.contrary_evidence_ids`
+    # feeds both fields into the identical check, so leaving one documented
+    # and its sibling silent was the same instance-not-class error this
+    # whole unit exists to close, caught by item 5's own cross-check test
+    # before it reached a live run.
+    supporting_evidence_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "A DIAGNOSED assessment must cite at least one entry here. Copy "
+            "evidence ids exactly as they appear in the Evidence section -- "
+            "an id that was not retrieved this run fails the investigation."
+        ),
+    )
+    contrary_evidence_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Copy evidence ids exactly as they appear in the Evidence "
+            "section -- an id that was not retrieved this run fails the "
+            "investigation."
+        ),
+    )
     # `TECHNICAL_SPEC.md` §7: "The final assessment stores incident-evidence
     # citations separately from runbook-guidance citations." Deliberately
     # not merged into the two fields above -- `check_terminal_invariants`
@@ -432,8 +523,22 @@ class FinalAssessment(BaseModel):
     # fields above) score exactly what they scored before this field
     # existed.
     runbook_citations: tuple[str, ...] = ()
-    uncertainty: str = Field(max_length=300)
-    next_step: str = Field(max_length=300)
+    # Unit 3b-4, item 3: see `Hypothesis.missing_evidence`'s comment above --
+    # the second live run's second new failure exceeded this same bound on
+    # an unrepaired first attempt, and the provider does not enforce
+    # `maxLength` server-side, so the word limit has to be stated in prose.
+    uncertainty: str = Field(
+        max_length=300,
+        description=(
+            "What remains unresolved about this diagnosis, in 300 characters or fewer."
+        ),
+    )
+    next_step: str = Field(
+        max_length=300,
+        description=(
+            "The single next action you would recommend, in 300 characters or fewer."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_terminal_invariants(self) -> Self:

@@ -114,14 +114,74 @@ def fits(payload: dict[str, JsonValue]) -> bool:
 
 
 def trim_to_bytes(
-    payload: dict[str, JsonValue], rows_key: str, rows: list[JsonValue]
+    payload: dict[str, JsonValue],
+    rows_key: str,
+    rows: list[JsonValue],
+    count_key: str,
 ) -> dict[str, JsonValue]:
-    """Drop rows from the end until the whole result fits the byte bound."""
+    """Drop rows from the end until the whole result fits the byte bound.
+    `count_key` (`"row_count"`/`"change_count"`/`"edge_count"`/
+    `"sample_count"`, one per caller) is kept equal to `len(kept)`
+    throughout, not just set once from the pre-trim count and left stale --
+    an owner reading the payload after trimming must see a count that
+    actually matches what `payload[rows_key]` holds.
+
+    Unit 3b-4 addendum, C3. Dropping rows alone cannot help when the
+    payload's real weight is a SCALAR field assembled from those rows
+    before this function ever sees them (`run_changes_check`'s
+    `summaries`, joined from every matched change's own summary text,
+    before `trim_to_bytes` is called at all). Once `rows` is fully
+    emptied, the loop below has nothing left to drop -- before this fix,
+    the function returned there regardless of whether `fits(payload)` was
+    actually `True`, silently shipping an over-budget result. This
+    function's contract, post-fix, is `fits(payload)` on return WHENEVER
+    the overage is text this function can shrink -- once the row list is
+    exhausted, it falls back to shrinking the largest remaining
+    string-valued field (by half, repeatedly) instead of stopping. That
+    guarantee is not unconditional: if every string field is already
+    empty and the payload still does not fit, the loop below gives up
+    rather than looping forever (see its own comment at the `break`) --
+    the remaining weight is fixed JSON structure this function has no text
+    left to shrink, a documented known limit, not a silent one.
+    `"truncated"` is set on every path that changes what the payload
+    actually holds, list-trimming or scalar-shrinking alike -- the signal
+    an owner needs to know the result no longer represents everything that
+    matched, never silently.
+
+    Rows are ALWAYS popped first, unconditionally, even when a caller's
+    oversized scalar (not the rows) turns out to be the real cause: an
+    earlier version of this fix tried to skip popping when a cheap
+    up-front check judged the rows "innocent," and broke on exactly
+    `run_changes_check`'s real shape -- each kept row there is the raw
+    entry dict, which still carries its OWN full-size `summary` text
+    inside it, a second, undetected copy of the same oversized content the
+    top-level `summaries` scalar holds. Skipping the row pop left that
+    copy sitting inside `payload[rows_key]`, where the scalar-shrinking
+    fallback below (which only inspects top-level string values) could
+    never reach it. Popping rows first removes both copies in one step;
+    the scalar fallback then only has to handle whatever is left over."""
     kept = list(rows)
     payload[rows_key] = kept
+    payload[count_key] = len(kept)
     while kept and not fits(payload):
         kept.pop()
         payload[rows_key] = kept
+        payload[count_key] = len(kept)
+        payload["truncated"] = True
+    while not fits(payload):
+        widest_key = max(
+            (key for key, value in payload.items() if isinstance(value, str) and value),
+            key=lambda key: len(str(payload[key])),
+            default=None,
+        )
+        if widest_key is None:
+            # Every string field is already empty and the payload still
+            # does not fit -- the remaining weight is fixed JSON structure
+            # (keys, ints, bools), not text this function can shrink.
+            # Documented as a known limit rather than looped forever.
+            break
+        text = str(payload[widest_key])
+        payload[widest_key] = text[: len(text) // 2]
         payload["truncated"] = True
     return payload
 

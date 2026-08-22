@@ -57,6 +57,18 @@ class LabReasonCode(StrEnum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     BASELINE_NOT_HEALTHY = "BASELINE_NOT_HEALTHY"
     FAULT_NOT_OBSERVED = "FAULT_NOT_OBSERVED"
+    # Unit 3b-4 addendum, C5. A stored JSON artifact (`incident.json`,
+    # `report.json`) exists but could not be turned back into the typed
+    # record it is supposed to hold -- unreadable (permissions, a file
+    # that vanished after an earlier existence check), not valid UTF-8, or
+    # JSON that does not satisfy the model's own schema. Distinct from
+    # `INCIDENT_NOT_FOUND`: that code means "there is no such artifact,"
+    # this one means "there is one, and it is corrupt" -- an owner reading
+    # the reason code needs to tell "wrong id" apart from "something on
+    # disk is actually broken" (a crashed write, a hand-edited byte, disk
+    # corruption), since only the second is worth investigating the
+    # filesystem over.
+    CORRUPT_ARTIFACT = "CORRUPT_ARTIFACT"
 
 
 class LabError(Exception):
@@ -73,6 +85,46 @@ def runs_root(root: Path) -> Path:
 
 def run_paths(root: Path, incident_id: str) -> RunPaths:
     return RunPaths(root=runs_root(root) / incident_id)
+
+
+def validated_run_paths(root: Path, incident_id: str) -> RunPaths:
+    """Unit 3b-4 addendum, C1. Builds `incident_id`'s run directory path
+    only after confirming it cannot escape `runs_root(root)` -- the check
+    `reset_scenario` below already had, extracted so a second caller
+    (`cli.py`'s `run_investigate_command`) does not hand-copy the same two
+    checks a second time. `run_paths` above stays unvalidated on purpose: it
+    is called only with `new_opaque_id()`'s own output inside
+    `start_scenario`, never with an external string, so it has nothing to
+    validate against.
+
+    `isalnum()` refuses anything containing `/`, `.`, `..`, or a null byte
+    outright -- a real incident id (always `new_opaque_id()`'s output)
+    never fails this. The parent-resolves-to-`runs_root` check is defense
+    in depth against a platform-specific path oddity `isalnum()` alone
+    might miss, not a second, independent proof technique -- both guard the
+    same property.
+
+    This project is a single-operator local CLI, not a networked service,
+    so a path-traversal argument here has no separate "attacker" from
+    "victim" the way `reset_scenario`'s destructive `rmtree` does -- see
+    `TECHNICAL_OVERVIEW.md`'s note on this call site for why it is
+    recorded as a defensive check rather than a security boundary. The
+    identity-mismatch check this function's callers add afterward
+    (comparing the loaded `StoredIncident.scope.incident_id` back against
+    `incident_id`) is worth having regardless of the security framing: it
+    is what catches `runs/<id>/incident.json` ever diverging from its own
+    directory name, a correctness bug this check can catch even though a
+    traversal attempt from this project's own user cannot really "attack"
+    anyone but themselves.
+    """
+    if not incident_id.isalnum():
+        raise LabError(LabReasonCode.INCIDENT_NOT_FOUND, "that is not an incident ID")
+    paths = run_paths(root, incident_id)
+    if runs_root(root).resolve() != paths.root.resolve().parent:
+        raise LabError(
+            LabReasonCode.INCIDENT_NOT_FOUND, "that path is not inside the run tree"
+        )
+    return paths
 
 
 def active_incident_file(root: Path) -> Path:
@@ -352,16 +404,10 @@ def start_scenario(
 
 def reset_scenario(root: Path, incident_id: str) -> None:
     """Delete only this run's transient state. Finalized results are never touched."""
-    if not incident_id.isalnum():
-        raise LabError(LabReasonCode.INCIDENT_NOT_FOUND, "that is not an incident ID")
-    target = runs_root(root) / incident_id
+    target = validated_run_paths(root, incident_id).root
     if not target.is_dir():
         raise LabError(
             LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
-        )
-    if runs_root(root).resolve() != target.resolve().parent:
-        raise LabError(
-            LabReasonCode.INCIDENT_NOT_FOUND, "that path is not inside the run tree"
         )
     marker = active_incident_file(root)
     if marker.is_file() and marker.read_text(encoding="utf-8").strip() == incident_id:

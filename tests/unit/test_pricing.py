@@ -155,15 +155,15 @@ def test_a_settled_request_never_costs_more_than_its_own_reservation() -> None:
     snapshot = CLAUDE_SONNET_5_PRICING
     # This unit's own measurements (re-derived directly, not carried by
     # hand -- `test_live_model.py`'s `test_the_tool_payload_size_matches_
-    # what_pricingpy_assumes` pins the same 7,595 figure against the real
-    # tool definitions, post Unit 3b-3's discriminator fix): `_plan_tool_
-    # definition` plus the five `_domain_tool_definitions` serialize to
-    # 7,595 characters; a representative turn-zero INITIAL_PLAN prose
-    # renders to 1,512 (Unit 3b-2's figure -- unaffected by 3b-3, which
-    # touched only the tool schema and the FINAL_ASSESSMENT-stage prose
-    # measurement, not this one).
+    # what_pricingpy_assumes` pins the same 7,020 figure against the real
+    # tool definitions, post Unit 3b-4's item 6 schema-description strip
+    # and the addendum's A1/A2 prose additions): `_plan_tool_definition`
+    # plus the five `_domain_tool_definitions` serialize to 7,020
+    # characters; a representative turn-zero INITIAL_PLAN prose renders to
+    # 1,512 (Unit 3b-2's figure -- unaffected by 3b-3 or either 3b-4 round,
+    # none of which touched INITIAL_PLAN prose rendering).
     prose = "x" * 1_512
-    tool_definitions = "x" * 7_595
+    tool_definitions = "x" * 7_020
 
     reserved = snapshot.reservation_usd(
         estimate_input_tokens(prose) + estimate_input_tokens(tool_definitions)

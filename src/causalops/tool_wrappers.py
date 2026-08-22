@@ -338,10 +338,11 @@ def _make_wrapper[ArgsT: BaseModel](
 ) -> ToolWrapper:
     """Builds the one path from a parsed proposal for `tool` to a backend.
 
-    `run_check` is the backend seam, mirroring `registered_check_runner`'s
-    existing closure pattern in `telemetry.py` -- this module needs no import
-    of `telemetry.py` or `prometheus.py` themselves, which is exactly what
-    the AST import test checks.
+    `run_check` is the backend seam, mirroring `telemetry.py`'s own private
+    `_registered_check_runner`'s closure pattern (Unit 3b-4 addendum, C6:
+    made private there, since nothing in `cli.py` calls it) -- this module
+    needs no import of `telemetry.py` or `prometheus.py` themselves, which
+    is exactly what the AST import test checks.
 
     The seam takes the `IncidentScope` for all five tools, even though only
     `query_metric`'s backend reads it (the PromQL `incident` label --

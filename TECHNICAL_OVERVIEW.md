@@ -2460,21 +2460,296 @@ guard.
 **Why the tool schema stays out of `MAX_INPUT_TOKENS` — corrected.** An
 earlier version of this argument (both in this document and, before it, in
 Unit 3b-2's own unpinned "512 tokens" claim) used a FINAL_ASSESSMENT turn
-with zero evidence as its example and concluded folding the ~7,595-token
-tool schema into the cap "would refuse ordinary runs." That conclusion did
-not follow from its own numbers: at 1,280 tokens of prose against a
-9,600 − 7,595 = 2,005-token folded headroom, that specific turn is
-*admitted* (1,280 < 2,005), not refused — the same defect (512 < 620) was
-present in the original figure and survived the rewrite to the new one.
-The claim is still true, on the right example: `Budgets.runbook_passages`
-(5) retrieved passages at `RunbookPassage.content`'s own `max_length`
-(800) are still present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
+with zero evidence as its example and concluded folding the tool schema
+into the cap "would refuse ordinary runs." That conclusion did not follow
+from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
+7,595 = 2,005-token folded headroom, that specific turn was *admitted*
+(1,280 < 2,005), not refused — the same defect (512 < 620) was present in
+the original figure and survived the rewrite to the new one. The claim is
+still true, on the right example: `Budgets.runbook_passages` (5) retrieved
+passages at `RunbookPassage.content`'s own `max_length` (800) are still
+present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
 `_make_final_assessment` rebuilds and re-renders passages from state on
 every stage, not just the one that retrieved them — and measure to 5,465
-characters/tokens, well over the 2,005-token folded headroom. Measured
-directly and pinned by `test_live_model.py`'s
+characters/tokens. Measured directly and pinned by `test_live_model.py`'s
 `test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
-not asserted from the zero-evidence case that cannot support it.
+not asserted from the zero-evidence case that cannot support it. Unit
+3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
+characters; the addendum round's A1/A2 (also below) then grew it back to
+**7,020**, since both are additive prose fixes in the opposite direction
+from item 6's strip. The tool payload's CURRENT size widens the folded
+headroom to 9,600 − 7,020 = 2,580 tokens — 5,465 still clears it either
+way, so this conclusion is unaffected across every revision of the figure;
+the test above re-measures both figures directly rather than either one
+being carried by hand.
+
+### The second live run and its root-cause investigation — Unit 3b-4
+
+**The owner ran a second live call after Unit 3b-3's discriminator fix
+landed.** Cost $0.05560. It confirmed the fix: Claude sent the `tool`
+discriminator, a check executed, evidence was collected, and the run
+reached `FINAL_ASSESSMENT` for the first time. It still ended
+`FAILED_SAFE`/`REPAIR_EXHAUSTED`, on two new failures neither of which was
+the discriminator regressing.
+
+**The root-cause investigation that followed found three tiers this
+project had been conflating as one contract:** in-schema-and-enforced
+(`required`/`enum`/`const`, but only under `strict: true`, which this
+codebase does not set), in-schema-but-never-enforced (`maxLength`, numeric
+bounds), and not expressible in schema at all (conditional requirement,
+cross-field rules — a `model_validator(mode="after")` cannot appear in
+`model_json_schema()`'s output). Both new failures fell in the second and
+third tiers. **The reviewing error that let this ship:** Unit 3b-3's review
+tested the schema against itself ("is `default` consistent with
+`required`?"), which cannot detect a mismatch between the schema and the
+*application code that refuses the run* — and it read a field's absence
+from `required` as evidence the field was optional, which is not true for
+a conditionally-required one.
+
+**Six items landed, all prose/schema-shaping only except item 1:**
+
+1. **`PlanRecord.stop_reason` (`live_model.py`) is now required-and-nullable
+   -- the only behavioural change.** The second run's first new failure was
+   `record_plan` omitting `stop_reason` on a turn that proposed no check,
+   legal under the old `= None` default. Reproducing Unit 3b-3's successful
+   `tool`-field fix meant reproducing its *shape* (`required` membership
+   plus no `default`), not its edit (dropping `= None`) — `tool` was
+   already in `required`; `stop_reason` was not, so dropping only its
+   default would have left it exactly as omittable as before. The field's
+   `= None` assignment is gone instead, which pydantic marks required; the
+   emitted schema is asserted directly by
+   `test_the_plan_tool_definition_states_stop_reason_as_required_and_
+   nullable`.
+2. **`record_final_assessment`'s three terminal-disposition invariants**
+   (`domain.check_terminal_invariants`: a diagnosis needs a root cause and
+   supporting evidence; an abstention needs `UNDETERMINED`) are now stated
+   in prose, on `FinalAssessment.disposition`/`root_cause`/
+   `supporting_evidence_ids`'s own `Field(description=...)` in `domain.py`
+   and in the tool's top-level description in `live_model.py` — the
+   validator itself is unchanged.
+3. **The 300-character bound is now stated in words** on
+   `FinalAssessment.uncertainty`/`next_step`, `Hypothesis.missing_evidence`
+   (`domain.py`), and `PlanRecord.stop_reason` (`live_model.py`) — the
+   second run's second new failure exceeded `uncertainty`'s bound on an
+   *uncorrected* first attempt (an earlier stage had already spent the
+   run's one repair), so whether a correction would have fixed it is
+   untested; Anthropic's structured outputs do not enforce `maxLength`
+   server-side, so prose is the only mechanism that can actually hold a
+   model under it. The bound itself was not raised or relaxed.
+4. **`FinalAssessment.supporting_evidence_ids` AND `contrary_evidence_ids`
+   now tell the model to copy evidence ids exactly.** `graph.py:1069`'s
+   `cited = parsed.supporting_evidence_ids + parsed.contrary_evidence_ids`
+   feeds both fields into `store.unknown_ids(cited)`, which runs after
+   parsing, so a forged or mistyped id in either one is terminal with no
+   repair (`ReasonCode.FORGED_EVIDENCE_REFERENCE`). `contrary_evidence_ids`
+   was missed in this item's first pass and documented in a follow-up
+   round, once item 5's own cross-check (below) surfaced it as a live,
+   undocumented instance of the identical gap it was built to find —
+   repeating this document's own naming instance-not-class error a third
+   time, caught before it cost a run rather than after.
+5. **A schema-vs-application cross-check landed as a real test**
+   (`tests/unit/test_live_model.py`: `assert_documented_prose_only_contract`
+   plus `test_each_known_final_assessment_contract_is_schema_accepted_and_
+   app_refused`, `test_a_record_plan_null_stop_reason_with_no_check_is_a_
+   documented_gap`, and `test_an_undocumented_prose_only_contract_fails_
+   the_check`, which demonstrates the guard against a real, currently
+   unlisted gap on `search_runbooks.limit` exceeding `Budgets.
+   runbook_passages` — `contrary_evidence_ids` was this demonstration's
+   original example until item 4's follow-up fixed it, at which point it
+   correctly stopped being a gap the demonstration could show): for every
+   payload the emitted schema accepts and the application refuses, the
+   contract must be named in `KNOWN_PROSE_ONLY_CONTRACTS` with a pointer to
+   the prose that carries it, or the assertion fails. This closes the
+   *class* of gap the investigation found, not just the five instances it
+   found first — and, mid-unit, found a sixth.
+6. **Maintainer-only class docstrings no longer ship to Claude.**
+   `model_json_schema()` promotes a class docstring to `description` at the
+   schema root and at every `$defs` entry; `_strip_maintainer_prose`
+   (`live_model.py`) strips both sites, with a whitelist
+   (`Hypothesis.__doc__`, "Rank is not a probability," is genuine model
+   guidance and stays) — Unit 3b-3's P2-5 fix stripped two leaks by naming
+   the two classes it was looking at, and this investigation found three
+   more the same defect had reached (`SearchRunbooksArguments.__doc__`,
+   `RunbookTopic.__doc__`, `ModelDisposition.__doc__`) because the fix was
+   scoped to instances, not the class of the problem. The tool payload
+   shrank from 7,595 to 6,727 characters as a result of this item alone --
+   the addendum round's A1/A2 (below) later grew it back to 7,020, so
+   6,727 is this item's OWN historical effect, not the figure
+   `test_the_tool_payload_size_matches_what_pricingpy_assumes` currently
+   pins; see "The addendum round," below, for the current number.
+
+**Not approved, explicitly ruled out:** `strict: true` (the installed
+`langchain-anthropic==1.6.1`'s `convert_to_anthropic_tool` silently drops a
+`strict=` argument for a dict tool definition already carrying
+`name`/`description`/`input_schema` — confirmed against the installed
+package — so whether the API would even accept the result cannot be proven
+offline); raising or truncating the 300-character bound to make a run pass.
+
+**Recorded, not in this unit:** schema bounds exceeding policy budgets
+(`query_logs.row_limit` 1–200 vs `Budgets.log_rows` 40;
+`search_runbooks.limit` 1–20 vs `runbook_passages` 5 — this one is now
+exercised directly by `test_an_undocumented_prose_only_contract_fails_
+the_check`, as a real, deliberately-still-open gap, not a fixed one) cost
+a model call on denial and are invisible to the model; `Budgets.repairs =
+1` is run-wide, not per stage, so the second run's first failure consumed
+the only repair before the second failure was ever offered one;
+`events.jsonl` does not distinguish "this stage burned its own repair"
+from "no budget remained when the stage began."
+
+### The addendum round — correctness's own P1 and a second reviewer's findings
+
+**On top of the Unit 3b-4 freeze above, a second review pass landed one more fold-in
+(Group A) plus six independently-verified findings from an independent static review
+tool ("codex") run against `master`, split by what they touch: Group B (money-safety,
+same trust domain as the live-model work above) and Group C (pre-existing hardening
+gaps unrelated to the live-model prose investigation).** Every finding was verified
+against the actual code before being approved — one codex claim (an append-only
+`CLAUDE.md` convention) was a misreading and is not included below.
+
+**Group A — folded into the 3b-4 prose fixes.**
+
+- **A1.** `evidence_gap`/`expected_observation` (`live_model.py`'s
+  `_RATIONALE_PROPERTIES`) carried `maxLength: 300` without ever stating the bound in
+  words — the same gap item 3 closed on four other fields, missed here because these
+  two are synthetic properties this module injects, outside that sweep's scope. More
+  exposed than any field item 3 already fixed: both are REQUIRED on every domain-tool
+  call, not once per run.
+- **A2.** `record_plan`'s own description said "every turn" but never "once per
+  turn" — `propose()`'s own refusal for a second `record_plan` call already says
+  "call it exactly once"; the tool description now does too.
+- **A3, record only.** `DUPLICATE_PROPOSAL` (`policy.py`) has no prose anywhere —
+  not fixed this round; it has no live-run precedent yet, and the fact is not
+  expressible in schema (repetition across turns, not a payload shape).
+- **A4, record only.** `KNOWN_PROSE_ONLY_CONTRACTS`'s pointers (`test_live_model.py`)
+  are unverified — confirmed real by both reviewers (an equal-length placeholder
+  swap leaves all tests green), ruled future-drift risk rather than next-run risk.
+  A uniform verification mechanism needs real design (two entries point at
+  wire-visible prose, two at `domain.py` validator messages) and is not attempted
+  this round.
+- **A5, no code change.** `disposition`/`root_cause`'s per-field descriptions
+  duplicate the tool-level description in `live_model.py`. Verified deliberate: it is
+  unconfirmed whether Anthropic's parser honours a `description` sibling to a
+  property's own `$ref`, so collapsing to one copy risks losing the guidance
+  entirely if the sibling form is silently ignored. A comment in `domain.py` records
+  this so it is not "simplified away" later.
+
+The propose-turn tool payload moved to **7,020 characters/tokens** (up from 6,727,
+since A1/A2 are additive) — re-derived and re-pinned by
+`test_the_tool_payload_size_matches_what_pricingpy_assumes`, with every citation in
+`pricing.py`, `live_model.py`, and this document's own "Default limits" table updated
+to match.
+
+**Group B — the double-spend fix, the most important item in this round.**
+`cost_ledger.record_reservation_before_request` returned an existing reservation row
+indistinguishably whether it was `RESERVED` (unsettled) or freshly inserted, and
+`live_model.py`'s `_send` invoked the provider unconditionally either way. A crash
+between reserving and settling, followed by a LangGraph resume that re-renders the
+identical stage (same `context_digest`), read back the same ledger row (correct
+bookkeeping, no double-counted dollar) but still sent a second real paid request under
+it — the exact "reissue an ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids, in
+the one scenario the amended idempotency key exists to prevent. No existing test caught
+this: `test_an_identical_retry_reads_back_the_same_row_not_a_second_one`
+(`test_cost_ledger.py`) only ever asserted the ledger stayed correct, never that the
+transport was invoked twice.
+
+`record_reservation_before_request` now returns `(row, is_new)`; `_send` refuses to
+invoke the provider when `is_new` is `False`, raising the new
+`AmbiguousReservationNotResent` (`cost_ledger.py`, not `live_model.py` — `graph.py`
+catches it alongside `CostCeilingExceeded` without ever importing the concrete live
+adapter) and reporting the new `ReasonCode.AMBIGUOUS_MODEL_REQUEST`. Both possible
+states of a pre-existing row (`RESERVED` or `SETTLED`) are refused the same way, not
+two different judgment calls — see the exception's own docstring for why a `SETTLED`
+row cannot simply be replayed back (`CostLedgerRow` never stored the model's actual
+response, only its cost and token counts). `test_live_model.py`'s
+`test_a_pending_reservation_refuses_to_resend_without_touching_the_transport` is the
+test codex specifically asked for: it asserts on the fake client's own call count
+(`fake.sent == []`), not just ledger state, and is mutation-verified to fail if the
+new `is_new` check is removed — with the removed check, the mutation run showed the
+fake transport genuinely receiving the second call, the double-spend made visible in
+a test for the first time.
+
+**Open gap, recorded not fixed (post-freeze review, P3-4):** a crash after
+`settle_reservation` commits but before the LangGraph checkpoint saves leaves that
+thread's next resume attempt permanently refusing. The ledger row is genuinely
+`SETTLED` (the request really did complete and really was billed), but the
+checkpoint never advanced past the node that made it, so every resume re-renders
+the identical stage, finds `is_new=False`, and raises `AmbiguousReservationNotResent`
+again -- forever, for that specific thread. There is no code path that detects this
+narrow window and resumes some other way; the fix that exists is procedural, not
+automatic: `AmbiguousReservationNotResent`'s own message now tells the owner directly
+("start a fresh investigation instead of resuming this thread"), so the dead end is
+visible and actionable rather than a silent, repeating refusal an owner might retry
+against forever. Closing it properly would mean either storing enough of the
+model's actual response to replay it, or persisting settlement and the checkpoint
+in one atomic step -- both are real design changes, not this round's scope.
+
+**Group C — six pre-existing hardening gaps, verified real and independent of the
+two observed live-run failures.**
+
+- **C1 (P2, downgraded from codex's P1).** `run_investigate_command`
+  (`cli.py`) built `root / "runs" / incident_id` from an unvalidated positional CLI
+  argument, with no check that the loaded `StoredIncident.scope.incident_id` matched
+  the requested directory. `reset_scenario` (`scenario_control.py`) already had the
+  right check; the new `validated_run_paths` extracts it so both callers share one
+  implementation instead of a second hand-copy. A single-operator local CLI has no
+  separate attacker from victim for the path-traversal framing, but the
+  identity-mismatch check is worth having regardless — it is what catches
+  `runs/<id>/incident.json` ever diverging from its own directory name, a correctness
+  bug a security framing alone would not motivate fixing. Both checks are
+  mutation-verified independently: a decoy artifact planted exactly where an
+  unvalidated `../decoy` argument would resolve to proves the `isalnum()` check fires
+  first, and reverting the identity check alone lets a real (if degenerate)
+  investigation attempt through.
+- **C2 (P2).** `telemetry.py`'s `within_window` could raise `TypeError` comparing a
+  naive `datetime.fromisoformat` result against the aware window bounds it is always
+  called with — only `ValueError` (the parse failure) was caught, turning one
+  malformed log or change record into a `FAILED_SAFE` for the entire check instead of
+  excluding just that record. A naive timestamp is now explicitly rejected (never
+  silently coerced to UTC — this project cannot know what offset was intended), the
+  same way an unparseable one already was.
+- **C3 (P2).** `evidence.py`'s `trim_to_bytes` only shrinks the list it is handed;
+  `run_changes_check` builds a SCALAR `summaries` field (joined from every matched
+  change's summary text) before calling it, so once the byte-trimming loop emptied
+  the list it had nothing left to drop, and the function returned an over-budget
+  payload silently if the scalar alone still exceeded `MAX_RESULT_BYTES`. It now
+  falls back to shrinking the largest remaining string field once the row list is
+  exhausted, and every caller's `row_count`/`change_count`/`edge_count`/
+  `sample_count` is now kept equal to `len(kept)` throughout rather than set once
+  before trimming and left stale. One real implementation bug was caught and fixed
+  during this item's OWN mutation testing: an initial "skip popping rows if it looks
+  like it wouldn't help" optimization broke on `run_changes_check`'s actual shape,
+  where a kept row's raw dict still carries its own full-size `summary` field — a
+  second, undetected copy of the same oversized text the top-level scalar holds, only
+  reachable by removing the row itself. `trim_to_bytes`'s own docstring tells this
+  story so it is not rediscovered.
+- **C4 (P2).** `live_model.py`'s `respond()` used `next(...)` to silently take the
+  first of two or more `record_final_assessment` calls in one message, discarding a
+  conflicting second one instead of refusing — the one case `propose()`'s own
+  `record_plan` duplicate check (`len(plan_calls) > 1`) already covers on the
+  proposal side. Two-or-more matches now refuse the same way zero matches already
+  did (empty `content`, routed through the existing repair path).
+- **C5 (P2).** `cli.py`'s `main()` catches only `(LabError, RunRecordError,
+  CheckpointStoreError)`; three call sites read and validated a stored JSON artifact
+  (`incident.json` twice, `report.json` once) with nothing wrapping
+  `Path.read_text()`/`model_validate_json()` — a missing file, invalid UTF-8, or a
+  malformed JSON body all escaped as raw tracebacks. The new `_load_stored_artifact`
+  helper centralizes this, catching `OSError`, `UnicodeDecodeError`, and pydantic's
+  `ValidationError`, and reports the new `LabReasonCode.CORRUPT_ARTIFACT` — distinct
+  from `INCIDENT_NOT_FOUND` ("there is no such artifact") and from the `report.json`
+  site's previous `CheckpointStoreReasonCode.STORE_UNAVAILABLE` (a corrupt artifact
+  is not the same fact as an unavailable store; `test_approvals.py`'s existing
+  regression test for that site was updated to the more accurate code).
+- **C6 (P3, low priority, owner-approved to fix this round).**
+  `telemetry.py`'s `registered_check_runner` — superseded by
+  `tool_wrappers.dispatch_registry` before `search_runbooks` existed, unused by
+  `cli.py` — is now `_registered_check_runner`, a private name rather than a
+  public-looking incomplete dispatch seam. Kept, not deleted: `test_telemetry.py`
+  still exercises it directly as documented history of why the seam cannot route a
+  `search_runbooks` proposal.
+
+**Not approved, unchanged from the base 3b-4 scope:** `strict: true`, the item 2
+`anyOf` schema encoding, raising or truncating the 300-character bound, and the
+GitHub Actions Node 20 deprecation.
 
 ## Superseded v1 evaluation design
 

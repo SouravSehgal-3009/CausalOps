@@ -92,9 +92,30 @@ def matches_filter(log_filter: LogFilter, record: dict[str, JsonValue]) -> bool:
 
 
 def within_window(moment: str, start: datetime, end: datetime) -> bool:
+    """A record with a malformed or naive timestamp is excluded, the same
+    way any other malformed field in a record is -- never raised, which
+    would turn one bad record into a crash for the whole check
+    (`run_logs_check`/`run_changes_check`, then `graph.py`'s blanket
+    handler, then `FAILED_SAFE` for the entire run instead of skipping one
+    row).
+
+    Unit 3b-4 addendum, C2: `datetime.fromisoformat` returns either an
+    aware or a naive `datetime` depending on whether `moment` carries a UTC
+    offset; comparing a naive one against the aware `start`/`end` this
+    function is always called with raises `TypeError`, not `ValueError` --
+    a second, distinct failure mode the original `except ValueError` alone
+    never caught, inconsistent with this function's own evident intent
+    (skip a bad record, don't crash the check). The contract is explicit:
+    a naive timestamp is REJECTED, never silently coerced to UTC -- this
+    project has no way to know what offset a naive value was actually
+    meant to carry, and guessing UTC could misplace a record outside its
+    real window in either direction. Consistent with every other timestamp
+    in this codebase being required aware (`tools.UtcDatetime`)."""
     try:
         observed = datetime.fromisoformat(moment)
     except ValueError:
+        return False
+    if observed.tzinfo is None:
         return False
     return start <= observed <= end
 
@@ -141,12 +162,22 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
         "event_codes": ",".join(sorted(events)),
         "truncated": truncated,
     }
-    payload = trim_to_bytes(payload, "rows", rows)
+    payload = trim_to_bytes(payload, "rows", rows, "row_count")
+    # Post-freeze review, P3-1. `len(rows)` here is the PRE-trim count --
+    # `trim_to_bytes` mutates a COPY (`kept = list(rows)`), never `rows`
+    # itself, so this summary used to claim more rows than `payload["rows"]`
+    # actually holds whenever byte-trimming (not just the `limit` cap
+    # above) removed any. `payload["row_count"]` is what `trim_to_bytes`
+    # keeps honest throughout (Unit 3b-4 addendum, C3); a trailing
+    # "(truncated)" names the gap explicitly rather than leaving a reader
+    # to notice the count looks low.
+    truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.LOG,
         source,
         f"{arguments.log_filter.value} on {arguments.service}: "
-        f"{len(rows)} rows, events {payload['event_codes'] or 'none'}",
+        f"{payload['row_count']} rows, events "
+        f"{payload['event_codes'] or 'none'}{truncated_note}",
         payload,
         started,
     )
@@ -188,11 +219,16 @@ def run_changes_check(
         "summaries": "; ".join(summaries),
         "truncated": False,
     }
-    payload = trim_to_bytes(payload, "changes", changes)
+    payload = trim_to_bytes(payload, "changes", changes, "change_count")
+    # Post-freeze review, P3-1. Same fix as `run_logs_check` above:
+    # `len(changes)` is the PRE-trim count; `payload["change_count"]` is
+    # what `trim_to_bytes` keeps honest throughout.
+    truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.CHANGE,
         source,
-        f"{len(changes)} recent changes on {arguments.service}",
+        f"{payload['change_count']} recent changes on "
+        f"{arguments.service}{truncated_note}",
         payload,
         started,
     )
@@ -219,7 +255,7 @@ def run_topology_check(
         "edge_count": len(edge_list),
         "truncated": False,
     }
-    payload = trim_to_bytes(payload, "edges", edge_list)
+    payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
     return executed_check(
         EvidenceKind.TOPOLOGY,
         source,
@@ -229,13 +265,22 @@ def run_topology_check(
     )
 
 
-def registered_check_runner(
+def _registered_check_runner(
     paths: RunPaths, prometheus_url: str, timeout_seconds: int
 ) -> RunCheck:
     """The runner Step 2 left a seam for: it turns an approved proposal into a result.
 
     Everything a backend needs beyond the proposal is configuration, so it is
     captured here and the returned callable matches the seam exactly.
+
+    Unit 3b-4 addendum, C6: private, not a real dispatch path. Superseded by
+    `tool_wrappers.dispatch_registry` before `search_runbooks` existed;
+    nothing in `cli.py` calls this today, and its `RunCheck` return type
+    (`CheckOutcome` only) cannot even express a `search_runbooks` result
+    (`RunbookCheckOutcome`) if something ever did. Kept, not deleted,
+    because `tests/unit/test_telemetry.py` still exercises it directly as
+    a documented historical seam -- a leading underscore says "do not wire
+    this up as a second dispatch path" without discarding that coverage.
     """
 
     def run(proposal: ToolProposal, scope: IncidentScope) -> CheckOutcome:
@@ -257,7 +302,7 @@ def registered_check_runner(
         # unconditional fallthrough this replaced would have done the
         # moment a fifth argument type existed.
         raise ValueError(
-            f"registered_check_runner cannot route {type(arguments).__name__} -- "
+            f"_registered_check_runner cannot route {type(arguments).__name__} -- "
             "this seam predates search_runbooks and returns CheckOutcome only"
         )
 

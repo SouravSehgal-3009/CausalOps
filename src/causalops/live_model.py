@@ -78,6 +78,7 @@ from langchain_core.messages.tool import ToolCall
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from causalops.cost_ledger import (
+    AmbiguousReservationNotResent,
     record_reservation_before_request,
     settle_reservation,
 )
@@ -143,7 +144,31 @@ class PlanRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
-    stop_reason: str | None = Field(default=None, max_length=300)
+    # Unit 3b-4, item 1: the second live run's first new failure was
+    # `record_plan` omitting this field entirely on a turn that also
+    # proposed no check -- legal under the OLD schema, where `= None` gave
+    # `stop_reason` a Python-level default that (per Unit 3b-3's own
+    # discriminator finding) reads as an omittable field even though
+    # `str | None` still lets the model send an explicit `null`. Dropping
+    # only the default here, without touching `required` some other way,
+    # would NOT reproduce that fix: `tool` worked because it was already in
+    # `required` and only its `default` was extra; `stop_reason` was never
+    # in `required` in the first place, so removing `default` alone leaves
+    # it exactly as omittable as before. Removing the `= None` assignment
+    # is what makes pydantic mark it required (confirmed in
+    # `test_the_plan_tool_definition_states_stop_reason_as_required_and_
+    # nullable`, below in `test_live_model.py`) -- the model must now emit
+    # the key on every turn and consciously choose `null` (this turn also
+    # proposes a check) or a string (this turn is stopping), rather than
+    # relying on an affordance to omit it that this schema no longer offers.
+    stop_reason: str | None = Field(
+        max_length=300,
+        description=(
+            "Why you are stopping instead of proposing a check, in 300 "
+            "characters or fewer. Use null only when you are also calling "
+            "a check tool this turn."
+        ),
+    )
 
 
 # (typed-args class, registered tool name, one-line description for Claude)
@@ -177,18 +202,78 @@ _DOMAIN_TOOL_SPECS: tuple[tuple[type[BaseModel], ToolName, str], ...] = (
     ),
 )
 
+# Unit 3b-4 addendum, A1: both fields already carried `maxLength: 300`
+# (provider-unenforced, per the root-cause investigation) without their
+# description ever stating the bound in words -- the same gap item 3 fixed
+# on four other fields, missed here because these two are synthetic
+# properties this module injects rather than a `domain.py` field item 3's
+# sweep was scoped to. More exposed than any of those four: both are
+# REQUIRED on every domain-tool call, not once per run.
 _RATIONALE_PROPERTIES: dict[str, JsonValue] = {
     "evidence_gap": {
         "type": "string",
         "maxLength": 300,
-        "description": "What this check is meant to settle -- the open question.",
+        "description": (
+            "What this check is meant to settle -- the open question, in "
+            "300 characters or fewer."
+        ),
     },
     "expected_observation": {
         "type": "string",
         "maxLength": 300,
-        "description": "What a result confirming your leading hypothesis would show.",
+        "description": (
+            "What a result confirming your leading hypothesis would show, "
+            "in 300 characters or fewer."
+        ),
     },
 }
+
+
+def _strip_maintainer_prose(
+    schema: dict[str, Any], *, keep_defs: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    """Unit 3b-4, item 6. `model_json_schema()` promotes every class
+    docstring it can reach -- the schema's own root class, and any nested
+    model or enum reachable through `$defs` -- into a `"description"` key
+    that ships to Claude, billed on every call. Most of those docstrings are
+    written for a maintainer reading this codebase, not for a model filling
+    in a tool call: `RunbookTopic.__doc__` names the threat model in prose
+    ("an injected document or a malicious model turn"), `SearchRunbooksArguments
+    .__doc__` cites `policy.py` internals, `ModelDisposition.__doc__`
+    explains an application-side type boundary ("FAILED_SAFE is absent on
+    purpose"). Unit 3b-3's P2-5 fix stripped two leaks by naming the two
+    classes it happened to be looking at (`PlanRecord`'s omitted docstring,
+    and the schema_version/description strip this function replaces) --
+    this unit's investigation found three more that fix never reached,
+    because it was scoped to specific classes instead of every site
+    `model_json_schema()` can promote a docstring from. This strips the
+    class-level `"description"` at every such site -- the schema root and
+    every `$defs` entry -- once, rather than repeating the per-class fix a
+    third and fourth time.
+
+    `keep_defs` is the one exception: `Hypothesis.__doc__` ("Rank is not a
+    probability") is genuine guidance about how to fill the field in, not
+    implementation trivia, so `_plan_tool_definition` below passes
+    `{"Hypothesis"}` to keep it. Property-level `description`s this module
+    adds separately (`_RATIONALE_PROPERTIES` below, and the field-level
+    `description`s Unit 3b-4 added directly to `domain.py`'s `Hypothesis`/
+    `FinalAssessment` fields) live one level deeper, under each `$defs`
+    entry's or the schema's own `properties`, so this function -- which only
+    ever touches a `description` key that sits beside `"type"`/`"enum"`/
+    `"title"` at the top of a schema or a `$defs` entry -- never reaches
+    them."""
+    schema = dict(schema)
+    schema.pop("description", None)
+    defs = schema.get("$defs")
+    if defs:
+        stripped_defs: dict[str, Any] = {}
+        for name, definition in defs.items():
+            definition = dict(definition)
+            if name not in keep_defs:
+                definition.pop("description", None)
+            stripped_defs[name] = definition
+        schema["$defs"] = stripped_defs
+    return schema
 
 
 def _domain_tool_definitions() -> list[dict[str, Any]]:
@@ -212,10 +297,17 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     two independently-validated values -- this never injects `tool` from
     `call.name`, which would make that check unable to ever observe a
     disagreement again. Only this function's *output* changes; `tools.py`'s
-    own model keeps its default, so none of those ~30 call sites move."""
+    own model keeps its default, so none of those ~30 call sites move.
+
+    Unit 3b-4, item 6: `_strip_maintainer_prose` below drops
+    `SearchRunbooksArguments.__doc__` (cites `policy.py` internals) and
+    `RunbookTopic.__doc__` (names this project's own threat model) from the
+    schema this function emits -- both stay on the classes themselves in
+    `tools.py`, for a maintainer reading that file, they just never reach
+    the wire."""
     definitions: list[dict[str, Any]] = []
     for arguments_cls, tool_name, description in _DOMAIN_TOOL_SPECS:
-        schema = arguments_cls.model_json_schema()
+        schema = _strip_maintainer_prose(arguments_cls.model_json_schema())
         properties = dict(schema.get("properties", {}))
         tool_property = dict(properties["tool"])
         tool_property.pop("default", None)
@@ -238,44 +330,61 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
 
 
 def _plan_tool_definition() -> dict[str, Any]:
+    # Unit 3b-4, item 6: keeps `Hypothesis.__doc__` ("Rank is not a
+    # probability") -- genuine guidance about how to fill the field in --
+    # while stripping any other class-level docstring `PlanRecord`'s own
+    # `$defs` might carry (`RootCauseCode` has none today; this keeps the
+    # function correct if that ever changes).
+    schema = _strip_maintainer_prose(
+        PlanRecord.model_json_schema(), keep_defs=frozenset({"Hypothesis"})
+    )
     return {
         "name": RECORD_PLAN_TOOL_NAME,
         "description": (
-            "Call this on every turn, in addition to any check tool you call. "
-            "Record 2-3 ranked hypotheses about the root cause. If you are "
-            "also calling a check tool this turn, leave stop_reason unset -- "
-            "the check call itself is your proposal, and calling a check "
-            "while also setting stop_reason is treated as a mistake. If you "
-            "are not calling a check tool, stop_reason must explain why you "
-            "are stopping (either you are ready to give a final assessment, "
-            "or no remaining check would help)."
+            # Unit 3b-4 addendum, A2: propose()'s own refusal for a second
+            # `record_plan` call in one turn already says "call it exactly
+            # once" (below); `record_final_assessment`'s description already
+            # says "Call this once" -- this tool's own description said
+            # "every turn" but never "once per turn," so it stated the
+            # cadence without stating the count.
+            "Call this exactly once on every turn, in addition to any check "
+            "tool you call. Record 2-3 ranked hypotheses about the root "
+            "cause. If you are also calling a check tool this turn, set "
+            "stop_reason to null -- the check call itself is your proposal, "
+            "and calling a check while also setting stop_reason to a "
+            "non-null value is treated as a mistake. If you are not calling "
+            "a check tool, stop_reason must explain why you are stopping "
+            "(either you are ready to give a final assessment, or no "
+            "remaining check would help)."
         ),
-        "input_schema": PlanRecord.model_json_schema(),
+        "input_schema": schema,
     }
 
 
-def _without_schema_version_and_description(schema: dict[str, Any]) -> dict[str, Any]:
-    """Unit 3b-2, P2-5. `domain.py`'s `FinalAssessment` -- unlike this
-    module's own `PlanRecord` -- is a shared domain model, not written just
-    for this tool definition, so its `model_json_schema()` carries two
-    things `_final_assessment_tool_definition` below must not ship to
-    Claude as-is:
+def _final_assessment_schema() -> dict[str, Any]:
+    """Unit 3b-2, P2-5, generalized by Unit 3b-4's item 6. `domain.py`'s
+    `FinalAssessment` -- unlike this module's own `PlanRecord` -- is a
+    shared domain model, not written just for this tool definition, so its
+    `model_json_schema()` carries two things this tool's `input_schema`
+    must not ship to Claude as-is:
 
     - `schema_version`: application bookkeeping (`domain.SCHEMA_VERSION`)
       the model has no business setting. Every domain tool
       (`_domain_tool_definitions`) and `PlanRecord` already omit it; this
       is `FinalAssessment`'s own equivalent.
-    - `description`: pydantic promotes `FinalAssessment.__doc__` --
-      "Its schema cannot express FAILED_SAFE" -- to the schema's own
-      top-level key. `FAILED_SAFE` names an application disposition
-      (`domain.Disposition`) this tool's schema does not even offer Claude
-      a field to select, so surfacing it here is a maintainer note about
-      this module's own type boundary, not guidance about how to fill the
-      tool in -- the hand-written `"description"` string below already
-      says what Claude needs to know about this tool.
+    - `description` (this schema's own, and every nested `$defs` entry's,
+      per `_strip_maintainer_prose`): pydantic promotes `FinalAssessment
+      .__doc__` ("Its schema cannot express FAILED_SAFE") to the schema's
+      own top-level key, and `ModelDisposition.__doc__` ("FAILED_SAFE is
+      absent on purpose") the same way into `$defs`. Both name an
+      application-side type boundary for a maintainer reading `domain.py`,
+      not guidance about how to fill the tool in -- the hand-written
+      `"description"` string in `_final_assessment_tool_definition` below,
+      and the field-level `description`s Unit 3b-4 added directly to
+      `FinalAssessment`'s own fields, already say what Claude needs to
+      know.
     """
-    schema = dict(schema)
-    schema.pop("description", None)
+    schema = _strip_maintainer_prose(FinalAssessment.model_json_schema())
     properties = {
         name: value
         for name, value in schema.get("properties", {}).items()
@@ -291,10 +400,21 @@ def _without_schema_version_and_description(schema: dict[str, Any]) -> dict[str,
 def _final_assessment_tool_definition() -> dict[str, Any]:
     return {
         "name": RECORD_FINAL_ASSESSMENT_TOOL_NAME,
-        "description": "Call this once to record your final diagnosis or abstention.",
-        "input_schema": _without_schema_version_and_description(
-            FinalAssessment.model_json_schema()
+        # Unit 3b-4, item 2: states the same three terminal-disposition
+        # invariants `domain.py`'s `check_terminal_invariants` enforces,
+        # restated per-field on `disposition`/`root_cause`/
+        # `supporting_evidence_ids` themselves (see those fields'
+        # `description`s in `domain.py`) -- named here too so the rule is
+        # visible from the tool's own one-line summary, not only once a
+        # model is already reading an individual field.
+        "description": (
+            "Call this once to record your final diagnosis or abstention. "
+            "A DIAGNOSED assessment needs a root_cause other than "
+            "UNDETERMINED and at least one supporting_evidence_ids entry; "
+            "an abstention (INSUFFICIENT_EVIDENCE) needs root_cause "
+            "UNDETERMINED."
         ),
+        "input_schema": _final_assessment_schema(),
     }
 
 
@@ -512,10 +632,14 @@ class LiveClaudeModel:
             raise InputTooLarge(estimated_input_tokens)
         # Unit 3b-2, P1-1. The reservation must price what actually goes out
         # on the wire: prose *plus* the tool schema `bind_tools` sends on
-        # every call, roughly 7,595 tokens of fixed, per-stage tool
-        # definitions this unit measured (`test_live_model.py` pins the
-        # exact figure, so this comment cannot drift from the real payload
-        # the way an earlier version of it already did once). `MAX_INPUT_
+        # every call, roughly 7,020 tokens of fixed, per-stage tool
+        # definitions (Unit 3b-4 addendum's figure, after item 6 stripped
+        # ~1.2K characters of maintainer-only schema/`$defs` docstrings and
+        # A1/A2 then added back ~293 characters stating two fields' 300-char
+        # bounds and a 4-word "exactly once" -- `test_live_model.py` pins
+        # the exact figure, so this comment cannot drift from the real
+        # payload the way an earlier version of it already did, three
+        # times). `MAX_INPUT_
         # TOKENS`'s cap above deliberately stays prose-only -- see
         # `InputTooLarge`'s docstring for why folding tools into the cap is
         # the wrong fix -- but a dollar reservation that omits real, billed
@@ -529,7 +653,7 @@ class LiveClaudeModel:
         # Raises `CostCeilingExceeded` and writes nothing further if this
         # reservation would exceed the remaining application-wide balance --
         # refuse rather than send, `TECHNICAL_SPEC.md` §10's own words.
-        record_reservation_before_request(
+        reservation, is_new = record_reservation_before_request(
             self._conn,
             run_id=request.run_id,
             graph_phase=request.graph_phase,
@@ -539,6 +663,17 @@ class LiveClaudeModel:
             requested_at=requested_at,
             ceiling_usd=self._ceiling_usd,
         )
+        # Unit 3b-4 addendum, Group B. `is_new is False` means a reservation
+        # for this exact key already existed BEFORE this call -- a crash
+        # between an earlier reserve and its settle, then a resume that
+        # re-renders this identical stage, would land here. Checked before
+        # the provider is ever invoked, not after: see
+        # `AmbiguousReservationNotResent`'s docstring for why both possible
+        # states of the pre-existing row (`RESERVED` or `SETTLED`) are
+        # refused the same way rather than one being treated as safe to
+        # resend.
+        if not is_new:
+            raise AmbiguousReservationNotResent(reservation)
         messages = [
             SystemMessage(content=request.system_text),
             HumanMessage(content=content),
@@ -587,21 +722,26 @@ class LiveClaudeModel:
         tool (`record_final_assessment`), no domain tools offered at all."""
         message = self._send(request, [_final_assessment_tool_definition()])
         usage = self._usage(message)
-        call = next(
-            (
-                call
-                for call in message.tool_calls
-                if call["name"] == RECORD_FINAL_ASSESSMENT_TOOL_NAME
-            ),
-            None,
-        )
-        if call is None or message.invalid_tool_calls:
+        matching_calls = [
+            call
+            for call in message.tool_calls
+            if call["name"] == RECORD_FINAL_ASSESSMENT_TOOL_NAME
+        ]
+        if len(matching_calls) != 1 or message.invalid_tool_calls:
             # No error channel on `ModelResponse` -- an empty `content`
             # dict fails `FinalAssessment`'s own required-field validation
             # for a genuine, informative reason (`disposition`/`root_cause`
-            # missing) rather than this module fabricating one.
+            # missing) rather than this module fabricating one. Unit 3b-4
+            # addendum, C4: this used to take the FIRST matching call via
+            # `next(...)`, silently discarding a second, possibly
+            # conflicting one instead of refusing the turn -- the same
+            # shape `propose()`'s own `record_plan` duplicate check
+            # (`len(plan_calls) > 1`, above) already refuses on the
+            # proposal side. Zero matches and two-or-more matches are
+            # refused the same way, through the same repair path, rather
+            # than the codebase silently picking a winner either time.
             return ModelResponse(content={}, usage=usage)
-        return ModelResponse(content=call["args"], usage=usage)
+        return ModelResponse(content=matching_calls[0]["args"], usage=usage)
 
     def propose[StageModel: BaseModel](
         self, request: ModelRequest, schema: type[StageModel]

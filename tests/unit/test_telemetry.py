@@ -31,10 +31,11 @@ from causalops.prometheus import MAX_METRIC_SAMPLES, parse_samples, run_metric_c
 from causalops.telemetry import (
     MAX_LOG_ROWS,
     RunPaths,
-    registered_check_runner,
+    _registered_check_runner,
     run_changes_check,
     run_logs_check,
     run_topology_check,
+    within_window,
 )
 from causalops.tools import (
     GetTopologyArguments,
@@ -184,6 +185,14 @@ def test_a_log_result_stays_inside_the_byte_bound(tmp_path: Path) -> None:
 
     assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
     assert outcome.payload["truncated"] is True
+    # Post-freeze review, P3-1. 30 rows were matched, but byte-trimming
+    # (not just the `row_limit` cap) drops some of them -- `outcome.summary`
+    # must report the SAME, smaller, post-trim count `payload["row_count"]`
+    # holds, not the pre-trim 30 `len(rows)` used to report regardless of
+    # what trimming did.
+    assert outcome.payload["row_count"] < 30
+    assert f"{outcome.payload['row_count']} rows" in outcome.summary
+    assert outcome.summary.endswith("(truncated)")
 
 
 def test_a_log_query_for_a_run_without_that_log_is_unavailable(tmp_path: Path) -> None:
@@ -191,6 +200,121 @@ def test_a_log_query_for_a_run_without_that_log_is_unavailable(tmp_path: Path) -
 
     assert outcome.outcome is ToolOutcome.UNAVAILABLE
     assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_within_window_rejects_a_naive_timestamp_instead_of_raising() -> None:
+    """Unit 3b-4 addendum, C2. `datetime.fromisoformat` returns a naive
+    `datetime` for a string carrying no UTC offset; comparing it against
+    the aware `WINDOW_START`/`WINDOW_END` this function is always called
+    with used to raise `TypeError`, uncaught (only `ValueError`, the parse
+    failure, was caught) -- a naive timestamp is now excluded the same way
+    an unparseable one already was, not raised."""
+    naive = WINDOW_START.replace(tzinfo=None).isoformat()
+
+    assert within_window(naive, WINDOW_START, WINDOW_END) is False
+
+
+def test_a_log_row_with_a_naive_timestamp_is_excluded_not_crashed(
+    tmp_path: Path,
+) -> None:
+    """The end-to-end sibling of `test_within_window_rejects_a_naive_
+    timestamp_instead_of_raising`: before this fix, this call raised
+    `TypeError` out of `within_window`, uncaught by `run_logs_check`,
+    turning one malformed row into a crash for the whole check rather than
+    excluding just that row."""
+    paths = RunPaths(root=tmp_path)
+    naive_row = log_row(5)
+    naive_row["at"] = WINDOW_START.replace(tzinfo=None).isoformat()
+    write_log(paths, [naive_row, log_row(10)])
+
+    outcome = run_logs_check(logs_arguments(), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+
+
+def test_a_change_row_with_a_naive_timestamp_is_excluded_not_crashed(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.replace(tzinfo=None).isoformat(),
+                    "service": "orders",
+                    "summary": "naive-timestamp change",
+                },
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": "aware change",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["change_count"] == 1
+
+
+def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
+    tmp_path: Path,
+) -> None:
+    """Unit 3b-4 addendum, C3. `run_changes_check` joins every matched
+    change's `summary` into one scalar `summaries` string before calling
+    `trim_to_bytes` -- a single change with an oversized summary makes that
+    scalar bigger than `MAX_RESULT_BYTES` all by itself, which no amount of
+    popping the `changes` list could ever fix (there is only one change to
+    begin with). Before this fix, `trim_to_bytes` would try popping it,
+    empty the list, and still return an over-budget payload silently."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": "x" * (MAX_RESULT_BYTES + 4000),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert outcome.payload["truncated"] is True
+    # `changes` (which embeds the raw entry, oversized `summary` field and
+    # all) is popped before the scalar fallback ever runs -- see
+    # `trim_to_bytes`'s own docstring for why that ordering matters here:
+    # the single change's OWN `summary` field is a second copy of the same
+    # oversized text `summaries` holds, invisible to a fallback that only
+    # inspects top-level scalars. `change_count` still honestly matches
+    # what `changes` actually holds, whatever that ends up being.
+    assert outcome.payload["change_count"] == len(outcome.payload["changes"])  # type: ignore[arg-type]
+    # Post-freeze review, P3-1. Before that fix, `outcome.summary` was
+    # built from `len(changes)` (the PRE-trim count, always 1 here) --
+    # "1 recent changes on orders" while the payload actually held zero.
+    # Reproduced by correctness directly against this exact scenario.
+    assert outcome.payload["change_count"] == 0
+    assert outcome.summary == "0 recent changes on orders (truncated)"
+    assert isinstance(outcome.payload["summaries"], str)
+    assert len(outcome.payload["summaries"]) < MAX_RESULT_BYTES
 
 
 def test_recent_changes_are_filtered_by_service_and_window(tmp_path: Path) -> None:
@@ -261,7 +385,7 @@ def test_the_runner_sends_each_tool_to_its_own_backend(tmp_path: Path) -> None:
     paths = RunPaths(root=tmp_path)
     write_log(paths, [log_row(1)])
     paths.topology_file.write_text(json.dumps({"edges": []}), encoding="utf-8")
-    run = registered_check_runner(paths, "http://127.0.0.1:1", 1)
+    run = _registered_check_runner(paths, "http://127.0.0.1:1", 1)
 
     logs = run(
         ToolProposal(
@@ -299,7 +423,7 @@ def test_the_runner_raises_loudly_for_search_runbooks(tmp_path: Path) -> None:
     rather than silently falling through to `run_topology_check` the way an
     unconditional last branch would have."""
     paths = RunPaths(root=tmp_path)
-    run = registered_check_runner(paths, "http://127.0.0.1:1", 1)
+    run = _registered_check_runner(paths, "http://127.0.0.1:1", 1)
 
     with pytest.raises(ValueError, match="SearchRunbooksArguments"):
         run(

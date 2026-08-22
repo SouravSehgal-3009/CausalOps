@@ -27,15 +27,25 @@ import pytest
 from fake_incident import alert_packet, incident_scope
 from langchain_core.messages import AIMessage
 from langchain_core.messages.tool import ToolCall, invalid_tool_call
+from pydantic import ValidationError
 
-from causalops.cost_ledger import CostCeilingExceeded, ensure_cost_ledger_table
+from causalops.cost_ledger import (
+    AmbiguousReservationNotResent,
+    CostCeilingExceeded,
+    ensure_cost_ledger_table,
+    record_reservation_before_request,
+    settle_reservation,
+)
 from causalops.domain import (
     Budgets,
     FinalAssessment,
     HypothesisUpdate,
     InitialPlan,
+    PolicyResult,
+    ReasonCode,
     RetrievalMode,
     RunbookPassage,
+    ToolProposal,
 )
 from causalops.live_model import (
     RECORD_FINAL_ASSESSMENT_TOOL_NAME,
@@ -43,9 +53,14 @@ from causalops.live_model import (
     LiveClaudeModel,
     MissingCredential,
     MissingProviderUsage,
+    PlanRecord,
     _build_chat_anthropic,
+    _domain_tool_definitions,
+    _final_assessment_tool_definition,
+    _plan_tool_definition,
 )
 from causalops.models import ModelRequest, Stage
+from causalops.policy import authorize
 from causalops.pricing import (
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -56,7 +71,7 @@ from causalops.pricing import (
 )
 from causalops.prompts import STAGE_INSTRUCTIONS, SYSTEM_TEXT, render_context
 from causalops.tool_calls import select_single_tool_call
-from causalops.tools import ToolName
+from causalops.tools import SearchRunbooksArguments, ToolName
 
 NOW = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
 USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
@@ -224,12 +239,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the ~7,595-token tool schema `bind_tools`
+    against prose alone, never the ~7,020-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~7,595" restates
+    the pinned, directly-measured figure this comment's "~7,020" restates
     in prose."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
@@ -259,6 +274,36 @@ def test_the_plan_tool_definition_ships_no_leaked_engineering_docstring(
     (tools,) = fake.bound_tools
     (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_PLAN_TOOL_NAME]
     assert "description" not in plan_tool["input_schema"]
+
+
+def test_the_plan_tool_definition_states_stop_reason_as_required_and_nullable(
+    conn: sqlite3.Connection,
+) -> None:
+    """Unit 3b-4, item 1. The second live run's first new failure was
+    `record_plan` omitting `stop_reason` on a turn that proposed no check --
+    legal under the OLD schema, where `stop_reason: str | None = Field(
+    default=None, ...)` gave the field a Python-level default. Naively
+    repeating Unit 3b-3's `tool`-field fix ("drop the default") would NOT
+    have closed this: `tool` was already in `required`, so removing only
+    its `default` left an unambiguous requirement; `stop_reason` was never
+    in `required` in the first place, so removing only its `default` would
+    have left it exactly as omittable as before. The actual fix drops the
+    `= None` assignment entirely, which is what pydantic reads as
+    "required" -- asserted here directly against the emitted wire schema,
+    not inferred from a passing `propose()` call."""
+    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+
+    model.propose(make_request(), InitialPlan)
+
+    (tools,) = fake.bound_tools
+    (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_PLAN_TOOL_NAME]
+    stop_reason_property = plan_tool["input_schema"]["properties"]["stop_reason"]
+    assert "default" not in stop_reason_property
+    assert stop_reason_property["anyOf"] == [
+        {"type": "string", "maxLength": 300},
+        {"type": "null"},
+    ]
+    assert "stop_reason" in plan_tool["input_schema"]["required"]
 
 
 def test_the_final_assessment_tool_definition_drops_schema_version_and_description(
@@ -295,26 +340,35 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     """Post-freeze review's stale-figure finding: `pricing.py`'s
     `InputTooLarge` docstring and `live_model.py`'s own comment on `_send`
     both cite this payload's size in prose, and the cited figure has
-    already gone stale twice without a test noticing -- once at 8,329
-    chars (before P2-5 shrank the payload by stripping `PlanRecord`'s
-    docstring and `FinalAssessment`'s `schema_version`/`description`), and
-    again at 7,738 chars / 2,580 tokens (before Unit 3b-3's discriminator
-    fix dropped the stale `"default"` key from every domain tool's `tool`
-    property, and before that same unit's ratio replan changed how many
-    tokens the same characters estimate to). This pins the real, measured
-    figure so a fourth silent drift fails a test instead of only a
-    docstring."""
+    already gone stale four times without a test noticing -- once at
+    8,329 chars (before P2-5 shrank the payload by stripping
+    `PlanRecord`'s docstring and `FinalAssessment`'s `schema_version`/
+    `description`), again at 7,738 chars / 2,580 tokens (before Unit
+    3b-3's discriminator fix dropped the stale `"default"` key from every
+    domain tool's `tool` property, and before that same unit's ratio
+    replan changed how many tokens the same characters estimate to), again
+    at 7,595 (before Unit 3b-4's item 6 stripped maintainer-only
+    schema/`$defs` docstrings -- `SearchRunbooksArguments.__doc__`,
+    `RunbookTopic.__doc__`, `ModelDisposition.__doc__` -- that Unit 3b-3's
+    P2-5 fix left in place because it was scoped to the two classes it was
+    looking at, not every site a docstring can leak from), and again at
+    6,727 (before the addendum's A1 stated `evidence_gap`/
+    `expected_observation`'s 300-character bound in words, and A2 added
+    four words to `record_plan`'s own description -- both additive, on
+    purpose, so this test's figure is expected to have GROWN this round,
+    not shrunk). This pins the real, measured figure so a sixth silent
+    drift fails a test instead of only a docstring."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 7_595
+    assert len(payload) == 7_020
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 7_595
+    assert estimate_input_tokens(payload) == 7_020
 
 
 def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
@@ -397,17 +451,20 @@ def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap()
 ):
     """P2-1's correction. The claim this docstring's sibling test measured
     (1,280 tokens of FINAL_ASSESSMENT prose with zero evidence, against a
-    ~2,005-token folded headroom) does NOT support "folding tools into the
-    cap would refuse ordinary runs" -- 1,280 < 2,005 is an ADMITTED request,
-    and an earlier version of this argument (in `TECHNICAL_OVERVIEW.md` and,
-    before it, in Unit 3b-2's own unpinned "512 tokens" claim) drew the
-    opposite conclusion from its own numbers. This test measures the
-    example that actually supports the conclusion: `Budgets.
-    runbook_passages` (5) retrieved passages at `RunbookPassage.content`'s
-    own `max_length` (800), still present in a FINAL_ASSESSMENT turn's
-    context because `graph.py`'s `_make_final_assessment` rebuilds and
-    re-renders passages from state on every stage, not just the stage that
-    retrieved them. Five max-length passages is not a contrived worst
+    folded headroom) does NOT support "folding tools into the cap would
+    refuse ordinary runs" -- 1,280 is below the folded headroom at every
+    payload size this project has measured (~2,005 tokens pre-Unit-3b-4,
+    ~2,873 after item 6 shrank the payload, ~2,580 now, after the addendum's
+    A1/A2 grew it back partway) -- an ADMITTED request, and an earlier
+    version of this argument (in
+    `TECHNICAL_OVERVIEW.md` and, before it, in Unit 3b-2's own unpinned
+    "512 tokens" claim) drew the opposite conclusion from its own numbers.
+    This test measures the example that actually supports the conclusion:
+    `Budgets.runbook_passages` (5) retrieved passages at `RunbookPassage
+    .content`'s own `max_length` (800), still present in a FINAL_ASSESSMENT
+    turn's context because `graph.py`'s `_make_final_assessment` rebuilds
+    and re-renders passages from state on every stage, not just the stage
+    that retrieved them. Five max-length passages is not a contrived worst
     case -- it is `search_runbooks`'s own schema ceiling
     (`SearchRunbooksArguments.limit`, `le=20`) clipped to what policy
     actually allows through in one call (`Budgets.runbook_passages`)."""
@@ -438,7 +495,7 @@ def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap()
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
-    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_595  # 7,595: the measured
+    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_020  # 7,020: the measured
     # tool-definition payload pinned by test_the_tool_payload_size_matches_
     # what_pricingpy_assumes above -- restated, not re-measured, here.
 
@@ -723,6 +780,47 @@ def test_respond_returns_empty_content_on_a_provider_invalid_tool_call(
     assert response.content == {}
 
 
+def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
+    conn: sqlite3.Connection,
+) -> None:
+    """Unit 3b-4 addendum, C4. Before this fix, `next(...)` silently took
+    the FIRST of two `record_final_assessment` calls, discarding the
+    second -- including a second call that DISAGREES with the first, which
+    is exactly what these two do (`DIAGNOSED` vs `INSUFFICIENT_EVIDENCE`).
+    `response.content == {}` proves this refuses the whole turn rather
+    than silently picking either disposition; a downstream diagnosis that
+    happened to match the first call's answer, by coincidence, would not
+    have caught this."""
+    first = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "DIAGNOSED",
+            "root_cause": "CONFIG_CHANGE",
+            "supporting_evidence_ids": ["e1"],
+            "uncertainty": "u",
+            "next_step": "n",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    second = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "u2",
+            "next_step": "n2",
+        },
+        id="fa-2",
+        type="tool_call",
+    )
+    model, _ = make_model(conn, [message([first, second])])
+
+    response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    assert response.content == {}
+
+
 # --- the refusal path: as tested as the success path ---------------------
 
 
@@ -737,6 +835,98 @@ def test_the_cost_ceiling_refuses_before_sending(conn: sqlite3.Connection) -> No
     assert fake.sent == []
     rows = conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()[0]
     assert rows == 0
+
+
+def test_a_pending_reservation_refuses_to_resend_without_touching_the_transport(
+    conn: sqlite3.Connection,
+) -> None:
+    """Unit 3b-4 addendum, Group B, codex P1 -- the double-spend bug.
+    Simulates the exact scenario `TECHNICAL_SPEC.md` §5's idempotency key
+    exists for: a crash between an earlier reserve and its settle, then a
+    LangGraph resume that re-renders the identical stage. Pre-inserts a
+    `RESERVED` row for exactly the key `propose()` below will compute
+    (`make_request()`'s `run_id`/`graph_phase`/`model_turn`/`digest`
+    defaults), simulating that earlier, unsettled attempt directly against
+    `cost_ledger` rather than via a real `_send` call.
+
+    Before this fix, `record_reservation_before_request` returned that
+    existing row and `_send` proceeded to call the transport anyway --
+    `test_an_identical_retry_reads_back_the_same_row_not_a_second_one`
+    (`test_cost_ledger.py`) only ever checked the *ledger* stayed
+    one-row-one-dollar; it never checked whether `self._client.bind_tools
+    (...).invoke(...)` was reached a second time. This is that missing
+    check, at the one layer that can actually see it: `fake.sent` records
+    every `invoke()` call `_send` makes, so `fake.sent == []` here is
+    direct proof the provider was never touched, not an inference from
+    ledger state."""
+    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    record_reservation_before_request(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        reserved_usd=0.01,
+        requested_at=NOW,
+        ceiling_usd=2.00,
+    )
+
+    with pytest.raises(AmbiguousReservationNotResent):
+        model.propose(make_request(), InitialPlan)
+
+    assert fake.sent == []
+    row = conn.execute(
+        "SELECT state FROM cost_ledger WHERE run_id = 'run-1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "RESERVED"
+
+
+def test_a_settled_reservation_also_refuses_to_resend(conn: sqlite3.Connection) -> None:
+    """Post-freeze review, P2-1. The sibling test above only covers a
+    pre-existing `RESERVED` row; this covers `SETTLED` -- a real, tempting
+    future "optimization" is `if not is_new and reservation.state ==
+    "RESERVED":`, refusing only the unsettled case and letting a `SETTLED`
+    one through on the theory that "it already succeeded, so a retry is
+    just wasteful, not dangerous." That reasoning is backwards: a
+    `SETTLED` row means the earlier request was ALREADY billed, so
+    resending it is strictly worse than the `RESERVED` case -- the money
+    is definitely gone, not merely possibly in flight. Settling the
+    pre-existing row first (mirroring a real earlier `_send` call that
+    completed normally) proves the refusal does not depend on which state
+    the stale reservation is in."""
+    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    record_reservation_before_request(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        reserved_usd=0.01,
+        requested_at=NOW,
+        ceiling_usd=2.00,
+    )
+    settle_reservation(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        actual_usd=0.008,
+        input_tokens=100,
+        output_tokens=20,
+        settled_at=NOW,
+    )
+
+    with pytest.raises(AmbiguousReservationNotResent):
+        model.propose(make_request(), InitialPlan)
+
+    assert fake.sent == []
+    row = conn.execute(
+        "SELECT state FROM cost_ledger WHERE run_id = 'run-1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "SETTLED"
 
 
 def test_a_missing_credential_refuses_before_reserving_or_sending(
@@ -927,3 +1117,407 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
     assert client.max_tokens == MAX_OUTPUT_TOKENS
     assert client.max_retries == 0
     assert client.model == CHEAP_PRICING.model_name
+
+
+# --- Unit 3b-4, item 5: the schema-vs-application cross-check ------------
+#
+# The root-cause investigation behind this unit found five payloads the
+# emitted wire schema ACCEPTS that the application REFUSES -- a class of
+# gap Unit 3b-3's own review could not have caught, because it tested the
+# schema against itself ("is `default` consistent with `required`?"), never
+# against the application code that actually refuses a run. `schema_accepts`
+# below is a small, dependency-free validator over exactly the JSON Schema
+# keywords these seven tool schemas use -- adapted from
+# `3b4-KEEP-schema_gap_check.py` (the investigation's own working
+# prototype, verified there to reproduce all five contracts) into a real,
+# asserting test. `KNOWN_PROSE_ONLY_CONTRACTS` is the registry every
+# payload the two checks below exercise must be named in, with a pointer to
+# the prose that actually carries the rule -- `test_an_undocumented_prose_
+# only_contract_fails_the_check` demonstrates what happens to one that
+# is not.
+
+
+def resolve_schema_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    while "$ref" in schema:
+        schema = root["$defs"][schema["$ref"].split("/")[-1]]
+    return schema
+
+
+def schema_accepts(
+    schema: dict[str, Any], value: Any, root: dict[str, Any] | None = None
+) -> tuple[bool, str]:
+    """True if `value` satisfies `schema`, covering only the keywords
+    `query_metric`/`query_logs`/`list_recent_changes`/`get_topology`/
+    `search_runbooks`/`record_plan`/`record_final_assessment`'s emitted
+    schemas actually use -- not a general-purpose JSON Schema validator."""
+    root = root or schema
+    schema = resolve_schema_ref(schema, root)
+    if "anyOf" in schema:
+        if any(schema_accepts(s, value, root)[0] for s in schema["anyOf"]):
+            return True, ""
+        return False, "no anyOf branch matched"
+    kind = schema.get("type")
+    if kind == "null":
+        return (value is None), "not null"
+    if value is None and kind is not None:
+        return False, f"null against type {kind}"
+    if kind == "object":
+        if not isinstance(value, dict):
+            return False, "not an object"
+        for name in schema.get("required", []):
+            if name not in value:
+                return False, f"missing required '{name}'"
+        for name, sub in schema.get("properties", {}).items():
+            if name in value:
+                ok, why = schema_accepts(sub, value[name], root)
+                if not ok:
+                    return False, f"{name}: {why}"
+        return True, ""
+    if kind == "array":
+        if not isinstance(value, list):
+            return False, "not an array"
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            return False, "too few items"
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            return False, "too many items"
+        for item in value:
+            ok, why = schema_accepts(schema.get("items", {}), item, root)
+            if not ok:
+                return False, f"item: {why}"
+        return True, ""
+    if kind == "string":
+        if not isinstance(value, str):
+            return False, "not a string"
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            return False, "too long"
+        if "enum" in schema and value not in schema["enum"]:
+            return False, "not in enum"
+        if "const" in schema and value != schema["const"]:
+            return False, "not the const"
+        return True, ""
+    if kind == "integer":
+        if not isinstance(value, int):
+            return False, "not an integer"
+        if "minimum" in schema and value < schema["minimum"]:
+            return False, "below minimum"
+        if "maximum" in schema and value > schema["maximum"]:
+            return False, "above maximum"
+        return True, ""
+    if "enum" in schema:
+        return (value in schema["enum"]), "not in enum"
+    return True, ""
+
+
+# Post-freeze review, P2-4. `schema_accepts` above is a hand-maintained
+# mirror of the JSON Schema keywords the seven real emitted tool schemas
+# use, not a general-purpose validator -- and a hand-maintained mirror can
+# silently narrow: `minItems`/`maxItems`/`minimum`/`maximum` were dropped
+# somewhere between `3b4-KEEP-schema_gap_check.py` (the investigation's own
+# scratch script, which already implements all four) and this file, in the
+# WEAKENING direction. Correctness measured the concrete consequence:
+# `record_plan` with a single hypothesis, `Hypothesis.rank=0`, and
+# `search_runbooks.limit=999` are all real pydantic rejections that
+# `schema_accepts` reported as "accepted." Nothing among the known
+# contracts below happened to depend on any of the four, so nothing was
+# misclassified as a RESULT of the gap -- but the mechanism's own coverage
+# claim ("covering only the keywords these schemas actually use") was
+# false, silently, with no test noticing.
+#
+# The two sets below, plus the walker and the test after them, are the
+# stronger fix the owner chose over just restoring the four keywords:
+# a coverage assertion that catches the NEXT dropped keyword automatically,
+# not just this one restored by hand.
+_SCHEMA_ACCEPTS_HANDLED_KEYWORDS = frozenset(
+    {
+        "anyOf",
+        "type",
+        "required",
+        "minItems",
+        "maxItems",
+        "maxLength",
+        "enum",
+        "const",
+        "minimum",
+        "maximum",
+    }
+)
+# Keywords the real emitted schemas carry that are structural (navigated
+# to reach a nested schema, never themselves checked against a value) or
+# pure annotation (documentation text no provider or this application
+# enforces as a constraint) -- deliberately NOT "things schema_accepts
+# happens not to implement yet." Adding a keyword here is a claim that it
+# can never be the kind of gap this check exists to find.
+_SCHEMA_ACCEPTS_ANNOTATION_KEYWORDS = frozenset(
+    {
+        "$ref",
+        "$defs",
+        "properties",
+        "items",
+        "title",
+        "description",
+        "format",
+        # `default` never restricts which values a payload may send --
+        # it is a hint for what an OMITTED field would resolve to, not a
+        # constraint on what is present. Confirmed real, not guessed: this
+        # test failed on exactly this keyword the first time it ran,
+        # naming `"default"` (e.g. `supporting_evidence_ids`'s `[]`).
+        "default",
+    }
+)
+
+
+def _collect_schema_keywords(node: dict[str, Any]) -> set[str]:
+    """Walks one schema node the same way `schema_accepts` itself
+    navigates it -- `properties`/`$defs` VALUES are nested schemas to
+    recurse into, but their own keys are arbitrary field/type names picked
+    by a domain model, never JSON Schema keywords, so they are deliberately
+    NOT collected (unlike a naive "every dict key anywhere" walk, which
+    would pollute the result with names like `"hypotheses"` or
+    `"stop_reason"` and make this assertion fail for the wrong reason)."""
+    keywords = set(node.keys())
+    if "anyOf" in node:
+        for sub in node["anyOf"]:
+            keywords |= _collect_schema_keywords(sub)
+    if "properties" in node:
+        for sub in node["properties"].values():
+            keywords |= _collect_schema_keywords(sub)
+    if "items" in node:
+        keywords |= _collect_schema_keywords(node["items"])
+    if "$defs" in node:
+        for sub in node["$defs"].values():
+            keywords |= _collect_schema_keywords(sub)
+    return keywords
+
+
+def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
+    """The coverage assertion itself: walks all seven real emitted tool
+    schemas (five domain tools, `record_plan`, `record_final_assessment`),
+    collects every keyword actually present, and fails -- naming the
+    specific keyword -- if one is neither handled by `schema_accepts` nor
+    explicitly allowlisted as non-constraining. Mutation-verified: removing
+    `"minimum"`/`"maximum"` from `_SCHEMA_ACCEPTS_HANDLED_KEYWORDS` alone
+    (the real `schema_accepts` implementation untouched) fails this test,
+    proving it is sensitive to exactly the class of drift that dropped all
+    four keywords between the scratch script and this file."""
+    tools = [
+        *_domain_tool_definitions(),
+        _plan_tool_definition(),
+        _final_assessment_tool_definition(),
+    ]
+    real_keywords: set[str] = set()
+    for tool in tools:
+        real_keywords |= _collect_schema_keywords(tool["input_schema"])
+
+    known = _SCHEMA_ACCEPTS_HANDLED_KEYWORDS | _SCHEMA_ACCEPTS_ANNOTATION_KEYWORDS
+    unhandled = real_keywords - known
+    assert not unhandled, (
+        f"real emitted schemas use {sorted(unhandled)}, which schema_accepts "
+        "neither handles nor allowlists as non-constraining -- implement it "
+        "or allowlist it with a stated reason"
+    )
+
+
+# label -> where the rule this payload violates actually lives, since the
+# schema itself cannot express it. Every payload exercised by the two tests
+# below must have an entry here.
+KNOWN_PROSE_ONLY_CONTRACTS: dict[str, str] = {
+    "record_plan: stop_reason explicitly null, no check proposed": (
+        "live_model.py's propose(): 'record_plan must set stop_reason "
+        "when no check is proposed this turn' -- and PlanRecord."
+        "stop_reason's own description, 'Use null only when you are "
+        "also calling a check tool this turn.'"
+    ),
+    "record_final_assessment: DIAGNOSED, no supporting_evidence_ids": (
+        "domain.py's FinalAssessment.check_terminal_invariants -- "
+        "'a diagnosis must cite supporting evidence' -- and "
+        "FinalAssessment.supporting_evidence_ids's own description."
+    ),
+    "record_final_assessment: DIAGNOSED + root_cause UNDETERMINED": (
+        "domain.py's FinalAssessment.check_terminal_invariants -- "
+        "'a diagnosis needs a root cause other than UNDETERMINED' -- "
+        "and FinalAssessment.disposition's own description."
+    ),
+    "record_final_assessment: INSUFFICIENT_EVIDENCE + a real root cause": (
+        "domain.py's FinalAssessment.check_terminal_invariants -- "
+        "'an abstention requires UNDETERMINED' -- and FinalAssessment."
+        "root_cause's own description."
+    ),
+}
+
+
+def assert_documented_prose_only_contract(
+    label: str, schema: dict[str, Any], payload: dict[str, Any], *, app_refuses: bool
+) -> None:
+    """The cross-check itself. A payload the schema accepts and the
+    application refuses is exactly the shape of gap this unit's
+    investigation was launched to find; requiring `label` to already be in
+    `KNOWN_PROSE_ONLY_CONTRACTS` is what makes a new, undocumented one fail
+    this assertion instead of shipping quietly."""
+    accepted, why = schema_accepts(schema, payload)
+    assert accepted, f"{label}: expected the schema to accept this payload ({why})"
+    if app_refuses:
+        assert label in KNOWN_PROSE_ONLY_CONTRACTS, (
+            f"{label!r} is accepted by the emitted schema and refused by "
+            "the application -- a prose-only contract -- but is not named "
+            "in KNOWN_PROSE_ONLY_CONTRACTS with a pointer to the prose "
+            "that carries it"
+        )
+
+
+_HYPOTHESES_PAYLOAD = [
+    {"root_cause": "CONFIG_CHANGE", "rank": 1, "missing_evidence": "a"},
+    {"root_cause": "RESOURCE_POOL_SATURATION", "rank": 2, "missing_evidence": "b"},
+]
+
+
+def test_the_stop_reason_omission_gap_is_now_closed_at_the_schema_level() -> None:
+    """Unit 3b-4, item 1's structural effect, seen through the same
+    mechanical checker item 5 uses: the very first payload this
+    investigation found (`record_plan` called with no `stop_reason` key at
+    all, no check proposed) used to be schema-accepted and app-refused --
+    a genuine prose-only contract. Item 1 made `stop_reason` required, so
+    the schema itself now refuses this shape too; it is no longer a gap
+    `schema_accepts` finds, and so it is correctly absent from
+    `KNOWN_PROSE_ONLY_CONTRACTS` above. Mutation-verified: temporarily
+    reverting `PlanRecord.stop_reason` to `Field(default=None, ...)` flips
+    `accepted` back to `True` for this exact payload."""
+    plan_schema = _plan_tool_definition()["input_schema"]
+    payload = {"hypotheses": _HYPOTHESES_PAYLOAD}
+
+    accepted, why = schema_accepts(plan_schema, payload)
+
+    assert accepted is False
+    assert why == "missing required 'stop_reason'"
+
+
+def test_a_record_plan_null_stop_reason_with_no_check_is_a_documented_gap(
+    conn: sqlite3.Connection,
+) -> None:
+    """The one `record_plan` prose-only contract item 1 does NOT close:
+    Claude can still explicitly send `stop_reason: null` on a turn that
+    proposes no check. The schema cannot forbid this by itself -- "a check
+    was proposed" is a fact about a *different* tool call in the same turn,
+    not about this tool's own arguments -- so the rule has to live in
+    `propose()`'s own code, confirmed here against the real method rather
+    than only against `PlanRecord.model_validate`."""
+    plan_schema = _plan_tool_definition()["input_schema"]
+    payload = {"hypotheses": _HYPOTHESES_PAYLOAD, "stop_reason": None}
+    label = "record_plan: stop_reason explicitly null, no check proposed"
+
+    # The schema, and pydantic underneath it, both accept this shape --
+    # confirming the gap is real, not a typo in the payload.
+    PlanRecord.model_validate(payload)
+
+    model, _ = make_model(conn, [message([plan_call(stop_reason=None)])])
+    turn = model.propose(make_request(), InitialPlan)
+    app_refuses = turn.parsed is None and "stop_reason" in (turn.errors or "")
+
+    assert_documented_prose_only_contract(
+        label, plan_schema, payload, app_refuses=app_refuses
+    )
+    assert app_refuses
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        (
+            "record_final_assessment: DIAGNOSED, no supporting_evidence_ids",
+            {
+                "disposition": "DIAGNOSED",
+                "root_cause": "CONFIG_CHANGE",
+                "uncertainty": "u",
+                "next_step": "n",
+            },
+        ),
+        (
+            "record_final_assessment: DIAGNOSED + root_cause UNDETERMINED",
+            {
+                "disposition": "DIAGNOSED",
+                "root_cause": "UNDETERMINED",
+                "supporting_evidence_ids": ["e1"],
+                "uncertainty": "u",
+                "next_step": "n",
+            },
+        ),
+        (
+            "record_final_assessment: INSUFFICIENT_EVIDENCE + a real root cause",
+            {
+                "disposition": "INSUFFICIENT_EVIDENCE",
+                "root_cause": "CONFIG_CHANGE",
+                "uncertainty": "u",
+                "next_step": "n",
+            },
+        ),
+    ],
+)
+def test_each_known_final_assessment_contract_is_schema_accepted_and_app_refused(
+    label: str, payload: dict[str, Any]
+) -> None:
+    fa_schema = _final_assessment_tool_definition()["input_schema"]
+
+    try:
+        FinalAssessment.model_validate(payload)
+        app_refuses = False
+    except ValidationError:
+        app_refuses = True
+
+    assert_documented_prose_only_contract(
+        label, fa_schema, payload, app_refuses=app_refuses
+    )
+    assert app_refuses, f"{label}: FinalAssessment no longer refuses this payload"
+
+
+def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
+    """Demonstrates item 5's mechanism has teeth, using a real, not
+    contrived, gap this unit did not add to `KNOWN_PROSE_ONLY_CONTRACTS`.
+
+    `contrary_evidence_ids` was this test's original example -- it fed the
+    identical forged-citation check `supporting_evidence_ids` does, but was
+    left undocumented by item 4's first pass. The owner ruled that gap
+    fixed (see `FinalAssessment.contrary_evidence_ids`'s own description in
+    `domain.py`), which correctly makes it disappear from this test too --
+    keeping it here after fixing it would demonstrate nothing.
+
+    `search_runbooks.limit` is its replacement, a *different* gap in the
+    same "schema allows more than the application actually admits" family,
+    explicitly recorded as open and NOT in this unit's approved scope
+    (`3b4-approved-scope.md`'s P3-2): the wire schema admits `limit` up to
+    20 (`SearchRunbooksArguments.limit`, `le=20`), but `policy.authorize`
+    denies anything above `Budgets.runbook_passages` (5) with
+    `ReasonCode.RESULT_LIMIT_EXCEEDED` -- a real policy denial, invoked
+    here directly rather than simulated, that this unit does not fix
+    because P3-2 was explicitly ruled out of scope."""
+    domain_tools = _domain_tool_definitions()
+    (search_runbooks_tool,) = [
+        tool for tool in domain_tools if tool["name"] == ToolName.SEARCH_RUNBOOKS.value
+    ]
+    schema = search_runbooks_tool["input_schema"]
+    payload = {
+        "tool": ToolName.SEARCH_RUNBOOKS.value,
+        "topic": "gateway_errors",
+        "limit": 6,
+        "evidence_gap": "whether known gateway-error causes match this incident",
+        "expected_observation": "guidance naming a matching known cause",
+    }
+    label = "search_runbooks: limit above Budgets.runbook_passages"
+    assert label not in KNOWN_PROSE_ONLY_CONTRACTS
+
+    arguments = SearchRunbooksArguments.model_validate(payload)
+    proposal = ToolProposal(
+        arguments=arguments,
+        evidence_gap=payload["evidence_gap"],
+        expected_observation=payload["expected_observation"],
+    )
+    decision = authorize(
+        proposal,
+        incident_scope(),
+        seen_fingerprints=set(),
+        budgets=Budgets(),
+        tools_remaining=4,
+    )
+    assert decision.result is PolicyResult.DENIED
+    assert decision.reason_code is ReasonCode.RESULT_LIMIT_EXCEEDED
+
+    with pytest.raises(AssertionError, match="not named in KNOWN_PROSE_ONLY_CONTRACTS"):
+        assert_documented_prose_only_contract(label, schema, payload, app_refuses=True)

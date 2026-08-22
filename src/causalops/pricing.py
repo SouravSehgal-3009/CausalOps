@@ -121,26 +121,34 @@ class InputTooLarge(Exception):
     message, repair correction included when present), deliberately never
     the six tool definitions `bind_tools` also sends on every call
     (`_plan_tool_definition`/`_domain_tool_definitions`, a fixed
-    ~7,595-token payload -- 7,595 characters, the two now equal because
-    Unit 3b-3 set `PESSIMISTIC_CHARS_PER_TOKEN` to 1.0 -- measured directly
-    via `estimate_input_tokens(json.dumps(tools))` and pinned by a
-    dedicated `test_live_model.py` test, not a number carried by hand
-    between this docstring and its two other citations -- `live_model.py`'s
-    own comment on `_send`, and the "Default limits" row in
-    `TECHNICAL_OVERVIEW.md`). Folding the tool schema into *this* cap would
-    leave only ~2,005 tokens of prose headroom (`MAX_INPUT_TOKENS -
-    7,595`); a FINAL_ASSESSMENT turn against the project's own
-    `tests/unit/fake_incident.py` scenario -- the smallest incident checked
-    into this repo -- already renders to 1,280 tokens of prose with zero
-    tool-check evidence added (Unit 3b-2's "512 tokens" claim for this same
-    illustration was never pinned by a test and could not be reproduced
-    from the real `render_context`/`Budgets` call site during Unit 3b-3's
-    review; 1,280 is measured directly and pinned by
-    `test_live_model.py`'s `test_the_smallest_final_assessment_prose_
-    matches_what_inputtoolarge_assumes`), so folding tools into the cap
-    would still leave less than double the smallest scenario's own prose as
-    headroom before any evidence is added, not just an unusually large run.
-    The dollar *reservation* this gate books (`_send`'s `reserved_usd`) is
+    ~7,020-character payload -- 7,020 tokens, the two equal because Unit
+    3b-3 set `PESSIMISTIC_CHARS_PER_TOKEN` to 1.0 -- measured directly via
+    `estimate_input_tokens(json.dumps(tools))` and pinned by a dedicated
+    `test_live_model.py` test, not a number carried by hand between this
+    docstring and its two other citations -- `live_model.py`'s own comment
+    on `_send`, and the "Default limits" row in `TECHNICAL_OVERVIEW.md`;
+    Unit 3b-4's item 6 shrank this from 7,595 to 6,727 by stripping
+    maintainer-only schema/`$defs` docstrings, and the addendum's A1/A2 then
+    added it back up to 7,020 by stating two fields' 300-character bound in
+    words and adding four words to `record_plan`'s own description -- both
+    additive on purpose, the opposite direction from item 6's strip).
+    Folding the tool schema into *this* cap would leave ~2,580 tokens of
+    prose headroom (`MAX_INPUT_TOKENS - 7,020`). An earlier version of this
+    argument compared that headroom only against the smallest checked-in
+    scenario's zero-evidence FINAL_ASSESSMENT prose (1,280 tokens) and
+    concluded folding would "refuse ordinary runs" -- wrong on its own
+    numbers, since 1,280 < 2,580 is an ADMITTED request. Unit 3b-4 corrected
+    it with the example that actually supports the claim: five retrieved runbook
+    passages at their own schema's maximum length, still present in a
+    FINAL_ASSESSMENT turn because `graph.py`'s `_make_final_assessment`
+    re-renders passages from state on every stage rather than only the one
+    that retrieved them, render to 5,465 tokens of prose -- well over the
+    folded headroom, and not a contrived worst case
+    (`SearchRunbooksArguments.limit` clipped to what `Budgets.
+    runbook_passages` actually admits in one call). Measured directly and
+    pinned by `test_live_model.py`'s `test_a_final_assessment_with_a_full_
+    runbook_page_would_exceed_a_folded_cap`. The dollar *reservation* this
+    gate books (`_send`'s `reserved_usd`) is
     not scoped this way: it counts the tool payload too, because a
     reservation that ignores real, billed tokens is not conservative. The
     two numbers this module produces from the same request are
