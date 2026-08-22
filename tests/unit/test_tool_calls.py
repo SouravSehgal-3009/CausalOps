@@ -57,6 +57,41 @@ def test_a_name_that_does_not_match_the_arguments_tool_is_refused() -> None:
     assert "query_metric" in reason
 
 
+def test_a_call_missing_the_tool_discriminator_is_refused() -> None:
+    """Unit 3b-3: this is the exact shape the owner's first live run
+    produced -- Claude omitted `tool` from its arguments on both the
+    original call and the repair, so `arguments_adapter.validate_python`
+    could not resolve the discriminated union. That unit's fix changed
+    what `live_model.py` ASKS Claude to send (dropping the wire schema's
+    stray `"default"` on the `tool` property, which read as making a
+    required field omittable), never what this function VALIDATES -- the
+    discriminator was, and remains, required here regardless of what any
+    Python-level model default would have supplied. This test pins that
+    the refusal path is unchanged: a call whose args never named a `tool`
+    at all is refused with an informative reason, not resolved by falling
+    back to `call.name`."""
+    metric_call = to_tool_call(metric_proposal(), "call-1")
+    args_without_tool = dict(metric_call.args)
+    del args_without_tool["tool"]
+    undiscriminated = NativeToolCall(
+        name=metric_call.name, args=args_without_tool, id="call-1"
+    )
+
+    proposal, reason = parse_tool_call(undiscriminated)
+
+    assert proposal is None
+    # P2-6 (Unit 3b-3 review): this docstring claims "an informative
+    # reason," but `reason != ""` cannot observe that property -- it
+    # passes on any non-empty string, informative or not. The real
+    # message is pydantic's own `": Unable to extract tag using
+    # discriminator \'tool\'"`, the exact fragment quoted in the smoke
+    # call's own logged failure (`TECHNICAL_OVERVIEW.md`'s "The smoke
+    # call's findings"); asserting on its content is what actually pins
+    # the claim this test's docstring makes.
+    assert "discriminator" in reason
+    assert "tool" in reason
+
+
 def test_args_that_do_not_validate_as_any_registered_tool_are_refused() -> None:
     bogus = NativeToolCall(
         name="query_logs", args={"tool": "run_shell", "command": "whoami"}, id="c"

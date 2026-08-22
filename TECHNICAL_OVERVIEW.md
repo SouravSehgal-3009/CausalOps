@@ -557,7 +557,7 @@ remaining call budget permits a safe alternative or assessment.
 | Model calls, including repair | 4 | built — `Budgets.model_calls` |
 | Executed diagnostic tools | 2 | built — `Budgets.executed_tools` |
 | Structured-output repairs | 1 | built — `Budgets.repairs` |
-| Maximum counted input per model call | 3,200 tokens | built, Unit 3b-2 — `pricing.MAX_INPUT_TOKENS`/`estimate_input_tokens`/`InputTooLarge`; counts request prose (`system_text` plus the rendered human message, correction header included on a repair turn) only, not the ~2,580-token fixed tool schema every call also sends (7,738 characters, measured directly and pinned by a `test_live_model.py` test) — folding tools into the cap would leave only ~620 tokens of prose headroom, and a FINAL_ASSESSMENT turn on this project's own smallest checked-in scenario already renders to 512 tokens of prose with no evidence added, so folding tools in would refuse ordinary runs, not just unusually large ones. A pessimistic character-per-token estimate, not a real tokenizer (deliberately, see `pricing.py`'s docstring). The dollar *reservation* below (`Unbounded provider spend`) is not scoped this way — it counts the tool schema too, since a reservation that ignores real, billed tokens is not conservative |
+| Maximum counted input per model call | 9,600 tokens (Unit 3b-2/3b-3; prose only, not the tool schema) | built — `pricing.MAX_INPUT_TOKENS`/`estimate_input_tokens`/`InputTooLarge`. See "The smoke call's findings" below for the replan, the measured figures, and why the tool schema stays out of this cap |
 | Claude `max_tokens` | 1,600 tokens | built, Unit 3b-2 — `pricing.MAX_OUTPUT_TOKENS`, `live_model.LiveClaudeModel`'s `ChatAnthropic` construction |
 | Claude adaptive-thinking effort | `medium` | built, Unit 3b-2 — `live_model.LiveClaudeModel`'s `ChatAnthropic(..., thinking={"type": "adaptive"}, effort="medium")` |
 | Log result | 40 rows and 12 KB | built — `Budgets.log_rows`, `evidence.MAX_RESULT_BYTES` |
@@ -760,8 +760,8 @@ causalops conformance
 None of these three commands is registered in `cli.py`'s parser. The
 `benchmark` signature above is the original v1 design; it is superseded by
 `TECHNICAL_SPEC.md` §10's paired evaluation (at most six held-out incidents,
-USD 2.00 cap) — see Part III, "Superseded v1 evaluation design," for what
-changed and why the numbers differ.
+USD 5.00 cap, Unit 3b-3) — see Part III, "Superseded v1 evaluation design,"
+for what changed and why the numbers differ.
 
 Business outcomes `DIAGNOSED` and `INSUFFICIENT_EVIDENCE` are successful CLI
 executions. `FAILED_SAFE`, invalid configuration, and unavailable dependencies
@@ -2135,9 +2135,10 @@ plus this fix, one at a time, reverted before the next):
 **Status:** not started. Adds curated FTS5 runbooks, retrieval provenance,
 and injection/no-ground-truth-leakage tests — deferred here from Milestone 2
 by `TECHNICAL_SPEC.md` §12's *Amendment, Milestone 2*. Runs the fixed paired
-evaluation under the USD 2 cap, saves raw records and limitations, produces
-architecture and threat-model documents, verifies the clean source commit,
-and records a short diagnosis plus abstention/escalation demo.
+evaluation under the USD 5 cap (Unit 3b-3, raised from USD 2), saves raw
+records and limitations, produces architecture and threat-model documents,
+verifies the clean source commit, and records a short diagnosis plus
+abstention/escalation demo.
 
 ### Open gaps recorded during Unit 3b-1's review — for Unit 3b-2
 
@@ -2212,15 +2213,28 @@ whoever actually runs it.
 doctor` warns, does not fail, if it is not — a replay run needs no key, so
 `doctor` cannot use its absence to refuse a command that might not need it).
 `LIVE_EVALUATION_MAX_USD` optionally set (`.env.example`'s documented
-default, `2.00`, applies if not). The local Docker lab running.
+default, `5.00` as of Unit 3b-3, applies if not). The local Docker lab
+running. **No scenario already active for the incident you are about to
+start.** Unit 3b-3, reproduced live: running `scenario start` again while a
+previous smoke call's incident is still active fails with `FAIL
+SCENARIO_ALREADY_ACTIVE`. Reset it first —
+`uv run causalops scenario reset <incident-id>` — using the incident id
+printed in that earlier `FAIL` line (or in the earlier `scenario start`
+output, if you still have it). This is the same "repaired for the failures
+already observed, never re-run from the state the first run left" pattern
+this section's other two runbook fixes belong to.
 
-**The exact command sequence:**
+**The exact command sequence.** Unit 3b-3, found by the owner actually
+running this: `causalops` is a console script installed at `.venv/bin/
+causalops`, not on `PATH` — a bare `causalops lab up` fails immediately.
+Every command below is prefixed `uv run`, the same way `README.md`'s own
+example already is:
 
 ```bash
-causalops lab up
-causalops scenario start configuration_change --seed development
+uv run causalops lab up
+uv run causalops scenario start configuration_change --seed development
 # prints an opaque incident id, e.g. a1b2c3d4e5f6...
-causalops investigate a1b2c3d4e5f6... --model claude
+uv run causalops investigate a1b2c3d4e5f6... --model claude
 ```
 
 `--model claude` is the only thing that distinguishes this from an ordinary
@@ -2243,22 +2257,36 @@ anything new this unit built:
 - `results/investigations/<investigation-id>/events.jsonl` — the ordinary
   `RunEvent` stream, unchanged in shape from a replay run.
 - `results/checkpoints.db`'s `cost_ledger` table: **exactly one row per
-  model call this run made** (`SELECT * FROM cost_ledger WHERE run_id =
-  '<run-id>'` — `run_id` is internal, not printed by the CLI; the simplest
-  way to find it is `SELECT * FROM cost_ledger ORDER BY reserved_at DESC
-  LIMIT <model-calls-used>` right after the run). Each row's `state` is
-  `SETTLED` (a row still `RESERVED` after the process exits means a crash
-  or timeout interrupted that specific request — see below),
-  `reserved_usd` is the pessimistic upper bound charged against the
-  ceiling — priced off prose *and* the fixed tool-definition schema every
-  call sends (`live_model.py`'s `_send`; the input-token *cap* in "Default
-  limits" above stays prose-only, a deliberately different scope) —
-  `actual_usd` is what the request really cost from the provider's own
-  reported `input_tokens`/`output_tokens`, and `actual_usd` must be
-  `<= reserved_usd` on every row. `test_pricing.py`'s
-  `test_a_settled_request_never_costs_more_than_its_own_reservation` pins
-  this as a property of the pricing math itself, not just something that
-  happened to hold this run; `test_live_model.py`'s
+  model call this run made**. Unit 3b-3, found by the owner actually
+  running this: the `sqlite3` CLI binary is not a dependency of this
+  project and may not be installed, even though the `sqlite3` *Python
+  module* (stdlib, used throughout `src/`) always is. Read the table with
+  `uv run python` instead of assuming a `sqlite3` binary on `PATH`. A
+  multi-line heredoc does not survive a copy-paste from inside this list
+  item -- Unit 3b-3's own review found and reproduced this: every line,
+  including a `<<'PY'` heredoc's closing `PY`, inherits this list item's
+  2-space indent, and a heredoc terminator must sit flush at column 0 or
+  the shell never sees it end. A single-line invocation has no terminator
+  to misalign, so that is what this runbook uses instead:
+
+  ```bash
+  uv run python -c "import sqlite3; conn = sqlite3.connect('results/checkpoints.db'); conn.row_factory = sqlite3.Row; [print(dict(r)) for r in conn.execute(\"SELECT * FROM cost_ledger ORDER BY reserved_at DESC LIMIT 5\")]"
+  ```
+
+  Edit the `LIMIT` (or add a `WHERE run_id = '<run-id>'`, `run_id` is
+  internal, not printed by the CLI) to match how many model calls the run
+  actually made. Each row's `state` is `SETTLED` (a row still `RESERVED`
+  after the process exits means a crash or timeout interrupted that
+  specific request — see below), `reserved_usd` is the pessimistic upper
+  bound charged against the ceiling — priced off prose *and* the fixed
+  tool-definition schema every call sends (`live_model.py`'s `_send`; the
+  input-token *cap* in "Default limits" above stays prose-only, a
+  deliberately different scope) — `actual_usd` is what the request really
+  cost from the provider's own reported `input_tokens`/`output_tokens`,
+  and `actual_usd` must be `<= reserved_usd` on every row. `test_pricing.
+  py`'s `test_a_settled_request_never_costs_more_than_its_own_reservation`
+  pins this as a property of the pricing math itself, not just something
+  that happened to hold this run; `test_live_model.py`'s
   `test_propose_reserves_at_least_the_full_wire_payload` additionally pins
   that a real `propose()` call's reservation genuinely counts the tool
   payload, not just prose — the P1-1 bug this unit fixed shipped past an
@@ -2267,23 +2295,23 @@ anything new this unit built:
 
   This invariant holds whenever the pessimistic estimate
   (`pricing.estimate_input_tokens`) actually bounds the tokens the
-  provider bills — every case measured so far. It is not a structural
-  guarantee: `estimate_input_tokens` cannot see the provider's own
-  tool-use system prompt (injected server-side once tools are bound,
-  invisible to `json.dumps(tools)`) or ordinary message-envelope
-  overhead, and has not yet been checked against a real billed request
-  (see "record the estimate beside the settled row" below). If a row
-  ever does show `actual_usd > reserved_usd`, suspect those two
-  unmodelled contributions first, and treat it as **a signal to
-  re-derive `PESSIMISTIC_CHARS_PER_TOKEN`, not an incident**: the
-  violation is bounded to a fraction of a cent per row (the estimate
-  would have to be wrong by whole tokens to matter at these rates), and
-  the application-wide ceiling still counts the *reserved* amount
-  against `LIVE_EVALUATION_MAX_USD` regardless — a mispriced row does not
-  let spend run away, it only means this one row under-priced itself.
+  provider bills. **Unit 3b-3's smoke call checked it against a real
+  billed request for the first time and it held on both settled rows —
+  but only because output stayed under its allowance both times.** See
+  "The smoke call's findings" below for the measured numbers and what
+  changed as a result. If a row ever does show `actual_usd >
+  reserved_usd`, suspect the two unmodelled contributions
+  (`estimate_input_tokens`'s own docstring names them: the provider's
+  tool-use system prompt and ordinary message-envelope overhead) first,
+  and treat it as **a signal to re-derive `PESSIMISTIC_CHARS_PER_TOKEN`,
+  not an incident**: the violation is bounded to a fraction of a cent per
+  row, and the application-wide ceiling still counts the *reserved*
+  amount against `LIVE_EVALUATION_MAX_USD` regardless — a mispriced row
+  does not let spend run away, it only means this one row under-priced
+  itself.
 
-**Record the estimate beside the settled row — this smoke call is the
-calibration `pricing.py`'s own docstring asks for.** The call is
+**Record the estimate beside the settled row — every live call is a
+calibration point `pricing.py`'s own docstring asks for.** The call is
 happening anyway, its prompt is known, and its settled `cost_ledger` row
 carries the provider's own `input_tokens`. Before running it, compute
 `estimate_input_tokens(system_text + content)` plus
@@ -2291,14 +2319,10 @@ carries the provider's own `input_tokens`. Before running it, compute
 send (`system_text`/`content` are what `_send` actually estimates;
 `tools` is whatever `propose`/`respond` bound for that stage). After the
 run settles, compare that sum against the row's real `input_tokens`. If
-the estimate is still `>=` the billed count, this is now a *checked*
-empirical bound, not just a documented judgment call — `pricing.py`'s own
-docstring on `PESSIMISTIC_CHARS_PER_TOKEN` names exactly this as what
-would justify tightening the constant. If the estimate comes in *below*
-the billed count, that is real evidence the two unmodelled contributions
-above (the provider's tool-use system prompt, message-envelope overhead)
-are large enough to matter, and `PESSIMISTIC_CHARS_PER_TOKEN` needs to
-move — with this measurement as the reason, not a guess.
+the estimate is still `>=` the billed count, that is one more confirming
+point for the current ratio. If the estimate comes in *below* the billed
+count, that is real evidence `PESSIMISTIC_CHARS_PER_TOKEN` needs to move
+again — with the measurement as the reason, not a guess.
 
 **What an escalated run looks like — a normal outcome, not a failure.**
 The graph can pause for owner approval on an ordinary `investigate` run
@@ -2314,8 +2338,9 @@ of the smoke call, not a hypothetical. Escalation is only reachable from
 `cost_ledger` rows for the model calls already made are `SETTLED` at this
 point — the money is spent** before the pause, since settlement happens
 per model call, inside the graph, before the escalation interrupt runs.
-Run `causalops approve <thread_id>` to accept the paused diagnosis, or
-`causalops reject <thread_id> "<reason>"` to reject it; either produces
+Run `uv run causalops approve <thread_id>` to accept the paused diagnosis,
+or `uv run causalops reject <thread_id> "<reason>"` to reject it; either
+produces
 the terminal `report.json` and `events.jsonl` this section describes
 above. Resuming spends nothing further: `escalation_interrupt` routes
 straight to `final_report`, so neither `approve` nor `reject` makes
@@ -2332,12 +2357,14 @@ to require, not that anything broke.
   raises before any insert (`cost_ledger.py`, `test_cost_ledger.py`'s
   `test_a_refused_reservation_writes_nothing`). If this run was meant to
   proceed, either raise `LIVE_EVALUATION_MAX_USD` (after checking why the
-  running total is where it is — `SELECT SUM(reserved_usd) FROM
-  cost_ledger`) or accept that the ceiling did its job.
+  running total is where it is, using the `uv run python` reader above
+  with `"SELECT SUM(reserved_usd) FROM cost_ledger"`) or accept that the
+  ceiling did its job.
 - **Input too large.** `reason_code: INPUT_TOKEN_CAP_EXCEEDED` — the
-  rendered context exceeded the 3,200-token pessimistic estimate. Nothing
-  was sent, nothing was reserved. This should not happen on the checked-in
-  scenarios at their default budgets; if it does, that is worth
+  rendered context exceeded the 9,600-token pessimistic estimate (Unit
+  3b-3, raised from 3,200 — see "The smoke call's findings" below).
+  Nothing was sent, nothing was reserved. This should not happen on the
+  checked-in scenarios at their default budgets; if it does, that is worth
   investigating on its own before re-running.
 - **A crash or timeout mid-request.** The run reports `FAILED_SAFE`/
   `INTERNAL_ERROR`, and the `cost_ledger` row for that specific request is
@@ -2350,6 +2377,105 @@ to require, not that anything broke.
   the run at `REPAIR_EXHAUSTED`/`MODEL_OUTPUT_INVALID`, same reason codes
   replay already produces.
 
+### The smoke call's findings (2026-08-22) — Unit 3b-3
+
+**The owner ran the first live Claude call in this project's history on
+2026-08-22.** Total spend: $0.03771, two model calls (one repair), zero
+tools executed, outcome `FAILED_SAFE`/`MODEL_OUTPUT_INVALID`. Recorded here
+because it drove real numeric changes to this document and to `pricing.py`,
+`cli.py`, and `.env.example` — a dated record, not a silent renumbering.
+
+**What worked**, unchanged by this unit: the cost gate (both ledger rows
+`SETTLED`, `actual_usd <= reserved_usd` on both), the context digest
+(distinguished the original call from the repair at the same `model_turn`),
+3b-1's safe-failure path (one repair consumed, then a clean `FAILED_SAFE`
+instead of a crash), and `record_plan` reconciliation (it parsed both
+times — the failure was in the domain tool call, downstream).
+
+**The blocker.** `parse_tool_call` failed identically on both calls:
+`"tool: Unable to extract tag using discriminator 'tool'"` — Claude never
+included the `tool` field in its domain-tool arguments. The schema was not
+malformed: `tool` was present in `properties` and forced into `required`,
+but pydantic's own `model_json_schema()` also gave it a `"default"`
+(confirmed, by set comprehension over all five domain schemas, to be the
+*only* property carrying one) — a required field that also names its own
+default reads as omittable. Fixed by dropping only the wire schema's
+`"default"` key (`live_model.py`'s `_domain_tool_definitions`); `"const"`
+and the forced `required` entry are untouched, so `parse_tool_call`'s
+confused-deputy check (`call.name` against `arguments.tool.value`) still
+compares two independently-validated values, not one injected from the
+other. `tests/unit/test_live_model.py`'s `test_domain_tool_schemas_drop_
+default_but_keep_const_and_required` and `tests/unit/test_tool_calls.py`'s
+`test_a_call_missing_the_tool_discriminator_is_refused` pin this offline;
+whether it actually changes what Claude sends is unconfirmed until the
+next live call — deliberately the *only* change to the discriminator path
+this unit made, so that call's evidence is unambiguous about what worked.
+
+**Open gap, recorded not fixed:** the repair turn's entire correction
+message was a bare pydantic-error fragment — `": Unable to extract tag
+using discriminator 'tool'"`, an empty `loc` and no guidance a model could
+act on — and it is a second, independent candidate cause of the smoke
+call's failure alongside the schema defect above: even a perfectly fixed
+schema gives a model nothing to correct from if the repair prompt itself
+carries no actionable text. Left unfixed on the owner's explicit ruling —
+if the schema fix works, the first call succeeds and the repair never
+runs, so improving the repair message changes no observed outcome in that
+case, and fixing both at once would leave two variables in flight for one
+live call's evidence to separate instead of one.
+
+**The calibration.** The failed INITIAL_PLAN turn still composed and
+billed real tokens: 9,249 characters sent (1,511 prose + 7,738
+pre-3b-3 tool-definition payload), 4,099 tokens billed by the provider — a
+real ratio of about 2.26 characters per token. The OLD estimate
+(`PESSIMISTIC_CHARS_PER_TOKEN = 3.0`) would have estimated 3,084 tokens for
+that same request (`_send` estimates prose and tools as two separate
+ceiling divisions, 504 + 2,580 — not one combined division over 9,249
+characters, which would give 3,083) — *below* the 4,099 actually billed,
+a 33% undercount.
+Both settled rows still held `actual_usd <= reserved_usd` only because
+output stayed under its allowance on both calls (878 and 1,248 of the
+1,600-token allowance); at saturation, the same request would have
+measurably violated the invariant ($0.024198 actual against $0.022168
+reserved) — exactly the risk the correctness reviewer flagged algebraically
+during Unit 3b-2, now measured rather than argued.
+
+**The replan, owner-approved, 100% buffer over the one measured point:**
+
+| Constant | Was | Now |
+|---|---:|---:|
+| `pricing.PESSIMISTIC_CHARS_PER_TOKEN` | 3.0 | 1.0 |
+| `pricing.MAX_INPUT_TOKENS` | 3,200 | 9,600 |
+| `cli.DEFAULT_LIVE_EVALUATION_MAX_USD` / `.env.example` | 2.00 | 5.00 |
+
+`MAX_INPUT_TOKENS` moved specifically to hold the *character* budget the
+cap actually exists to bound at 9,600 (3,200 × 3.0 = 9,600 = 9,600 × 1.0):
+the cap's job was never really "N tokens," it was always "N characters of
+prose," and a ratio change without a matching cap change would have
+silently re-tightened it — `pricing.py`'s own comments on both constants
+now say so, and `test_pricing.py`'s `test_the_input_cap_preserves_the_
+intended_9600_character_prose_budget` pins the 9,600-character figure
+directly rather than deriving it from the two constants it is meant to
+guard.
+
+**Why the tool schema stays out of `MAX_INPUT_TOKENS` — corrected.** An
+earlier version of this argument (both in this document and, before it, in
+Unit 3b-2's own unpinned "512 tokens" claim) used a FINAL_ASSESSMENT turn
+with zero evidence as its example and concluded folding the ~7,595-token
+tool schema into the cap "would refuse ordinary runs." That conclusion did
+not follow from its own numbers: at 1,280 tokens of prose against a
+9,600 − 7,595 = 2,005-token folded headroom, that specific turn is
+*admitted* (1,280 < 2,005), not refused — the same defect (512 < 620) was
+present in the original figure and survived the rewrite to the new one.
+The claim is still true, on the right example: `Budgets.runbook_passages`
+(5) retrieved passages at `RunbookPassage.content`'s own `max_length`
+(800) are still present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
+`_make_final_assessment` rebuilds and re-renders passages from state on
+every stage, not just the one that retrieved them — and measure to 5,465
+characters/tokens, well over the 2,005-token folded headroom. Measured
+directly and pinned by `test_live_model.py`'s
+`test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
+not asserted from the zero-evidence case that cannot support it.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"
@@ -2360,10 +2486,11 @@ investigation cap.
 
 That design is superseded by `TECHNICAL_SPEC.md` §10: **at most six held-out
 paired incidents** (one no-tool baseline and one tool-enabled run each) under
-a single **USD 2.00 application-wide ceiling**, covering both standalone and
-paired runs together rather than separate caps. The escalation path is
-explicitly excluded from scored runs; HITL is demonstrated and tested
-separately.
+a single **USD 5.00 application-wide ceiling** (raised from USD 2.00 by
+Unit 3b-3 -- see "The smoke call's findings" above), covering both
+standalone and paired runs together rather than separate caps. The
+escalation path is explicitly excluded from scored runs; HITL is
+demonstrated and tested separately.
 
 Kept here rather than deleted because the scope change — 24 runs to 6, two
 caps to one — is something a reader who remembers the original number will

@@ -401,11 +401,24 @@ Evaluate three distinct purposes:
 The live comparison is a predefined paired set of at most six held-out
 incidents: one no-tool baseline and one tool-enabled run per incident. It must
 not invoke the escalation path; HITL is demonstrated and tested separately.
-`LIVE_EVALUATION_MAX_USD=2.00` is an application-wide hard ceiling. Before each
+`LIVE_EVALUATION_MAX_USD=5.00` is an application-wide hard ceiling. Before each
 provider request, persist a conservative reservation using the pricing snapshot
 and the request's bounded input/output allowance. Do not send a request that
 would exceed the remaining ceiling. Provider-reported usage settles the
 reservation; ambiguous requests retain it and are never repeated.
+
+*Amendment, Unit 3b-3:* the original figure was `LIVE_EVALUATION_MAX_USD=
+2.00`. The owner's first live call (`TECHNICAL_OVERVIEW.md`'s "The smoke
+call's findings") measured the pessimistic input-token estimate
+undercounting the provider's real bill by 33% at the original
+`PESSIMISTIC_CHARS_PER_TOKEN` ratio; the ratio was tightened in response
+(3.0 to 1.0, a 100% buffer over the one measured point), which roughly
+triples the reservation's input-token component (~1.8x the total
+worst-case dollar reservation, since the fixed output-token allowance
+dominates every reservation; ~1.54x for the smoke call's own turn shape).
+`5.00` preserves the same "six held-out pairs plus room for reruns"
+headroom this ceiling was always meant to leave, re-derived against the
+larger reservation rather than picked to make the new math comfortable.
 
 Mechanical scores remain:
 
@@ -471,10 +484,11 @@ a separate portfolio milestone.
 3. **Local retrieval and evidence-backed portfolio release.** Add curated
    FTS5 runbooks, retrieval provenance, and injection/no-ground-truth-leakage
    tests, deferred here from Milestone 2 by the amendment above. Run the
-   fixed paired evaluation under the USD 2 cap, save raw records and
-   limitations, produce architecture and threat-model documents, verify the
-   clean source commit, and record a short diagnosis plus
-   abstention/escalation demo.
+   fixed paired evaluation under the USD 5 cap (raised from USD 2 by the
+   *Amendment, Unit 3b-3* in §10), save raw records and limitations,
+   produce architecture and threat-model documents, verify the clean
+   source commit, and record a short diagnosis plus abstention/escalation
+   demo.
 
 Every work unit must preserve a runnable, tested existing path. Do not begin a
 later milestone while a P0/P1 finding, owner disposition, or regression remains

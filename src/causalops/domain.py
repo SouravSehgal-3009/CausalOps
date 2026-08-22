@@ -135,7 +135,7 @@ class ReasonCode(StrEnum):
     # whether raising `Budgets.model_calls` would even help (it would not).
     COST_CEILING_EXCEEDED = "COST_CEILING_EXCEEDED"
     # Unit 3b-2. The rendered request's pessimistic token estimate exceeded
-    # the 3,200-token input cap (`pricing.MAX_INPUT_TOKENS`,
+    # the 9,600-token input cap (`pricing.MAX_INPUT_TOKENS`,
     # `TECHNICAL_OVERVIEW.md`'s "Default limits" table). Its own code, not
     # `COST_CEILING_EXCEEDED`: one is about a dollar balance across every
     # run this application has made, the other is about one request's shape

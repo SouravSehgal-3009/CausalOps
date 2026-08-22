@@ -280,12 +280,15 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
 # three is the *smallest* plausible ceiling to fall back to, so silently
 # defaulting on them can only make the gate stricter than the value
 # suggested, never more permissive. What this fallback does *not* catch: a
-# well-formed positive number that is simply the wrong one -- `200` typed
-# for `2.00` parses cleanly and is honoured as written, the same as any
+# well-formed positive number that is simply the wrong one -- `500` typed
+# for `5.00` parses cleanly and is honoured as written, the same as any
 # other config value. Guarding against a fat-fingered magnitude is the
 # owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
-# intent.
-DEFAULT_LIVE_EVALUATION_MAX_USD = 2.00
+# intent. Unit 3b-3: raised from 2.00 to 5.00, re-derived from the smoke
+# call's measured per-call reservation size after `pricing.py`'s ratio
+# replan (see that module's `PESSIMISTIC_CHARS_PER_TOKEN` comment) --
+# `TECHNICAL_SPEC.md` §10 carries the same amendment.
+DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
 
