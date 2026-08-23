@@ -631,9 +631,9 @@ def test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason
     None
 ):
     """Post-freeze review, P2-2, the FINAL_ASSESSMENT-side sibling of
-    `test_an_ambiguous_reservation_refusal_reports_its_own_reason_not_
-    internal_error` above -- same reasoning as the cost-ceiling pair: the
-    INVESTIGATE-side test alone cannot exercise `final_assessment`'s own
+    `test_an_ambiguous_reservation_refusal_reports_its_own_reason` above --
+    same reasoning as the cost-ceiling pair: the INVESTIGATE-side test
+    alone cannot exercise `final_assessment`'s own
     `except (CostCeilingExceeded, InputTooLarge, AmbiguousReservationNot
     Resent)` tuple, since a raise on turn 0's `propose` never lets the run
     reach that handler."""

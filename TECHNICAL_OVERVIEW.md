@@ -2965,6 +2965,125 @@ sibling packet-mismatch test's docstring points readers to for the `_rebuild_sto
 explanation, did not actually contain it — fixed by stating the explanation there directly
 (see "Second dual review on `a44bf57`" above for the full trace).
 
+### Round 7 and round 8 review — non-finite values, topology comment overclaim, JSON token rejection
+
+**Round 7 landed as `7008534` with no `TECHNICAL_OVERVIEW.md` update of its own — the same gap
+round 4 shipped with, backfilled here together with round 8's own fixes on top of it.** Round 8
+was a whole-branch review (20 mutations against load-bearing code from every prior round, 19
+caught, no P0/P1 anywhere) that found two real P2s, both in round 7's own newest code, plus four
+smaller items.
+
+**Round 7 — `read_sample` rejects non-finite metric readings.** `float()` parses `"NaN"`,
+`"Infinity"`, and an overflow literal like `"1e400"` without raising, and `histogram_quantile`
+(`GATEWAY_LATENCY_P95`) is documented to return NaN over an all-zero-rate bucket — a realistic
+quiet-minute case, not an exotic one. A NaN sample made `max()` in `run_metric_check`
+order-dependent (a genuine peak could be silently replaced depending only on where the NaN
+sample sat in the fetched list), and both non-finite kinds serialize outside the JSON spec.
+`read_sample` now checks `math.isfinite` on both the timestamp and the value after parsing and
+returns `None` — the same "unreadable field, skip this row" contract it already applies to
+unparsable rows — instead of threading a Python `nan`/`inf` into a typed `MetricSample`.
+
+**Round 7 — `run_topology_check` gained an `assert fits(payload)` after both `trim_to_bytes`
+calls.** Unlike every other `trim_to_bytes` caller, this payload has no string-valued field
+(`services`/`edges` are lists; `service_count`/`edge_count`/`truncated` are int/bool), so
+`trim_to_bytes`'s own scalar-shrinking fallback is a true no-op here. A reviewer measured that
+the fallback's `widest_key is None` escape IS reached in normal operation (a realistic
+small-services/large-edges shape hits it), so this assert is real defense-in-depth, not
+decoration — see round 8's finding below for the more precise claim about whether it is
+*currently reachable*.
+
+**Round 7 — the wire-proof exemption registry's values were unchecked.**
+`_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` became a `dict[str, str]` in round 6 so an exemption
+could not be added without a stated reason, matching its two sibling registries — but the
+existing test only ever read `set(_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF)`, the dict's KEYS,
+never the values it exists to force. `test_every_wire_proof_exemption_carries_a_real_reason` now
+asserts every value is a non-empty stated reason. The registry is empty today, so this closes the
+enforcement gap for whenever an entry is first added, not a live gap today.
+
+**Round 8, P2 — `read_sample` didn't catch `OverflowError`.** `json.loads` produces a genuine
+Python `int` for a large integer literal in a JSON response (no decimal point or exponent, so
+`float()`'s string-parsing path — which rounds an oversized literal to `inf` rather than raising
+— is never involved). Converting a Python int that large to `float` raises `OverflowError`, which
+is *not* a subclass of `ValueError` — round 7's `except ValueError` alone missed it, so a single
+oversized integer sample escaped `read_sample`'s own "unreadable field, skip this row" contract
+entirely, propagated through `graph.py`'s blanket exception handler, and turned one bad sample
+into `FAILED_SAFE` for the whole investigation. Fixed by widening the except clause to
+`(ValueError, OverflowError)`. `test_read_sample_rejects_non_finite_readings` extended with an
+oversized-integer case on both the timestamp and the value position; mutation-verified (reverting
+to `except ValueError` alone reproduces the exact `OverflowError` traceback the finding describes).
+
+**Round 8, P2 — an all-NaN metric window read as confirmed zero, not as "nothing measured."**
+Once round 7's fix correctly drops non-finite samples, an all-NaN window (the same documented
+`histogram_quantile` quiet-minute case round 7's own fix cites) produces `sample_count: 0,
+max_value: 0.0` — bit-for-bit identical to a genuinely empty, valid Prometheus response. The
+model had no way to distinguish "measured zero" from "nothing measured," reopening the same
+problem class round 6's own P1 fix addressed (the summary not reflecting a data reduction) in a
+new shape. Fixed with a new `ParsedSamples` type (`prometheus.py`) carrying `raw_count` — how
+many rows Prometheus actually sent — alongside the surviving samples; `run_metric_check` computes
+`readings_discarded = raw_count - len(samples)` and appends a distinct `" (N unreadable,
+discarded)"` note to the summary, deliberately separate from `" (truncated)"` (truncation means
+"more data than fit the budget"; this means "some of what was sent could not be read at all" —
+conflating the two would tell the model the wrong story). Two new tests: an all-NaN window
+(`readings_discarded == 3`, summary names it, distinct from a genuinely empty response) and the
+partially-NaN case folded into the existing end-to-end NaN test (`readings_discarded == 1`).
+Mutation-verified (blanking the discard note makes both tests fail for the right reason).
+
+**Round 8, P3 — the topology assert's own comment overclaimed which of two siblings was "load-
+bearing."** `run_changes_check`'s assert comment called `run_topology_check`'s sibling "the
+genuinely load-bearing one." A reviewer measured directly (120 randomized trials, 5 adversarial
+shapes, and a mutation test disabling the topology assert entirely — all tests still passed) that
+it is currently unreachable too, for the same reason as its sibling: both lists can always be
+popped to empty, and the remaining fixed structure (85 bytes) is far under the 12,288-byte cap.
+Both comments reworded to state both asserts are currently unreachable defense-in-depth — the
+topology one is still worth keeping because it is the one function with no string field left
+standing if the byte math or the lab data shape ever changed, which is a real reason to keep it,
+not evidence it is load-bearing today.
+
+**Round 8, P3 — `schema_accepts`'s coverage check tracked keywords but not `type` values.**
+`test_schema_accepts_implements_every_keyword_the_real_schemas_use` (`test_live_model.py`)
+collects every JSON Schema *keyword* the real emitted schemas use and asserts each is handled or
+allowlisted — but never collected the *values* of the `type` keyword itself. Today's schemas only
+use `["array", "integer", "null", "object", "string"]`, all handled, so there was no live gap —
+but a future field emitting `"type": "number"` would fall through `schema_accepts`'s `kind ==`
+branches to a default `return True, ""`, silently accepting any value, while the coverage test
+would still pass (`"type"` the keyword is recognized regardless of which value it holds).
+`_collect_schema_keywords` now returns `(keywords, type_values)` from the same traversal; the
+coverage test asserts both. A new direct test,
+`test_the_type_coverage_check_catches_an_unhandled_type_value`, proves the mechanism against a
+synthetic `{"type": "number"}` schema. Mutation-verified (dropping `"integer"` from
+`_SCHEMA_ACCEPTS_HANDLED_TYPES` fails the coverage test, naming the real schemas' actual `type`
+value).
+
+**Round 8, P2 (found by a second, independent static reviewer — codex — reproduced directly
+before folding in) — `read_json_file`/`read_json_line` accepted the same non-standard JSON
+tokens `read_sample` was hardened against.** `json.loads` accepts `NaN`/`Infinity`/`-Infinity` by
+default — an extension beyond RFC-8259 most other JSON readers reject — and neither of
+`telemetry.py`'s two general-purpose parsers (the entry point for every log line, the changes
+manifest, and the topology manifest) passed a `parse_constant` callback to refuse them. A
+poisoned token would parse into an ordinary-looking Python `nan`/`inf` float instead of the
+record/manifest being refused the same way any other malformed input already is. Fixed with
+`_reject_non_finite_json_token`, a `parse_constant` callback raising `ValueError`, passed to both
+`json.loads` calls; both except clauses widened to `ValueError` (which `json.JSONDecodeError`
+already subclasses, so this is a simplification, not an addition). For a log line, one poisoned
+row is skipped like any other malformed line (`run_logs_check`'s existing `continue`); for a
+changes/topology manifest, the token can sit anywhere in the file, so the whole manifest becomes
+unreadable (`ToolOutcome.UNAVAILABLE`) rather than one field being silently poisoned — a stronger
+consequence than the line-level case, and tested as such. Five new tests cover both parsers
+directly and all three call sites end-to-end (`run_logs_check`, `run_changes_check`,
+`run_topology_check`); each mutation-verified by reverting to the bare `json.loads` call and
+confirming the corresponding new test fails for the right reason. `incident.json`/`report.json`
+are loaded through a separate path (`cli.py`'s `_load_stored_artifact`), not through either
+function here, and were out of this round's scope.
+
+**Round 8, P3 — a docstring cited a sibling test by a name that never existed.**
+`test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason` (`test_graph.py`)
+called itself the sibling of
+`test_an_ambiguous_reservation_refusal_reports_its_own_reason_not_internal_error` — a name that
+does not exist; the real sibling, a few hundred lines above, is
+`test_an_ambiguous_reservation_refusal_reports_its_own_reason`, with no `_not_internal_error`
+suffix (that suffix is real on the analogous cost-ceiling pair, which this docstring appears to
+have been copied from). Citation corrected.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

@@ -32,6 +32,7 @@ from causalops.evidence import MAX_RESULT_BYTES
 from causalops.prometheus import (
     MAX_METRIC_SAMPLES,
     MetricSample,
+    ParsedSamples,
     parse_samples,
     read_sample,
     run_metric_check,
@@ -40,6 +41,8 @@ from causalops.telemetry import (
     MAX_LOG_ROWS,
     RunPaths,
     _registered_check_runner,
+    read_json_file,
+    read_json_line,
     run_changes_check,
     run_logs_check,
     run_topology_check,
@@ -304,7 +307,9 @@ def test_a_service_name_that_could_reach_promql_is_refused() -> None:
 
 def test_an_unreadable_prometheus_answer_is_an_error() -> None:
     assert parse_samples({"status": "error"}) is None
-    assert parse_samples({"status": "success", "data": {"result": []}}) == []
+    assert parse_samples(
+        {"status": "success", "data": {"result": []}}
+    ) == ParsedSamples([], 0)
     assert parse_samples("nonsense") is None
 
 
@@ -313,13 +318,26 @@ def test_read_sample_rejects_non_finite_readings() -> None:
     literal like "1e400" into non-finite floats without raising -- so
     those used to become an ordinary-looking `MetricSample`. `float()`
     also accepts a bare numeric NaN/inf for the timestamp field, so both
-    positions are checked."""
+    positions are checked.
+
+    Round 8 review, P2. `float()` on a STRING that overflows (`"1e400"`,
+    above) rounds to `inf` without raising -- caught by the `isfinite`
+    check below. `float()` on a Python `int` that is too large to
+    represent raises `OverflowError` INSTEAD, which is not a subclass of
+    `ValueError` -- `json.loads` produces a genuine Python `int` for a
+    large integer literal with no decimal point or exponent, so this is
+    reachable from a real Prometheus response, not just a synthetic case.
+    Both the timestamp and value positions are checked, matching the two
+    `float()` calls in the same `try` block."""
     assert read_sample([0, "NaN"]) is None
     assert read_sample([0, "Infinity"]) is None
     assert read_sample([0, "-Infinity"]) is None
     assert read_sample([0, "1e400"]) is None  # overflows to inf
     assert read_sample([float("nan"), "0.5"]) is None
     assert read_sample([float("inf"), "0.5"]) is None
+    huge_int = 10**400
+    assert read_sample([huge_int, "0.5"]) is None  # OverflowError on `at`
+    assert read_sample([0, huge_int]) is None  # OverflowError on `value`
     assert read_sample([0, "0.5"]) == MetricSample(at=0.0, value=0.5)
 
 
@@ -340,10 +358,10 @@ def test_a_nan_sample_does_not_win_the_reported_peak_regardless_of_position() ->
         "data": {"result": [{"values": [[0, "NaN"], [1, "0.1"], [2, "0.9"]]}]},
     }
     for answer in (nan_after_the_peak, nan_before_the_peak):
-        samples = parse_samples(answer)
-        assert samples is not None
-        assert len(samples) == 2
-        assert max(sample.value for sample in samples) == 0.9
+        parsed = parse_samples(answer)
+        assert parsed is not None
+        assert len(parsed.samples) == 2
+        assert max(sample.value for sample in parsed.samples) == 0.9
 
 
 @contextmanager
@@ -377,7 +395,11 @@ def _serve_fixed_prometheus_body(body: bytes) -> Iterator[str]:
 def test_a_metric_checks_reported_peak_survives_a_nan_sample_end_to_end() -> None:
     """Same claim as the `parse_samples`-level test above, exercised through
     `run_metric_check`'s full pipeline (including the post-trim
-    `payload["max_value"]` rebuild) rather than only the parsing layer."""
+    `payload["max_value"]` rebuild) rather than only the parsing layer.
+
+    Round 8 review, P2. This is also the partially-NaN case for
+    `readings_discarded`: 3 raw rows, 1 unreadable, 2 kept -- the summary
+    must name the 1 discarded reading, distinct from `(truncated)`."""
     body = json.dumps(
         {
             "status": "success",
@@ -389,6 +411,52 @@ def test_a_metric_checks_reported_peak_survives_a_nan_sample_end_to_end() -> Non
 
     assert outcome.payload["sample_count"] == 2
     assert outcome.payload["max_value"] == 0.9
+    assert outcome.payload["readings_discarded"] == 1
+    assert outcome.payload["truncated"] is False
+    assert "1 unreadable, discarded" in outcome.summary
+
+
+def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
+    """Round 8 review, P2. `histogram_quantile` (GATEWAY_LATENCY_P95) is
+    documented to return NaN over an all-zero-rate bucket -- a realistic
+    "quiet minute," not an exotic input. Once round 7's fix correctly
+    drops every non-finite sample, an all-NaN window produces
+    `sample_count: 0, max_value: 0.0` -- which, without `readings_
+    discarded`, is bit-for-bit identical to a genuinely empty, valid
+    response (`test_an_unreadable_prometheus_answer_is_an_error`'s `{
+    "result": []}` case). A model reading only the summary could not tell
+    "confirmed zero, nothing measured was wrong" from "every reading this
+    window returned was unreadable" -- exactly the ambiguity round 6's own
+    `truncated` fix closed for the byte-trim case, reopened here in a new
+    shape."""
+    body = json.dumps(
+        {
+            "status": "success",
+            "data": {"result": [{"values": [[0, "NaN"], [1, "NaN"], [2, "Infinity"]]}]},
+        }
+    ).encode("utf-8")
+    with _serve_fixed_prometheus_body(body) as url:
+        outcome = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert outcome.payload["sample_count"] == 0
+    assert outcome.payload["max_value"] == 0.0
+    assert outcome.payload["readings_discarded"] == 3
+    assert "3 unreadable, discarded" in outcome.summary
+
+    empty_body = json.dumps(
+        {"status": "success", "data": {"result": [{"values": []}]}}
+    ).encode("utf-8")
+    with _serve_fixed_prometheus_body(empty_body) as url:
+        genuinely_empty = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert genuinely_empty.payload["sample_count"] == 0
+    assert genuinely_empty.payload["max_value"] == 0.0
+    assert genuinely_empty.payload["readings_discarded"] == 0
+    assert "unreadable, discarded" not in genuinely_empty.summary
+    # The two summaries must differ -- this is the actual claim: a reader
+    # (or the model) can no longer confuse "confirmed zero" with "every
+    # reading was unreadable" from the summary text alone.
+    assert outcome.summary != genuinely_empty.summary
 
 
 def test_a_log_query_returns_only_matching_rows_in_the_window(tmp_path: Path) -> None:
@@ -1098,3 +1166,106 @@ def test_the_config_reload_filter_matches_config_loaded_events(tmp_path: Path) -
     assert outcome.outcome is ToolOutcome.EXECUTED
     assert outcome.payload["row_count"] == 1
     assert outcome.payload["event_codes"] == "config_loaded"
+
+
+def test_read_json_line_rejects_non_finite_tokens() -> None:
+    """Round 8 review (codex). `json.loads` accepts the non-standard
+    `NaN`/`Infinity`/`-Infinity` tokens by default -- an extension beyond
+    RFC-8259 most other JSON readers reject. Without `parse_constant`
+    refusing them, a NaN token anywhere in a log line would parse into an
+    ordinary-looking Python `nan` float instead of the line being refused
+    the same way any other malformed line already is."""
+    assert read_json_line('{"value": NaN}') is None
+    assert read_json_line('{"value": Infinity}') is None
+    assert read_json_line('{"value": -Infinity}') is None
+    assert read_json_line('{"value": 1}') == {"value": 1}
+
+
+def test_read_json_file_rejects_non_finite_tokens(tmp_path: Path) -> None:
+    """Same claim as the line-reader test above, for the manifest reader
+    `run_changes_check`/`run_topology_check` both use."""
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"edges": [], "weight": NaN}', encoding="utf-8")
+    assert read_json_file(manifest) is None
+
+    manifest.write_text('{"edges": [], "weight": 1}', encoding="utf-8")
+    assert read_json_file(manifest) == {"edges": [], "weight": 1}
+
+
+def test_a_log_line_with_a_non_finite_token_is_skipped_not_crashed(
+    tmp_path: Path,
+) -> None:
+    """Round 8 review, codex finding, independently reproduced. Before this
+    fix, `read_json_line`'s bare `json.loads` accepted a NaN/Infinity token
+    anywhere in a log line and returned an ordinary-looking record carrying
+    a Python `nan`/`inf` float. Confirms the poisoned line is now skipped
+    the same way any other malformed line already is (`read_json_line`
+    returning `None`, `continue`d over), not that the whole check fails or
+    that the bad value silently reaches `payload["rows"]`."""
+    paths = RunPaths(root=tmp_path)
+    poisoned_row: dict[str, object] = {
+        "at": (WINDOW_START + timedelta(seconds=2)).isoformat(),
+        "request_id": "r2",
+        "service": "orders",
+        "severity": "error",
+        "event": "config_rejected_request",
+        "fields": {"config_key": "require_order_token", "detail": float("nan")},
+    }
+    write_log(paths, [log_row(1), poisoned_row])
+
+    outcome = run_logs_check(logs_arguments(), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+
+
+def test_a_changes_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -> None:
+    """Same codex finding as the log-line test above, for `run_changes_
+    check`'s whole-manifest reader (`read_json_file`): the non-standard
+    token can sit anywhere in the file, not just in a field this function
+    reads, so the entire manifest becomes unreadable rather than one row
+    being silently poisoned."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": "change",
+                    "risk_score": float("nan"),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.UNAVAILABLE
+    assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_a_topology_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -> None:
+    """Same codex finding, for `run_topology_check`'s manifest reader."""
+    paths = RunPaths(root=tmp_path)
+    paths.topology_file.write_text(
+        json.dumps(
+            {
+                "services": list(SERVICES),
+                "edges": ["gateway>orders"],
+                "weight": float("inf"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert outcome.outcome is ToolOutcome.UNAVAILABLE
+    assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE

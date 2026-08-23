@@ -63,18 +63,41 @@ class RunPaths(BaseModel):
         return self.root / "incident.json"
 
 
+def _reject_non_finite_json_token(token: str) -> JsonValue:
+    """`json.loads` accepts the non-standard tokens `NaN`/`Infinity`/
+    `-Infinity` by default -- an extension beyond RFC-8259 most other JSON
+    readers reject. Passed as `parse_constant`, this makes `read_json_file`/
+    `read_json_line` refuse them the same way they already refuse anything
+    else unreadable, instead of silently threading a Python `nan`/`inf`
+    float into a typed record. `prometheus.py`'s `read_sample` was hardened
+    against this same token class in metric API responses; these two
+    functions are the general JSON-parsing entry point for every file this
+    module reads -- logs (`read_json_line`, `run_logs_check`), changes and
+    topology (`read_json_file`, `run_changes_check`/`run_topology_check`)
+    -- so without this, any of those could carry a NaN/Infinity token and
+    have it silently propagate. (`incident.json`/`report.json` go through a
+    separate loader, `cli.py`'s `_load_stored_artifact`, not through
+    either function here.)"""
+    raise ValueError(f"non-standard JSON token {token!r} is not accepted")
+
+
 def read_json_file(path: Path) -> JsonValue | None:
     try:
-        loaded: JsonValue = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        loaded: JsonValue = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_non_finite_json_token,
+        )
+    except (OSError, ValueError):  # json.JSONDecodeError subclasses ValueError
         return None
     return loaded
 
 
 def read_json_line(line: str) -> dict[str, JsonValue] | None:
     try:
-        record: JsonValue = json.loads(line)
-    except json.JSONDecodeError:
+        record: JsonValue = json.loads(
+            line, parse_constant=_reject_non_finite_json_token
+        )
+    except ValueError:  # json.JSONDecodeError subclasses ValueError
         return None
     return record if isinstance(record, dict) else None
 
@@ -278,9 +301,18 @@ def run_changes_check(
     # for `trim_to_bytes`'s own scalar fallback to shrink, so `fits()`
     # cannot come back `False` at this point). Kept anyway as harmless
     # defense-in-depth: it costs nothing at runtime and would catch a
-    # future change to this rebuild that broke the reasoning above. The
-    # genuinely load-bearing sibling of this check is in
-    # `run_topology_check`, the one function with no string field at all.
+    # future change to this rebuild that broke the reasoning above.
+    #
+    # Round 8 review, P3. This assert's sibling in `run_topology_check`
+    # was, at one point, described as "the genuinely load-bearing one" by
+    # contrast with this one -- wrong: a reviewer measured directly (120
+    # randomized trials, 5 adversarial shapes, and a mutation test
+    # disabling the topology assert entirely) that IT is unreachable too,
+    # today, for the same reason any `run_topology_check` payload converges
+    # once both lists are trimmable to empty. Both asserts are currently
+    # unreachable defense-in-depth, not one provably-needed and one
+    # decorative -- see the topology assert's own comment for why it is
+    # still worth keeping despite that.
     assert fits(payload), (
         "rebuilding summaries from the post-trim changes list must not "
         "grow the payload back over the byte bound"
@@ -384,13 +416,23 @@ def run_topology_check(
     # `widest_key is None` escape IS reached in normal operation (a
     # realistic small-services/large-edges shape hits it inside the
     # `edges` call, while `services` is still its full, untrimmed size) --
-    # not just hypothetically. The two-call sequence still converges to a
-    # fitting payload in every case tried (300+ random trials plus several
-    # adversarial ones, see this round's freeze report), because each
-    # list can always be popped to empty and the remaining fixed structure
-    # is tiny -- but nothing else in this function proves that, so this
-    # assert is the actual safety net for the one payload shape in this
-    # codebase where the fallback cannot help.
+    # not just hypothetically.
+    #
+    # Round 8 review, P3. The paragraph above used to go on to call this
+    # assert "the actual safety net" for that shape -- overclaiming what
+    # was actually verified. A reviewer measured directly (120 randomized
+    # trials, 5 adversarial shapes, and a mutation test that disabled this
+    # assert entirely) that it is currently UNREACHABLE, same as its
+    # sibling in `run_changes_check`: both lists can always be popped to
+    # empty, and the remaining fixed structure (85 bytes) is far under the
+    # 12,288-byte cap, so `fits(payload)` is always true by the time this
+    # line runs. What the reachability finding above actually supports is
+    # narrower: the fallback's escape hatch fires in real cases, so THIS
+    # function -- alone among `trim_to_bytes`'s callers -- has no string
+    # field left standing if the byte math or the shape of lab data ever
+    # changed enough to make that stop being true. That is a real reason to
+    # keep this assert as defense-in-depth; it is not evidence the assert
+    # is load-bearing today.
     assert fits(payload), (
         "trimming both edges and services down to empty must still leave "
         "a payload under the byte bound -- this function has no string "

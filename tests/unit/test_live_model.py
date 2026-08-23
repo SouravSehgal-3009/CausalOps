@@ -1355,29 +1355,62 @@ _SCHEMA_ACCEPTS_ANNOTATION_KEYWORDS = frozenset(
         "default",
     }
 )
+# Round 8 review, P3. The KEYWORD `"type"` being recognized (above) is a
+# different claim from every VALUE it can take being one `schema_accepts`
+# actually branches on. Today's real schemas only ever use `"null"`,
+# `"object"`, `"array"`, `"string"`, `"integer"` -- all five handled below
+# -- so there is no live gap. But a future field emitting `"type":
+# "number"` (a float field, say) would fall through every `kind ==` branch
+# in `schema_accepts` to its final `return True, ""` -- silently accepting
+# any value -- while the KEYWORD-level coverage test above it would still
+# pass, since `"type"` itself is allowlisted regardless of which value it
+# holds. `_collect_schema_keywords` below collects both.
+_SCHEMA_ACCEPTS_HANDLED_TYPES = frozenset(
+    {"null", "object", "array", "string", "integer"}
+)
 
 
-def _collect_schema_keywords(node: dict[str, Any]) -> set[str]:
+def _collect_schema_keywords(node: dict[str, Any]) -> tuple[set[str], set[str]]:
     """Walks one schema node the same way `schema_accepts` itself
     navigates it -- `properties`/`$defs` VALUES are nested schemas to
     recurse into, but their own keys are arbitrary field/type names picked
     by a domain model, never JSON Schema keywords, so they are deliberately
     NOT collected (unlike a naive "every dict key anywhere" walk, which
     would pollute the result with names like `"hypotheses"` or
-    `"stop_reason"` and make this assertion fail for the wrong reason)."""
+    `"stop_reason"` and make this assertion fail for the wrong reason).
+
+    Returns `(keywords, type_values)` from the same traversal: the
+    KEYWORDS a schema uses, and separately, every VALUE its `"type"`
+    keyword actually takes (`"string"`, `"integer"`, ...) -- see
+    `_SCHEMA_ACCEPTS_HANDLED_TYPES`'s comment for why the two need
+    checking separately."""
     keywords = set(node.keys())
+    types: set[str] = set()
+    kind = node.get("type")
+    if isinstance(kind, str):
+        types.add(kind)
+    elif isinstance(kind, list):
+        types.update(value for value in kind if isinstance(value, str))
     if "anyOf" in node:
         for sub in node["anyOf"]:
-            keywords |= _collect_schema_keywords(sub)
+            sub_keywords, sub_types = _collect_schema_keywords(sub)
+            keywords |= sub_keywords
+            types |= sub_types
     if "properties" in node:
         for sub in node["properties"].values():
-            keywords |= _collect_schema_keywords(sub)
+            sub_keywords, sub_types = _collect_schema_keywords(sub)
+            keywords |= sub_keywords
+            types |= sub_types
     if "items" in node:
-        keywords |= _collect_schema_keywords(node["items"])
+        sub_keywords, sub_types = _collect_schema_keywords(node["items"])
+        keywords |= sub_keywords
+        types |= sub_types
     if "$defs" in node:
         for sub in node["$defs"].values():
-            keywords |= _collect_schema_keywords(sub)
-    return keywords
+            sub_keywords, sub_types = _collect_schema_keywords(sub)
+            keywords |= sub_keywords
+            types |= sub_types
+    return keywords, types
 
 
 def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
@@ -1389,15 +1422,23 @@ def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
     `"minimum"`/`"maximum"` from `_SCHEMA_ACCEPTS_HANDLED_KEYWORDS` alone
     (the real `schema_accepts` implementation untouched) fails this test,
     proving it is sensitive to exactly the class of drift that dropped all
-    four keywords between the scratch script and this file."""
+    four keywords between the scratch script and this file.
+
+    Round 8 review, P3. Also asserts on the second half of
+    `_collect_schema_keywords`'s return: every VALUE the real schemas'
+    `"type"` keyword takes must be one `schema_accepts` has a branch for,
+    not just a keyword the mirror above recognizes by name."""
     tools = [
         *_domain_tool_definitions(),
         _plan_tool_definition(),
         _final_assessment_tool_definition(),
     ]
     real_keywords: set[str] = set()
+    real_types: set[str] = set()
     for tool in tools:
-        real_keywords |= _collect_schema_keywords(tool["input_schema"])
+        keywords, types = _collect_schema_keywords(tool["input_schema"])
+        real_keywords |= keywords
+        real_types |= types
 
     known = _SCHEMA_ACCEPTS_HANDLED_KEYWORDS | _SCHEMA_ACCEPTS_ANNOTATION_KEYWORDS
     unhandled = real_keywords - known
@@ -1406,6 +1447,26 @@ def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
         "neither handles nor allowlists as non-constraining -- implement it "
         "or allowlist it with a stated reason"
     )
+
+    unhandled_types = real_types - _SCHEMA_ACCEPTS_HANDLED_TYPES
+    assert not unhandled_types, (
+        f"real emitted schemas use type value(s) {sorted(unhandled_types)}, "
+        "which schema_accepts has no `kind ==` branch for -- it would "
+        'silently fall through to `return True, ""` and accept any value'
+    )
+
+
+def test_the_type_coverage_check_catches_an_unhandled_type_value() -> None:
+    """Direct proof for the type-VALUE half of the coverage assertion
+    above, independent of whatever the real schemas happen to use today: a
+    synthetic schema carrying `"type": "number"`, a value
+    `_SCHEMA_ACCEPTS_HANDLED_TYPES` does not include, is picked up by
+    `_collect_schema_keywords`'s second return value -- proving the
+    mechanism would name a future unhandled type rather than let it hide
+    behind `"type"` the KEYWORD already being recognized."""
+    _keywords, types = _collect_schema_keywords({"type": "number"})
+    assert types == {"number"}
+    assert types - _SCHEMA_ACCEPTS_HANDLED_TYPES == {"number"}
 
 
 # label -> where the rule this payload violates actually lives, since the
