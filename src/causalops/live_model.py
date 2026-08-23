@@ -142,7 +142,7 @@ RECORD_FINAL_ASSESSMENT_TOOL_NAME = "record_final_assessment"
 # `hypotheses` field, because that one genuinely is guidance about how to
 # fill the field in, not implementation trivia.
 class PlanRecord(BaseModel):
-    # extra="forbid" rationale: see tools.py's QueryMetricArguments.
+    # `extra="forbid"` rationale: see `tools.py`'s `QueryMetricArguments`.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)

@@ -90,7 +90,7 @@ class QueryMetricArguments(BaseModel):
 
 
 class QueryLogsArguments(BaseModel):
-    # extra="forbid" rationale: see QueryMetricArguments above.
+    # `extra="forbid"` rationale: see `QueryMetricArguments` above.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.QUERY_LOGS] = ToolName.QUERY_LOGS
@@ -104,7 +104,7 @@ class QueryLogsArguments(BaseModel):
 
 
 class ListRecentChangesArguments(BaseModel):
-    # extra="forbid" rationale: see QueryMetricArguments above.
+    # `extra="forbid"` rationale: see `QueryMetricArguments` above.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.LIST_RECENT_CHANGES] = ToolName.LIST_RECENT_CHANGES
@@ -114,7 +114,7 @@ class ListRecentChangesArguments(BaseModel):
 
 
 class GetTopologyArguments(BaseModel):
-    # extra="forbid" rationale: see QueryMetricArguments above.
+    # `extra="forbid"` rationale: see `QueryMetricArguments` above.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.GET_TOPOLOGY] = ToolName.GET_TOPOLOGY
@@ -129,7 +129,7 @@ class SearchRunbooksArguments(BaseModel):
     policy decision with a reason code (`policy.py`'s new branch), not a
     silent schema rejection."""
 
-    # extra="forbid" rationale: see QueryMetricArguments above.
+    # `extra="forbid"` rationale: see `QueryMetricArguments` above.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.SEARCH_RUNBOOKS] = ToolName.SEARCH_RUNBOOKS

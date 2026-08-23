@@ -91,6 +91,23 @@ stage in every scenario here and feeds directly into
 in this file again, confirmed by running the suite before and after and
 updating only the six `final_context_digest` literals to match -- no other
 field in this file changed.
+
+**A later round moves every `final_context_digest` literal below a third
+time, and nothing else** -- the same mechanism as the two notes above.
+The sentence the previous round added was ambiguous: "respond with the
+tool call alone" reads naturally either as "no narrative text alongside
+the tool call" (the intended meaning) or as "make only one tool call"
+(wrong -- `live_model.py`'s `_plan_tool_definition` requires `record_plan`
+plus at most one domain tool on every INITIAL_PLAN/HYPOTHESIS_UPDATE
+turn, i.e. two tool calls is the normal shape). Reworded to "do not add
+narrative text, explanation, or commentary outside the tool call's own
+fields," which keeps the original intent and removes the cardinality
+reading. `system_text` is identical across every stage in every scenario
+here and feeds directly into `_render_stage_request`'s digest, so the
+reworded sentence shifts every digest in this file again, confirmed by
+running the suite before and after and updating only the six
+`final_context_digest` literals to match -- no other field in this file
+changed.
 """
 
 from pathlib import Path
@@ -473,7 +490,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "5653e526aac4001b92e829c8cfffe0809a200cd6862e2674958b2187ac7b170f"
+            "22b26c0e134a42d239391bf3d3bade7a077a6bcaf69b0165f02e5f2fb122c6e3"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -529,7 +546,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "0c6739028b3232cb2238dcb62d0e1fde311ffa352ae0e9ab0f44fd8adec1d90a"
+            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -586,7 +603,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "0c6739028b3232cb2238dcb62d0e1fde311ffa352ae0e9ab0f44fd8adec1d90a"
+            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -647,7 +664,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "fe9a4b4324e22be93c73f2cf4d9e8cf6c79e8358d867dba29129f4289a2e1b1b"
+            "b244c408007a5e5c90880fc64ea3e322619f7cdb481cec12bcba8d25767c44fa"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -697,7 +714,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "e066698bd6175c2fa8cc24bf6bd058c37556b47b5318b37ff86958340e5c1215"
+            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -784,7 +801,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "e066698bd6175c2fa8cc24bf6bd058c37556b47b5318b37ff86958340e5c1215"
+            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

@@ -386,7 +386,7 @@ class StoredIncident(BaseModel):
 class Hypothesis(BaseModel):
     """A possible cause and what would settle it. Rank is not a probability."""
 
-    # extra="forbid" rationale: see tools.py's QueryMetricArguments.
+    # `extra="forbid"` rationale: see `tools.py`'s `QueryMetricArguments`.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     root_cause: RootCauseCode
@@ -507,7 +507,7 @@ class HypothesisUpdate(BaseModel):
 class FinalAssessment(BaseModel):
     """The model's diagnosis or abstention. Its schema cannot express FAILED_SAFE."""
 
-    # extra="forbid" rationale: see tools.py's QueryMetricArguments.
+    # `extra="forbid"` rationale: see `tools.py`'s `QueryMetricArguments`.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: str = SCHEMA_VERSION

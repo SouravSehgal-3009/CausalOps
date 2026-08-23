@@ -55,8 +55,13 @@ def test_system_text_forbids_narrative_alongside_a_tool_call() -> None:
     investigation's only repair slot and fail the whole run safe. This
     pins the system prompt's own explicit instruction against that
     behaviour, so a future edit cannot silently drop the sentence that
-    exists to prevent it."""
-    assert "tool call alone" in SYSTEM_TEXT
+    exists to prevent it. The wording was reworded post-review from "the
+    tool call alone" (ambiguous between "no narrative text" and "exactly
+    one tool call", the latter reading being wrong -- this architecture
+    requires `record_plan` plus at most one domain tool on every
+    INITIAL_PLAN/HYPOTHESIS_UPDATE turn) to a phrasing that cannot be
+    misread as a cardinality limit."""
+    assert "do not add narrative text" in SYSTEM_TEXT
 
 
 def test_evidence_appears_with_its_opaque_id_inside_the_fence() -> None:

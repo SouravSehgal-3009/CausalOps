@@ -2470,19 +2470,23 @@ still true, on the right example: `Budgets.runbook_passages` (5) retrieved
 passages at `RunbookPassage.content`'s own `max_length` (800) are still
 present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
 `_make_final_assessment` rebuilds and re-renders passages from state on
-every stage, not just the one that retrieved them — and measure to 5,589
-characters/tokens (grew from 5,465 once the review round that closed the
-mixed-content/unknown-field gaps added one sentence to `SYSTEM_TEXT`
-forbidding narrative text alongside a tool call, since `SYSTEM_TEXT` is
-part of every rendered prose total). Measured directly and pinned by
-`test_live_model.py`'s
+every stage, not just the one that retrieved them — and measure to 5,577
+characters/tokens (grew from 5,465 to 5,589 once the review round that
+closed the mixed-content/unknown-field gaps added one sentence to
+`SYSTEM_TEXT` forbidding narrative text alongside a tool call, then
+shrank to 5,577 once a later round reworded that same sentence -- it read
+ambiguously as either "no narrative text" or "exactly one tool call," and
+the second reading is wrong for this architecture -- to remove the
+cardinality misreading without changing its intent; `SYSTEM_TEXT` is part
+of every rendered prose total, so each wording change moves this figure).
+Measured directly and pinned by `test_live_model.py`'s
 `test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
 not asserted from the zero-evidence case that cannot support it. Unit
 3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,589 still clears either
+is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,577 still clears either
 headroom value, so this conclusion is unaffected across every revision;
 the test above re-measures both figures directly rather than either one
 being carried by hand.
@@ -3109,7 +3113,7 @@ unsupported block is still refused alongside a real tool call. Second, an early 
 `extra="forbid"` to only some of the eight schema classes it now covers (`tools.py`'s five
 argument classes, `domain.py`'s `Hypothesis`/`FinalAssessment`, `live_model.py`'s `PlanRecord`) —
 the same "fix scoped to the instance touched, not every instance of the class" shape this
-document has recorded before (see "Round 4 and round 6 review" below). A model call reaching one
+document has recorded before (see "Round 4 and round 6 review" above). A model call reaching one
 of the missed classes could still smuggle an unrecognized field in and have it silently dropped
 under pydantic's default `extra="ignore"`, instead of surfacing as a named repair. Closed by
 applying `extra="forbid"` uniformly across all eight, each now carrying (or cross-referencing) a
