@@ -2470,15 +2470,19 @@ still true, on the right example: `Budgets.runbook_passages` (5) retrieved
 passages at `RunbookPassage.content`'s own `max_length` (800) are still
 present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
 `_make_final_assessment` rebuilds and re-renders passages from state on
-every stage, not just the one that retrieved them — and measure to 5,465
-characters/tokens. Measured directly and pinned by `test_live_model.py`'s
+every stage, not just the one that retrieved them — and measure to 5,589
+characters/tokens (grew from 5,465 once the review round that closed the
+mixed-content/unknown-field gaps added one sentence to `SYSTEM_TEXT`
+forbidding narrative text alongside a tool call, since `SYSTEM_TEXT` is
+part of every rendered prose total). Measured directly and pinned by
+`test_live_model.py`'s
 `test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
 not asserted from the zero-evidence case that cannot support it. Unit
 3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,465 still clears either
+is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,589 still clears either
 headroom value, so this conclusion is unaffected across every revision;
 the test above re-measures both figures directly rather than either one
 being carried by hand.
@@ -3089,6 +3093,28 @@ characters/tokens, leaving 2,363 tokens under the prose-only 9,600-token cap; th
 schema is 2,292. Strict schemas reject unknown tool, plan, hypothesis, and final-assessment fields.
 Native Anthropic tool-use responses may include `tool_use`, `thinking`, and `redacted_thinking`
 blocks, but visible text and unsupported blocks remain refused.
+
+This landed after two real problems were caught and fixed during review, before the commit
+above. First, the earliest version of `live_model.py`'s visible-content guard
+(`_has_visible_content`) rejected every list-typed response content outright rather than
+allow-listing specific block types — which would have refused a genuine Anthropic turn carrying
+only `tool_use`/`thinking` blocks, the ordinary shape once extended thinking is on
+(`_build_chat_anthropic` sets `thinking={"type": "adaptive"}` unconditionally), burning the run's
+one run-wide repair slot on a wholly valid turn. Fixed by allow-listing `tool_use`/`thinking`/
+`redacted_thinking` explicitly instead of rejecting every list; `test_propose_accepts_provider_
+tool_and_thinking_blocks` and `test_respond_accepts_provider_tool_and_redacted_thinking_blocks`
+pin the corrected behaviour, and `test_propose_refuses_a_text_block_alongside_tool_use`/
+`test_respond_refuses_an_unsupported_block_alongside_tool_use` confirm a genuine text or
+unsupported block is still refused alongside a real tool call. Second, an early pass applied
+`extra="forbid"` to only some of the eight schema classes it now covers (`tools.py`'s five
+argument classes, `domain.py`'s `Hypothesis`/`FinalAssessment`, `live_model.py`'s `PlanRecord`) —
+the same "fix scoped to the instance touched, not every instance of the class" shape this
+document has recorded before (see "Round 4 and round 6 review" below). A model call reaching one
+of the missed classes could still smuggle an unrecognized field in and have it silently dropped
+under pydantic's default `extra="ignore"`, instead of surfacing as a named repair. Closed by
+applying `extra="forbid"` uniformly across all eight, each now carrying (or cross-referencing) a
+comment stating why: a dropped field is invisible to the model and to this application, while a
+refused one is a repair attempt the model can see and correct.
 
 **Round 8, P3 — a docstring cited a sibling test by a name that never existed.**
 `test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason` (`test_graph.py`)

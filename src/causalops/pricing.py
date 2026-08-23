@@ -16,7 +16,10 @@ MAX_REQUEST_SECONDS = 90.0
 
 # A one-character ratio is a deliberately conservative empirical estimate,
 # not a universal tokenizer guarantee. Recalibrate only if saved provider usage
-# exceeds it, using that measured artifact rather than a preference.
+# exceeds it, using that measured artifact rather than a preference. The full
+# calibration record (the 2.26 chars/token smoke-call measurement, and how
+# close a saturated response came to violating the reservation invariant) is
+# in `TECHNICAL_OVERVIEW.md`'s "The smoke call's findings" section.
 PESSIMISTIC_CHARS_PER_TOKEN = 1.0
 
 
@@ -35,7 +38,11 @@ class InputTooLarge(Exception):
     """Refuse an oversized prose request before sending or reserving it.
 
     The input cap excludes tool schemas so normal turns retain their context
-    budget; reservations include every billed schema token separately.
+    budget; reservations include every billed schema token separately. Why
+    the tool schema stays out of this cap specifically -- including the
+    worked example of a turn that would actually exceed the folded
+    headroom -- is in `TECHNICAL_OVERVIEW.md`'s "Why the tool schema stays
+    out of MAX_INPUT_TOKENS" section.
     """
 
     def __init__(self, estimated_tokens: int) -> None:

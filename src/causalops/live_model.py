@@ -142,6 +142,7 @@ RECORD_FINAL_ASSESSMENT_TOOL_NAME = "record_final_assessment"
 # `hypotheses` field, because that one genuinely is guidance about how to
 # fill the field in, not implementation trivia.
 class PlanRecord(BaseModel):
+    # extra="forbid" rationale: see tools.py's QueryMetricArguments.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
@@ -421,7 +422,23 @@ def _to_native_tool_call(call: ToolCall) -> NativeToolCall:
 
 
 def _has_visible_content(content: object) -> bool:
-    """Native tool-call turns have no second, unstructured answer channel."""
+    """Native tool-call turns have no second, unstructured answer channel.
+
+    A block type outside `{"tool_use", "thinking", "redacted_thinking"}`
+    (ordinary visible text, or a block type this module has never seen) is
+    refused rather than ignored: narrative text sitting alongside a tool
+    call is ambiguous about whether the model actually committed to that
+    call or was still reasoning out loud in a channel the application does
+    not read, and this project needs one unambiguous decision per turn, not
+    a mix it would have to guess how to resolve. An earlier version of this
+    function rejected every list-typed response outright, which would also
+    have refused a genuine turn carrying only `tool_use`/`thinking` blocks
+    -- the ordinary shape once extended thinking is on
+    (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}`
+    unconditionally) -- burning the run's one repair slot on a wholly valid
+    turn; caught in review before landing, fixed by allow-listing the three
+    real provider block types explicitly instead of rejecting every list.
+    """
     if content in ("", []):
         return False
     if not isinstance(content, list):

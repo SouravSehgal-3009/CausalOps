@@ -78,6 +78,19 @@ this file -- a real, named reason, not drift. None of the five scenarios
 below ever proposes `search_runbooks` (confirmed: no fixture script
 references it), so ids, disposition, receipt shapes, evidence kinds, event
 vocabulary and `duration_ms` are all unaffected -- only the digest moved.
+
+**Post-review strict-schema round moves every `final_context_digest`
+literal below a second time, and nothing else** -- the same mechanism as
+Unit 3a's own note above. `SYSTEM_TEXT` (`prompts.py`) gained one sentence
+telling the model to answer a tool call with no accompanying narrative
+text, closing a real risk `live_model.py`'s `_has_visible_content` guard
+otherwise leaves open (a stray sentence beside a genuine tool call would
+burn the run's one repair slot). `system_text` is identical across every
+stage in every scenario here and feeds directly into
+`_render_stage_request`'s digest, so that one sentence shifts every digest
+in this file again, confirmed by running the suite before and after and
+updating only the six `final_context_digest` literals to match -- no other
+field in this file changed.
 """
 
 from pathlib import Path
@@ -460,7 +473,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "777f37685e316dbff088c3b44f6ff755ddae9fe7356151b45c5ce6839ea90229"
+            "5653e526aac4001b92e829c8cfffe0809a200cd6862e2674958b2187ac7b170f"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -516,7 +529,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
+            "0c6739028b3232cb2238dcb62d0e1fde311ffa352ae0e9ab0f44fd8adec1d90a"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -573,7 +586,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
+            "0c6739028b3232cb2238dcb62d0e1fde311ffa352ae0e9ab0f44fd8adec1d90a"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -634,7 +647,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "515e37e7e18020d6ec35bf6c41621ab3ae04b21f48021049bbc5be38e7ea4120"
+            "fe9a4b4324e22be93c73f2cf4d9e8cf6c79e8358d867dba29129f4289a2e1b1b"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -684,7 +697,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
+            "e066698bd6175c2fa8cc24bf6bd058c37556b47b5318b37ff86958340e5c1215"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -771,7 +784,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
+            "e066698bd6175c2fa8cc24bf6bd058c37556b47b5318b37ff86958340e5c1215"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

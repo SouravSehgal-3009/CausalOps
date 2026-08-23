@@ -455,10 +455,10 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
 
-    assert len(total) == 1_280
+    assert len(total) == 1_404
     # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 1_280
+    assert estimate_input_tokens(total) == 1_404
 
 
 def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap() -> (
@@ -497,8 +497,8 @@ def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap()
     # tool-definition payload pinned by test_the_tool_payload_size_matches_
     # what_pricingpy_assumes above -- restated, not re-measured, here.
 
-    assert len(total) == 5_465
-    assert estimate_input_tokens(total) == 5_465
+    assert len(total) == 5_589
+    assert estimate_input_tokens(total) == 5_589
     assert estimate_input_tokens(total) > folded_headroom_tokens
 
 
