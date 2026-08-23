@@ -171,6 +171,27 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
     # keeps honest throughout (Unit 3b-4 addendum, C3); a trailing
     # "(truncated)" names the gap explicitly rather than leaving a reader
     # to notice the count looks low.
+    #
+    # Round 4 review, F3. `event_codes` (above, built from `events`) has
+    # the SAME pre-trim-aggregate shape as `row_count` did -- it is
+    # assembled during the loop that fills `rows`, entirely before
+    # `trim_to_bytes` runs, so a row popped by BYTE trimming (as opposed
+    # to the `limit` cutoff the loop already respects) still left its
+    # event code listed even though it no longer appears in
+    # `payload["rows"]`. Rebuilt from `payload["rows"]`, the POST-trim
+    # list, so the codes shown always match the rows actually returned.
+    # Only ever removes codes (every kept row was already in the
+    # pre-trim set), so this cannot make the payload grow back over
+    # budget.
+    kept_rows = payload["rows"]
+    assert isinstance(kept_rows, list)
+    kept_events: set[str] = set()
+    for kept_row in kept_rows:
+        if isinstance(kept_row, dict):
+            kept_event = kept_row.get("event")
+            if isinstance(kept_event, str):
+                kept_events.add(kept_event)
+    payload["event_codes"] = ",".join(sorted(kept_events))
     truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.LOG,
@@ -283,9 +304,27 @@ def run_topology_check(
     # the scalar fallback to shrink (`services`, a list, is invisible to
     # it), that state could never re-converge. Seeding both up front means
     # each call's own `fits()` checks always see the TRUE combined size
-    # from its first iteration, so trimming one list already accounts for
-    # the other's full weight -- order between the two calls does not
-    # matter for the final result.
+    # from its first iteration, so WHETHER the combined payload ends up
+    # fitting the byte cap does not depend on call order.
+    #
+    # WHICH list absorbs the trimming is a different question, and order
+    # DOES decide it -- `trim_to_bytes` pops rows from its own list
+    # unconditionally until `fits(payload)`, so whichever call runs first
+    # keeps popping against the OTHER list's still-untrimmed full weight.
+    # A round of review found this the hard way: with `services`-first
+    # (the order this function used to run in) and a realistic incident
+    # shape -- a handful of real service names next to a genuinely
+    # oversized `edges` list -- the `services` call never sees `fits()`
+    # turn true until it has popped `services` to EMPTY, because `edges`
+    # is still full size on every iteration; `edges` itself, the field
+    # actually responsible for the overage, comes away barely trimmed.
+    # `edges`-first is the order below because it is the field this
+    # codebase's real data grows without bound (topology connections);
+    # `services` is a short, bounded list of service names that should
+    # almost never need trimming at all. Trimming `edges` first protects
+    # `services` at `edges`'s expense, which is the right tradeoff for
+    # that shape -- it does not eliminate the underlying asymmetry, it
+    # only points it at the field where losing rows is safe to read.
     payload: dict[str, JsonValue] = {
         "services": service_list,
         "service_count": len(service_list),
@@ -293,8 +332,8 @@ def run_topology_check(
         "edge_count": len(edge_list),
         "truncated": False,
     }
-    payload = trim_to_bytes(payload, "services", service_list, "service_count")
     payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
+    payload = trim_to_bytes(payload, "services", service_list, "service_count")
     return executed_check(
         EvidenceKind.TOPOLOGY,
         source,

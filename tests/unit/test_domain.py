@@ -176,14 +176,20 @@ def test_an_incident_window_must_end_after_it_starts() -> None:
 
 
 def test_stored_incident_refuses_a_packet_incident_id_mismatch() -> None:
-    """Post-freeze review, P1. Correctness traced a real safe-failure
-    breakage from exactly this shape reaching `graph.py`'s
-    `_rebuild_store`: it raises `ValueError` on a mismatched
-    `evidence[i].incident_id`, and that function runs from BOTH the
-    normal report-building path and the crash-containment path meant to
-    catch failures like it -- a second identical raise from inside the
-    handler escapes `main()`'s catch tuple entirely. `StoredIncident.
-    check_identity_agrees` now refuses this at load time instead."""
+    """Post-freeze review, P1. `packet.incident_id` is rendered straight
+    into the model's own prompt (`prompts.py`'s `render_context`:
+    `f"incident: {packet.incident_id}"`) -- a mismatch against `scope.
+    incident_id` would show the model a different incident than the one
+    the run's directory, thread, and evidence are actually keyed on,
+    with nothing else in the pipeline positioned to catch it before the
+    prompt is built. `StoredIncident.check_identity_agrees` now refuses
+    this at load time instead. (The `_rebuild_store` double-fault
+    correctness traced -- a mismatched `evidence[i].incident_id` raising
+    `ValueError` from both the normal report path and the crash-
+    containment path meant to catch it, escaping `main()`'s catch tuple
+    entirely -- is the sibling evidence-mismatch test's own reason, not
+    this one's; a bad `packet.incident_id` never reaches `_rebuild_store`
+    at all.)"""
     scope = incident_scope()
     mismatched_packet = alert_packet().model_copy(
         update={"incident_id": "not-the-scope-incident"}

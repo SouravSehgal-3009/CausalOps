@@ -199,6 +199,28 @@ def run_metric_check(
     # while this string still said "900 samples." Same bug, same fix
     # pattern already applied twice this round (`run_logs_check`,
     # `run_changes_check`).
+    #
+    # Round 4 review, F3. `max_value` (above) has the SAME pre-trim-
+    # aggregate shape -- computed from `kept` before `trim_to_bytes` ever
+    # runs, so a sample popped by byte trimming could still be reported as
+    # the peak even though it no longer appears in `payload["samples"]`.
+    # Not reachable with this suite's real data (`MetricSample.at`/
+    # `.value` are both floats, always small -- byte trimming never fires
+    # below the `MAX_METRIC_SAMPLES` cap already applied above), but fixed
+    # anyway: the owner ruled this closes the CLASS, not just the
+    # reachable instance. Rebuilt from `payload["samples"]`, the POST-trim
+    # list -- can only shrink or hold `max_value` (every kept row was
+    # already in the pre-trim set), never grow the payload back over
+    # budget.
+    kept_samples = payload["samples"]
+    assert isinstance(kept_samples, list)
+    kept_values: list[float] = []
+    for kept_sample in kept_samples:
+        if isinstance(kept_sample, list) and len(kept_sample) == 2:
+            value = kept_sample[1]
+            if isinstance(value, int | float):
+                kept_values.append(float(value))
+    payload["max_value"] = max(kept_values, default=0.0)
     return executed_check(
         EvidenceKind.METRIC,
         source,

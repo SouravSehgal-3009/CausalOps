@@ -161,6 +161,53 @@ def test_a_metric_summary_reports_the_post_trim_count_not_the_pre_trim_one(
     assert f"{MAX_METRIC_SAMPLES} samples" not in outcome.summary
 
 
+def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one(
+    monkeypatch: pytest.MonkeyPatch, fake_prometheus: RecordingPrometheus
+) -> None:
+    """Round 4 review, F3. `max_value` (payload) used to be computed from
+    `kept`, entirely before `trim_to_bytes` runs -- so a sample popped by
+    byte trimming could still be reported as the peak even though it no
+    longer appears in `payload["samples"]`. Not reachable through this
+    function's own real data shape in this test suite (`MetricSample.at`/
+    `.value` are both floats, always small, so byte-level popping never
+    fires below the `MAX_METRIC_SAMPLES` count cap already applied
+    earlier), fixed anyway per the owner's ruling to close the class, not
+    just the reachable `event_codes` instance. Monkeypatching
+    `trim_to_bytes` to additionally pop the LAST sample (simulating what a
+    future, larger row shape would trigger) drops the highest-value
+    sample -- `test_a_metric_query_returns_bounded_samples` above already
+    establishes values increase with index, so the last sample is always
+    the peak -- forcing `payload["max_value"]` and the pre-trim peak to
+    genuinely differ, proving the field reads the samples the payload
+    itself reports, not a stale local variable."""
+    import causalops.prometheus as prometheus_module
+
+    real_trim_to_bytes = prometheus_module.trim_to_bytes
+
+    def popping_trim_to_bytes(
+        payload: dict[str, JsonValue],
+        rows_key: str,
+        rows: list[JsonValue],
+        count_key: str,
+    ) -> dict[str, JsonValue]:
+        result = real_trim_to_bytes(payload, rows_key, rows, count_key)
+        kept_rows = result[rows_key]
+        assert isinstance(kept_rows, list)
+        kept_rows.pop()
+        result[rows_key] = kept_rows
+        result[count_key] = len(kept_rows)
+        return result
+
+    monkeypatch.setattr(prometheus_module, "trim_to_bytes", popping_trim_to_bytes)
+
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), fake_prometheus.url, 5
+    )
+
+    assert outcome.payload["sample_count"] == MAX_METRIC_SAMPLES - 1
+    assert outcome.payload["max_value"] == (MAX_METRIC_SAMPLES - 2) * 0.5
+
+
 def test_a_metric_query_against_nothing_is_unavailable() -> None:
     outcome = run_metric_check(
         metric_arguments(), incident_scope(), "http://127.0.0.1:1", 1
@@ -241,6 +288,45 @@ def test_a_log_result_stays_inside_the_byte_bound(tmp_path: Path) -> None:
     assert outcome.payload["row_count"] < 30
     assert f"{outcome.payload['row_count']} rows" in outcome.summary
     assert outcome.summary.endswith("(truncated)")
+
+
+def test_log_event_codes_reflect_the_post_trim_rows_not_every_matched_row(
+    tmp_path: Path,
+) -> None:
+    """Round 4 review, F3. `event_codes` used to be built from `events`,
+    gathered during the loop that fills `rows` -- entirely BEFORE
+    `trim_to_bytes` runs. So a row popped by byte trimming (as opposed to
+    the `row_limit` cap the loop already respects) could still have its
+    event code listed even though it no longer appears in
+    `payload["rows"]`. `trim_to_bytes` pops from the END of the row list
+    (`kept.pop()`), so the LAST matched row here -- the only one carrying
+    "config_loaded" -- is the first one trimmed away once the payload is
+    oversized; every surviving row is "config_rejected_request". Reachable
+    with real data (same oversized-detail shape as the byte-bound test
+    above), not a monkeypatch."""
+    paths = RunPaths(root=tmp_path)
+    rows = [
+        log_row(minute, event="config_rejected_request", detail="x" * 2000)
+        for minute in range(29)
+    ]
+    rows.append(log_row(29, event="config_loaded", detail="x" * 2000))
+    write_log(paths, rows)
+
+    outcome = run_logs_check(
+        logs_arguments(row_limit=30, log_filter=LogFilter.CONFIG_RELOAD), paths
+    )
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert outcome.payload["truncated"] is True
+    assert outcome.payload["row_count"] < 30
+    kept_rows = outcome.payload["rows"]
+    assert isinstance(kept_rows, list)
+    assert not any(
+        isinstance(row, dict) and row.get("event") == "config_loaded"
+        for row in kept_rows
+    )
+    assert "config_loaded" not in str(outcome.payload["event_codes"])
+    assert "config_rejected_request" in str(outcome.payload["event_codes"])
 
 
 def test_a_log_query_for_a_run_without_that_log_is_unavailable(tmp_path: Path) -> None:
@@ -464,6 +550,39 @@ def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) ->
     kept_service_count = outcome.payload["service_count"]
     assert isinstance(kept_service_count, int)
     assert kept_service_count < len(services)
+    assert kept_service_count == len(outcome.payload["services"])  # type: ignore[arg-type]
+
+
+def test_a_small_services_list_survives_an_oversized_edges_list(tmp_path: Path) -> None:
+    """Round 4 review. The services-list fix above was tested only against
+    the case it was built for -- an oversized `services` list on its own --
+    and shipped with `trim_to_bytes(payload, "services", ...)` called
+    BEFORE the `"edges"` call. That order broke the realistic asymmetric
+    case: a handful of real service names next to a genuinely oversized
+    `edges` list. `trim_to_bytes` pops rows from its own list
+    unconditionally until `fits(payload)`, so the `services` call never
+    saw `fits()` turn true until it had popped `services` to EMPTY --
+    `edges`, the field actually responsible for the overage, came away
+    barely trimmed. An incident with 4 real services would have reported
+    "0 services" to the investigator. The fix is call order: `edges`
+    trims first, protecting the short, bounded `services` list at the
+    expense of `edges`, the field this codebase's real data actually
+    grows without bound. This test fails under the old services-first
+    order (kept_service_count == 0) and passes under the fixed
+    edges-first order."""
+    paths = RunPaths(root=tmp_path)
+    services = ["payments-api", "checkout-web", "orders-db", "gateway"]
+    edges = [f"edge-{i}-" + "z" * 30 for i in range(400)]
+    paths.topology_file.write_text(
+        json.dumps({"services": services, "edges": edges}), encoding="utf-8"
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    kept_service_count = outcome.payload["service_count"]
+    assert isinstance(kept_service_count, int)
+    assert kept_service_count == len(services)
     assert kept_service_count == len(outcome.payload["services"])  # type: ignore[arg-type]
 
 

@@ -1479,11 +1479,44 @@ _WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
 }
 
 
+# Round 4 review, F2. The subset check below used to prove only that every
+# PROOF entry is registered -- it never proved the reverse, that every
+# REGISTERED contract has a proof. A fifth prose-only contract added to
+# `KNOWN_PROSE_ONLY_CONTRACTS` without a matching `_WIRE_VISIBLE_PROSE_
+# PROOF` entry would pass silently, with no wire-proof requirement on it
+# at all -- exactly the shape of gap N2 closed for the first four.
+#
+# A registered contract's prose does not always live in a single JSON
+# schema field's `description`, though -- some rules are raised as a
+# Python error string (e.g. a `ValueError` message in `graph.py` or
+# `live_model.py`) rather than shipped to the provider as schema text, and
+# `_WIRE_VISIBLE_PROSE_PROOF`'s tuple shape (tool name, field path,
+# description substring) has no way to express that. Naming such a
+# contract here, with a stated reason, is how it opts out of the wire-
+# proof requirement without silently defeating this test for a future
+# contract that legitimately needs to.
+_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF: frozenset[str] = frozenset()
+
+
 def test_wire_visible_prose_proof_only_names_registered_contracts() -> None:
     """Guards `_WIRE_VISIBLE_PROSE_PROOF` itself against drifting out of
-    sync with the registry it is meant to verify -- every label it names
-    must actually be in `KNOWN_PROSE_ONLY_CONTRACTS`."""
-    assert set(_WIRE_VISIBLE_PROSE_PROOF) <= set(KNOWN_PROSE_ONLY_CONTRACTS)
+    sync with the registry it is meant to verify, in both directions --
+    every label it names must actually be in `KNOWN_PROSE_ONLY_CONTRACTS`
+    (a stray/renamed proof entry), and every label in
+    `KNOWN_PROSE_ONLY_CONTRACTS` must appear either as a proof or as a
+    documented, reasoned exemption in
+    `_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` (an unproven contract)."""
+    proven = set(_WIRE_VISIBLE_PROSE_PROOF)
+    exempted = set(_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF)
+    registered = set(KNOWN_PROSE_ONLY_CONTRACTS)
+    assert not (proven & exempted), (
+        f"{proven & exempted} is both proven and exempted -- pick one"
+    )
+    assert proven | exempted == registered, (
+        f"missing wire proof or a documented exemption for "
+        f"{registered - proven - exempted}; stray proof/exemption entries "
+        f"not in KNOWN_PROSE_ONLY_CONTRACTS: {(proven | exempted) - registered}"
+    )
 
 
 def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
