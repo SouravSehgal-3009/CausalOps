@@ -1192,6 +1192,15 @@ def test_read_json_file_rejects_non_finite_tokens(tmp_path: Path) -> None:
     assert read_json_file(manifest) == {"edges": [], "weight": 1}
 
 
+def test_json_readers_reject_overflowing_numeric_literals(tmp_path: Path) -> None:
+    """A raw JSON numeral takes `parse_float`, not `parse_constant`."""
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"weight": 1e400}', encoding="utf-8")
+
+    assert read_json_line('{"weight": 1e400}') is None
+    assert read_json_file(manifest) is None
+
+
 def test_a_log_line_with_a_non_finite_token_is_skipped_not_crashed(
     tmp_path: Path,
 ) -> None:
@@ -1212,6 +1221,23 @@ def test_a_log_line_with_a_non_finite_token_is_skipped_not_crashed(
         "fields": {"config_key": "require_order_token", "detail": float("nan")},
     }
     write_log(paths, [log_row(1), poisoned_row])
+
+    outcome = run_logs_check(logs_arguments(), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1
+
+
+def test_a_log_line_with_an_overflowing_numeric_literal_is_skipped(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.logs.mkdir()
+    overflowing_row = json.dumps(log_row(2)).rsplit("}", 1)[0] + ',"weight":1e400}'
+    paths.logs.joinpath("orders.jsonl").write_text(
+        json.dumps(log_row(1)) + "\n" + overflowing_row + "\n",
+        encoding="utf-8",
+    )
 
     outcome = run_logs_check(logs_arguments(), paths)
 
@@ -1251,6 +1277,27 @@ def test_a_changes_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -
     assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
 
 
+def test_a_changes_manifest_with_an_overflowing_numeric_literal_is_refused(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        '[{"at":"2026-01-01T00:01:00+00:00","service":"orders",'
+        '"summary":"change","risk_score":1e400}]',
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.UNAVAILABLE
+    assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
 def test_a_topology_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -> None:
     """Same codex finding, for `run_topology_check`'s manifest reader."""
     paths = RunPaths(root=tmp_path)
@@ -1269,3 +1316,53 @@ def test_a_topology_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) 
 
     assert outcome.outcome is ToolOutcome.UNAVAILABLE
     assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_a_topology_manifest_with_an_overflowing_numeric_literal_is_refused(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.topology_file.write_text(
+        '{"services":["gateway","orders"],"edges":["gateway>orders"],"weight":1e400}',
+        encoding="utf-8",
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert outcome.outcome is ToolOutcome.UNAVAILABLE
+    assert outcome.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_malformed_utf8_manifest_is_unavailable(tmp_path: Path) -> None:
+    """Manifest decoding is intentionally unavailable, not an uncaught failure."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_bytes(b"[\xff]")
+    paths.topology_file.write_bytes(b"{\xff}")
+
+    changes = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+    topology = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert changes.outcome is ToolOutcome.UNAVAILABLE
+    assert changes.reason_code is ReasonCode.TOOL_UNAVAILABLE
+    assert topology.outcome is ToolOutcome.UNAVAILABLE
+    assert topology.reason_code is ReasonCode.TOOL_UNAVAILABLE
+
+
+def test_malformed_utf8_log_line_is_skipped_while_valid_lines_execute(
+    tmp_path: Path,
+) -> None:
+    paths = RunPaths(root=tmp_path)
+    paths.logs.mkdir()
+    paths.logs.joinpath("orders.jsonl").write_bytes(
+        json.dumps(log_row(1)).encode("utf-8") + b"\n" + b"{\xff}\n"
+    )
+
+    outcome = run_logs_check(logs_arguments(), paths)
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert outcome.payload["row_count"] == 1

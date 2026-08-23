@@ -45,18 +45,11 @@ def test_the_ratio_rounds_up_not_down(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_estimate_never_undercounts_a_real_tokenizer() -> None:
-    # This module deliberately has no tokenizer to compare against
-    # (pricing.py's own docstring), so this test pins the one thing that
-    # actually matters about the ratio: it must not be looser than the
-    # documented real-world average of ~4 characters per token -- and,
-    # since Unit 3b-3, not looser than the one real billed data point this
-    # project has measured either (~2.26 chars/token; see
-    # `PESSIMISTIC_CHARS_PER_TOKEN`'s own comment). If this constant is
-    # ever loosened back toward 4.0, a real request could tokenize to more
-    # tokens than this estimate reports -- exactly the failure mode the
-    # pessimism exists to prevent, and exactly what the smoke call caught
-    # at the old 3.0 value.
+    # This estimator deliberately has no tokenizer. Keep its ratio below
+    # both the usual ~4 chars/token and the measured ~2.26 chars/token;
+    # otherwise a real request can exceed the reservation estimate.
     assert PESSIMISTIC_CHARS_PER_TOKEN < 4.0
+    assert PESSIMISTIC_CHARS_PER_TOKEN < 2.26
 
 
 def test_the_input_cap_preserves_the_intended_9600_character_prose_budget() -> None:
@@ -124,55 +117,19 @@ def test_actual_cost_usd_uses_real_tokens_not_the_output_allowance() -> None:
 
 
 def test_a_settled_request_never_costs_more_than_its_own_reservation() -> None:
-    """The reservation is supposed to be a worst case, but pricing this
-    single number the same way on both sides (as an earlier version of this
-    test did) proves nothing: `reservation_usd(N)` and
-    `actual_cost_usd(N, MAX_OUTPUT_TOKENS)` are the identical linear formula
-    given the identical `N`, so `worst_case_actual <= reserved` reduces to
-    `X <= X` -- true no matter what `N` omits, which is exactly how Unit
-    3b-2's P1-1 bug (the reservation once excluded ~2,580 tokens of
-    tool-definition text `bind_tools` sends on every call) shipped past
-    this assertion.
-
-    This version prices the two sides off genuinely different numbers: the
-    reservation gets this module's own *pessimistic* estimate (ceiling
-    division at `PESSIMISTIC_CHARS_PER_TOKEN` -- 1.0 as of Unit 3b-3, far
-    more conservative than the 3.0 in effect when this test was written)
-    for the combined prose-plus-tool-schema text `live_model.py`'s `_send`
-    reserves against post-fix; the settlement gets the smaller token count
-    a genuine tokenizer would report for the *same* text -- calibrated
-    against the smoke call's own measured ratio (~2.26 characters per
-    token: `pricing.py`'s `PESSIMISTIC_CHARS_PER_TOKEN` comment), the
-    weakest, most billing-realistic choice available, not the documented
-    ~4 chars/token English-prose average this test used before Unit 3b-3
-    (a looser divisor means fewer billed tokens, which makes this
-    assertion easier to pass for no real reason -- calibrating against the
-    one real data point this project has closes that gap). If the
-    reservation math ever again dropped the tool payload (reverting P1-1),
-    a settlement still billed for the whole wire request would come in
-    above a reservation sized for prose alone, and this assertion would
-    fail."""
+    """Reserve pessimistically for prose plus tools, then price the same
+    request at the measured 2.26 chars/token ratio. Omitting the tool schema
+    makes the real settlement exceed the reservation."""
     snapshot = CLAUDE_SONNET_5_PRICING
-    # This unit's own measurements (re-derived directly, not carried by
-    # hand -- `test_live_model.py`'s `test_the_tool_payload_size_matches_
-    # what_pricingpy_assumes` pins the same 7,020 figure against the real
-    # tool definitions, post Unit 3b-4's item 6 schema-description strip
-    # and the addendum's A1/A2 prose additions): `_plan_tool_definition`
-    # plus the five `_domain_tool_definitions` serialize to 7,020
-    # characters; a representative turn-zero INITIAL_PLAN prose renders to
-    # 1,512 (Unit 3b-2's figure -- unaffected by 3b-3 or either 3b-4 round,
-    # none of which touched INITIAL_PLAN prose rendering).
+    # The emitted proposal schema is pinned at 7,237 by test_live_model;
+    # representative initial-plan prose is 1,512 characters.
     prose = "x" * 1_512
-    tool_definitions = "x" * 7_020
+    tool_definitions = "x" * 7_237
 
     reserved = snapshot.reservation_usd(
         estimate_input_tokens(prose) + estimate_input_tokens(tool_definitions)
     )
-    # The smoke call's own measured ratio (`pricing.py`'s
-    # `PESSIMISTIC_CHARS_PER_TOKEN` comment: 9,249 characters billed at
-    # 4,099 tokens), not the documented ~4 chars/token English-prose
-    # average -- a real, measured data point rather than the weakest
-    # divisor this test happened to have on hand.
+    # The smoke call measured 2.26 chars/token (9,249 chars / 4,099 tokens).
     measured_chars_per_token = 2.26
     real_input_tokens = int(
         (len(prose) + len(tool_definitions)) // measured_chars_per_token

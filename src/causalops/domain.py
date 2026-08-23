@@ -386,7 +386,7 @@ class StoredIncident(BaseModel):
 class Hypothesis(BaseModel):
     """A possible cause and what would settle it. Rank is not a probability."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     root_cause: RootCauseCode
     rank: int = Field(ge=1)
@@ -506,7 +506,7 @@ class HypothesisUpdate(BaseModel):
 class FinalAssessment(BaseModel):
     """The model's diagnosis or abstention. Its schema cannot express FAILED_SAFE."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: str = SCHEMA_VERSION
     # Unit 3b-4, item 2: `check_terminal_invariants` below enforces a rule

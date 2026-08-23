@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from causalops.approvals import CheckpointStoreError
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
     AmbiguousReservationNotResent,
     CostCeilingExceeded,
@@ -209,7 +209,7 @@ def test_settle_reservation_records_the_real_cost(conn: sqlite3.Connection) -> N
 
 
 def test_settling_a_never_reserved_key_is_refused(conn: sqlite3.Connection) -> None:
-    with pytest.raises(CheckpointStoreError):
+    with pytest.raises(CheckpointStoreError) as excinfo:
         settle_reservation(
             conn,
             run_id="ghost",
@@ -221,6 +221,12 @@ def test_settling_a_never_reserved_key_is_refused(conn: sqlite3.Connection) -> N
             output_tokens=1,
             settled_at=NOW,
         )
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE
+    )
+    assert "('ghost', 'INVESTIGATE', 0, 'digest-1')" in str(excinfo.value)
+    assert "absent or not RESERVED" in str(excinfo.value)
 
 
 def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) -> None:
@@ -241,7 +247,7 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
         settled_at=NOW,
     )
 
-    with pytest.raises(CheckpointStoreError):
+    with pytest.raises(CheckpointStoreError) as excinfo:
         settle_reservation(
             conn,
             run_id="run-1",
@@ -253,3 +259,13 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
             output_tokens=1,
             settled_at=NOW,
         )
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE
+    )
+    assert "('run-1', 'INVESTIGATE', 0, 'digest-1')" in str(excinfo.value)
+    assert "absent or not RESERVED" in str(excinfo.value)
+    row = conn.execute(
+        "SELECT state, actual_usd, input_tokens, output_tokens FROM cost_ledger"
+    ).fetchone()
+    assert row == ("SETTLED", 0.01, 100, 50)

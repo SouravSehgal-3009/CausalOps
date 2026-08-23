@@ -120,7 +120,14 @@ def validated_run_paths(root: Path, incident_id: str) -> RunPaths:
     if not incident_id.isalnum():
         raise LabError(LabReasonCode.INCIDENT_NOT_FOUND, "that is not an incident ID")
     paths = run_paths(root, incident_id)
-    if runs_root(root).resolve() != paths.root.resolve().parent:
+    try:
+        root_path = runs_root(root).resolve()
+        parent_path = paths.root.resolve().parent
+    except RuntimeError as error:
+        raise LabError(
+            LabReasonCode.INCIDENT_NOT_FOUND, "that path is not inside the run tree"
+        ) from error
+    if root_path != parent_path:
         raise LabError(
             LabReasonCode.INCIDENT_NOT_FOUND, "that path is not inside the run tree"
         )

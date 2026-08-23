@@ -71,7 +71,7 @@ class RunbookTopic(StrEnum):
 
 
 class QueryMetricArguments(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.QUERY_METRIC] = ToolName.QUERY_METRIC
     template: MetricTemplate
@@ -81,7 +81,7 @@ class QueryMetricArguments(BaseModel):
 
 
 class QueryLogsArguments(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.QUERY_LOGS] = ToolName.QUERY_LOGS
     log_filter: LogFilter
@@ -94,7 +94,7 @@ class QueryLogsArguments(BaseModel):
 
 
 class ListRecentChangesArguments(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.LIST_RECENT_CHANGES] = ToolName.LIST_RECENT_CHANGES
     service: str
@@ -103,7 +103,7 @@ class ListRecentChangesArguments(BaseModel):
 
 
 class GetTopologyArguments(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.GET_TOPOLOGY] = ToolName.GET_TOPOLOGY
     incident_id: str
@@ -117,7 +117,7 @@ class SearchRunbooksArguments(BaseModel):
     policy decision with a reason code (`policy.py`'s new branch), not a
     silent schema rejection."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.SEARCH_RUNBOOKS] = ToolName.SEARCH_RUNBOOKS
     topic: RunbookTopic

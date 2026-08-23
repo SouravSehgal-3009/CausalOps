@@ -2301,8 +2301,8 @@ anything new this unit built:
   "The smoke call's findings" below for the measured numbers and what
   changed as a result. If a row ever does show `actual_usd >
   reserved_usd`, suspect the two unmodelled contributions
-  (`estimate_input_tokens`'s own docstring names them: the provider's
-  tool-use system prompt and ordinary message-envelope overhead) first,
+  (provider-side tool-use and message-envelope overhead, which
+  `estimate_input_tokens` deliberately does not receive) first,
   and treat it as **a signal to re-derive `PESSIMISTIC_CHARS_PER_TOKEN`,
   not an incident**: the violation is bounded to a fraction of a cent per
   row, and the application-wide ceiling still counts the *reserved*
@@ -2451,8 +2451,8 @@ during Unit 3b-2, now measured rather than argued.
 cap actually exists to bound at 9,600 (3,200 × 3.0 = 9,600 = 9,600 × 1.0):
 the cap's job was never really "N tokens," it was always "N characters of
 prose," and a ratio change without a matching cap change would have
-silently re-tightened it — `pricing.py`'s own comments on both constants
-now say so, and `test_pricing.py`'s `test_the_input_cap_preserves_the_
+silently re-tightened it. `pricing.py` records the current conservative
+estimate; `test_pricing.py`'s `test_the_input_cap_preserves_the_
 intended_9600_character_prose_budget` pins the 9,600-character figure
 directly rather than deriving it from the two constants it is meant to
 guard.
@@ -2476,10 +2476,10 @@ characters/tokens. Measured directly and pinned by `test_live_model.py`'s
 not asserted from the zero-evidence case that cannot support it. Unit
 3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
 characters; the addendum round's A1/A2 (also below) then grew it back to
-**7,020**, since both are additive prose fixes in the opposite direction
-from item 6's strip. The tool payload's CURRENT size widens the folded
-headroom to 9,600 − 7,020 = 2,580 tokens — 5,465 still clears it either
-way, so this conclusion is unaffected across every revision of the figure;
+**7,020** at that historical point, since both were additive prose fixes in
+the opposite direction from item 6's strip. The current strict-schema payload
+is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,465 still clears either
+headroom value, so this conclusion is unaffected across every revision;
 the test above re-measures both figures directly rather than either one
 being carried by hand.
 
@@ -2633,11 +2633,10 @@ against the actual code before being approved — one codex claim (an append-onl
   entirely if the sibling form is silently ignored. A comment in `domain.py` records
   this so it is not "simplified away" later.
 
-The propose-turn tool payload moved to **7,020 characters/tokens** (up from 6,727,
-since A1/A2 are additive) — re-derived and re-pinned by
+The propose-turn tool payload moved to **7,020 characters/tokens** at that
+historical point (up from 6,727, since A1/A2 are additive) — re-derived and re-pinned by
 `test_the_tool_payload_size_matches_what_pricingpy_assumes`, with every citation in
-`pricing.py`, `live_model.py`, and this document's own "Default limits" table updated
-to match.
+the then-current implementation and this document updated to match.
 
 **Group B — the double-spend fix, the most important item in this round.**
 `cost_ledger.record_reservation_before_request` returned an existing reservation row
@@ -2808,9 +2807,9 @@ round.
   `_final_assessment_tool_definition()` was never in that binding, so `respond()`'s own
   payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
   unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
-  assumes`, now pins it at **2,261 characters/tokens**. `_send`'s own comment, which called
-  7,020 "the per-stage figure" while only one of the two real stage payloads was ever
-  measured, now names both figures separately.
+  assumes`, pinned the final schema at **2,261 characters/tokens** at that
+  historical point. The current strict-schema measurements are 7,237 for
+  proposals and 2,292 for final assessments; `_send` names them separately.
 - **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
   mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
   prose actually EXISTS. Correctness proved the gap with a mutation: deleting
@@ -3074,6 +3073,22 @@ directly and all three call sites end-to-end (`run_logs_check`, `run_changes_che
 confirming the corresponding new test fails for the right reason. `incident.json`/`report.json`
 are loaded through a separate path (`cli.py`'s `_load_stored_artifact`), not through either
 function here, and were out of this round's scope.
+
+**Round 10 — complete telemetry JSON and decoding hardening.** The round 8
+`parse_constant` guard covered only literal `NaN`/`Infinity` tokens. A syntactically valid JSON
+number such as raw `1e400` instead reaches Python's default `parse_float`, silently becoming
+`inf`; `_parse_finite_float` now rejects it in both telemetry readers. This is exercised directly
+and through logs, changes, and topology paths. A malformed UTF-8 changes/topology manifest is
+intentionally unavailable (matching `cli.py`'s stored-artifact boundary); a malformed UTF-8 JSONL
+line is intentionally skipped individually so valid log rows still produce evidence. Finally,
+`settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
+caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
+
+**Post-review strict-schema update.** Current proposal tool schemas are 7,237 serialized
+characters/tokens, leaving 2,363 tokens under the prose-only 9,600-token cap; the final-assessment
+schema is 2,292. Strict schemas reject unknown tool, plan, hypothesis, and final-assessment fields.
+Native Anthropic tool-use responses may include `tool_use`, `thinking`, and `redacted_thinking`
+blocks, but visible text and unsupported blocks remain refused.
 
 **Round 8, P3 — a docstring cited a sibling test by a name that never existed.**
 `test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason` (`test_graph.py`)

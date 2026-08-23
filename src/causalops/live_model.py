@@ -83,6 +83,7 @@ from causalops.cost_ledger import (
     settle_reservation,
 )
 from causalops.domain import (
+    SCHEMA_VERSION,
     FinalAssessment,
     Hypothesis,
     ModelUsage,
@@ -141,7 +142,7 @@ RECORD_FINAL_ASSESSMENT_TOOL_NAME = "record_final_assessment"
 # `hypotheses` field, because that one genuinely is guidance about how to
 # fill the field in, not implementation trivia.
 class PlanRecord(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
     # Unit 3b-4, item 1: the second live run's first new failure was
@@ -232,36 +233,7 @@ _RATIONALE_PROPERTIES: dict[str, JsonValue] = {
 def _strip_maintainer_prose(
     schema: dict[str, Any], *, keep_defs: frozenset[str] = frozenset()
 ) -> dict[str, Any]:
-    """Unit 3b-4, item 6. `model_json_schema()` promotes every class
-    docstring it can reach -- the schema's own root class, and any nested
-    model or enum reachable through `$defs` -- into a `"description"` key
-    that ships to Claude, billed on every call. Most of those docstrings are
-    written for a maintainer reading this codebase, not for a model filling
-    in a tool call: `RunbookTopic.__doc__` names the threat model in prose
-    ("an injected document or a malicious model turn"), `SearchRunbooksArguments
-    .__doc__` cites `policy.py` internals, `ModelDisposition.__doc__`
-    explains an application-side type boundary ("FAILED_SAFE is absent on
-    purpose"). Unit 3b-3's P2-5 fix stripped two leaks by naming the two
-    classes it happened to be looking at (`PlanRecord`'s omitted docstring,
-    and the schema_version/description strip this function replaces) --
-    this unit's investigation found three more that fix never reached,
-    because it was scoped to specific classes instead of every site
-    `model_json_schema()` can promote a docstring from. This strips the
-    class-level `"description"` at every such site -- the schema root and
-    every `$defs` entry -- once, rather than repeating the per-class fix a
-    third and fourth time.
-
-    `keep_defs` is the one exception: `Hypothesis.__doc__` ("Rank is not a
-    probability") is genuine guidance about how to fill the field in, not
-    implementation trivia, so `_plan_tool_definition` below passes
-    `{"Hypothesis"}` to keep it. Property-level `description`s this module
-    adds separately (`_RATIONALE_PROPERTIES` below, and the field-level
-    `description`s Unit 3b-4 added directly to `domain.py`'s `Hypothesis`/
-    `FinalAssessment` fields) live one level deeper, under each `$defs`
-    entry's or the schema's own `properties`, so this function -- which only
-    ever touches a `description` key that sits beside `"type"`/`"enum"`/
-    `"title"` at the top of a schema or a `$defs` entry -- never reaches
-    them."""
+    """Remove billed class-level prose while preserving chosen field guidance."""
     schema = dict(schema)
     schema.pop("description", None)
     defs = schema.get("$defs")
@@ -278,33 +250,11 @@ def _strip_maintainer_prose(
 
 def _domain_tool_definitions() -> list[dict[str, Any]]:
     """Anthropic-format tool definitions for the five registered checks,
-    derived from `ToolArguments`'s own member schemas -- never a second,
-    hand-written list of what arguments each tool takes.
+    derived from `ToolArguments` so code and wire schemas cannot drift.
 
-    Unit 3b-3, the smoke-call blocker: `tools.py`'s `tool` field carries a
-    Python-level default (`= ToolName.X`) for every *other* caller's
-    convenience -- ~30 existing call sites across this repo's tests
-    construct these argument objects without passing `tool=`. That default
-    leaks into `model_json_schema()`'s output as a `"default"` key sitting
-    beside `"const"` on the same required field -- confirmed to be the
-    *only* property, across all five schemas, that carries one. The first
-    live run omitted `tool` from its arguments on both the original call
-    and the repair; a required field that also names its own default reads
-    as omittable, and stripping the wire-schema-only `"default"` below is
-    the targeted fix. `"const"` and the forced membership in `required`
-    just below are untouched, so `parse_tool_call`'s confused-deputy check
-    (`tool_calls.py`: `call.name != arguments.tool.value`) still compares
-    two independently-validated values -- this never injects `tool` from
-    `call.name`, which would make that check unable to ever observe a
-    disagreement again. Only this function's *output* changes; `tools.py`'s
-    own model keeps its default, so none of those ~30 call sites move.
-
-    Unit 3b-4, item 6: `_strip_maintainer_prose` below drops
-    `SearchRunbooksArguments.__doc__` (cites `policy.py` internals) and
-    `RunbookTopic.__doc__` (names this project's own threat model) from the
-    schema this function emits -- both stay on the classes themselves in
-    `tools.py`, for a maintainer reading that file, they just never reach
-    the wire."""
+    Keep `tool` required on the wire while removing its Python convenience
+    default; preserve the independent name/discriminator validation.
+    """
     definitions: list[dict[str, Any]] = []
     for arguments_cls, tool_name, description in _DOMAIN_TOOL_SPECS:
         schema = _strip_maintainer_prose(arguments_cls.model_json_schema())
@@ -468,6 +418,19 @@ def _to_native_tool_call(call: ToolCall) -> NativeToolCall:
     object."""
     call_id = call.get("id") or "missing-call-id"
     return NativeToolCall(name=call["name"], args=call["args"], id=call_id)
+
+
+def _has_visible_content(content: object) -> bool:
+    """Native tool-call turns have no second, unstructured answer channel."""
+    if content in ("", []):
+        return False
+    if not isinstance(content, list):
+        return True
+    return any(
+        not isinstance(block, dict)
+        or block.get("type") not in {"tool_use", "thinking", "redacted_thinking"}
+        for block in content
+    )
 
 
 def _split_tool_calls(
@@ -635,12 +598,12 @@ class LiveClaudeModel:
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
         # binds `_plan_tool_definition()` plus the five `_domain_tool_
-        # definitions()`, ~7,020 tokens (Unit 3b-4 addendum's figure, after
+        # definitions()`, 7,237 tokens in the current emitted schema;
         # item 6 stripped ~1.2K characters of maintainer-only schema/
         # `$defs` docstrings and A1/A2 then added back ~293 characters
         # stating two fields' 300-char bounds and a 4-word "exactly once");
         # `respond()` binds only `_final_assessment_tool_definition()`,
-        # ~2,261 tokens (post-freeze review, N1 -- unpinned until then).
+        # 2,292 tokens in the current emitted schema.
         # `test_live_model.py` pins both figures separately, so this
         # comment cannot drift from either real payload the way an earlier
         # version of the `propose()` figure already did, three times, and
@@ -728,6 +691,8 @@ class LiveClaudeModel:
         tool (`record_final_assessment`), no domain tools offered at all."""
         message = self._send(request, [_final_assessment_tool_definition()])
         usage = self._usage(message)
+        if _has_visible_content(message.content):
+            return ModelResponse(content={}, usage=usage)
         matching_calls = [
             call
             for call in message.tool_calls
@@ -760,9 +725,13 @@ class LiveClaudeModel:
             len(message.tool_calls) != 1
             or len(matching_calls) != 1
             or message.invalid_tool_calls
+            or "schema_version" in matching_calls[0]["args"]
         ):
             return ModelResponse(content={}, usage=usage)
-        return ModelResponse(content=matching_calls[0]["args"], usage=usage)
+        return ModelResponse(
+            content={**matching_calls[0]["args"], "schema_version": SCHEMA_VERSION},
+            usage=usage,
+        )
 
     def propose[StageModel: BaseModel](
         self, request: ModelRequest, schema: type[StageModel]
@@ -774,6 +743,13 @@ class LiveClaudeModel:
         tools = [_plan_tool_definition(), *_domain_tool_definitions()]
         message = self._send(request, tools)
         usage = self._usage(message)
+        if _has_visible_content(message.content):
+            return ProposedTurn(
+                parsed=None,
+                errors="tool-call response must not include visible text",
+                tool_call=(),
+                usage=usage,
+            )
         if message.invalid_tool_calls:
             reasons = "; ".join(
                 f"{call.get('name') or '<unnamed>'}: "

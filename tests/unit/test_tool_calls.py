@@ -131,10 +131,8 @@ def test_a_rationale_field_over_the_length_bound_is_refused() -> None:
     assert "evidence_gap" in reason
 
 
-def test_extra_keys_in_args_do_not_stop_the_arguments_from_parsing() -> None:
-    """The tool schema is flat, so `evidence_gap`/`expected_observation` sit
-    beside the typed fields; the discriminated union has to ignore them
-    without choking, since it never declares `extra="forbid"`."""
+def test_rationale_keys_do_not_stop_the_arguments_from_parsing() -> None:
+    """Rationale siblings are removed before strict tool-argument validation."""
     call = to_tool_call(metric_proposal(), "call-1")
 
     parsed, reason = parse_tool_call(call)
@@ -142,3 +140,15 @@ def test_extra_keys_in_args_do_not_stop_the_arguments_from_parsing() -> None:
     assert parsed is not None
     assert reason == ""
     assert parsed.arguments.tool.value == "query_metric"
+
+
+def test_an_unknown_tool_argument_is_refused() -> None:
+    call = to_tool_call(metric_proposal(), "call-1")
+    args = {**call.args, "unexpected": "must not be ignored"}
+
+    parsed, reason = parse_tool_call(
+        NativeToolCall(name=call.name, args=args, id=call.id)
+    )
+
+    assert parsed is None
+    assert "unexpected" in reason

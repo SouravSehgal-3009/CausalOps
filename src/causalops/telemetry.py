@@ -7,6 +7,7 @@ investigation.
 """
 
 import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -66,19 +67,20 @@ class RunPaths(BaseModel):
 def _reject_non_finite_json_token(token: str) -> JsonValue:
     """`json.loads` accepts the non-standard tokens `NaN`/`Infinity`/
     `-Infinity` by default -- an extension beyond RFC-8259 most other JSON
-    readers reject. Passed as `parse_constant`, this makes `read_json_file`/
-    `read_json_line` refuse them the same way they already refuse anything
-    else unreadable, instead of silently threading a Python `nan`/`inf`
-    float into a typed record. `prometheus.py`'s `read_sample` was hardened
-    against this same token class in metric API responses; these two
-    functions are the general JSON-parsing entry point for every file this
-    module reads -- logs (`read_json_line`, `run_logs_check`), changes and
-    topology (`read_json_file`, `run_changes_check`/`run_topology_check`)
-    -- so without this, any of those could carry a NaN/Infinity token and
-    have it silently propagate. (`incident.json`/`report.json` go through a
-    separate loader, `cli.py`'s `_load_stored_artifact`, not through
-    either function here.)"""
+    readers reject. `parse_constant` refuses those literal tokens, while
+    `_parse_finite_float` refuses ordinary JSON numerals that overflow to
+    `inf`; together they keep either form out of the module's general JSON
+    readers. (`incident.json`/`report.json` use `cli.py`'s separate
+    `_load_stored_artifact` loader.)"""
     raise ValueError(f"non-standard JSON token {token!r} is not accepted")
+
+
+def _parse_finite_float(text: str) -> float:
+    """Parse a JSON float literal without accepting an overflow as `inf`."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number {text!r} is not accepted")
+    return value
 
 
 def read_json_file(path: Path) -> JsonValue | None:
@@ -86,8 +88,12 @@ def read_json_file(path: Path) -> JsonValue | None:
         loaded: JsonValue = json.loads(
             path.read_text(encoding="utf-8"),
             parse_constant=_reject_non_finite_json_token,
+            parse_float=_parse_finite_float,
         )
-    except (OSError, ValueError):  # json.JSONDecodeError subclasses ValueError
+    except (OSError, ValueError):
+        # `JSONDecodeError` and `UnicodeDecodeError` both subclass ValueError.
+        # Treat a malformed manifest as unavailable, matching cli.py's
+        # `_load_stored_artifact` boundary for unreadable UTF-8 artifacts.
         return None
     return loaded
 
@@ -95,7 +101,9 @@ def read_json_file(path: Path) -> JsonValue | None:
 def read_json_line(line: str) -> dict[str, JsonValue] | None:
     try:
         record: JsonValue = json.loads(
-            line, parse_constant=_reject_non_finite_json_token
+            line,
+            parse_constant=_reject_non_finite_json_token,
+            parse_float=_parse_finite_float,
         )
     except ValueError:  # json.JSONDecodeError subclasses ValueError
         return None
@@ -161,8 +169,12 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
     rows: list[JsonValue] = []
     events: set[str] = set()
     truncated = False
-    with log_file.open(encoding="utf-8") as handle:
-        for line in handle:
+    with log_file.open("rb") as handle:
+        for raw_line in handle:
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
             record = read_json_line(line)
             if record is None or not matches_filter(arguments.log_filter, record):
                 continue

@@ -345,9 +345,10 @@ def settle_reservation(
         if cursor.rowcount == 0:
             conn.rollback()
             raise CheckpointStoreError(
-                CheckpointStoreReasonCode.STORE_UNAVAILABLE,
-                f"no RESERVED cost_ledger row for {(run_id, graph_phase, model_turn)} "
-                "to settle -- settle called without a prior reservation",
+                CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE,
+                "no RESERVED cost_ledger row for request key "
+                f"{(run_id, graph_phase, model_turn, context_digest)} to settle "
+                "-- the row is absent or not RESERVED",
             )
         conn.commit()
     except sqlite3.Error as error:

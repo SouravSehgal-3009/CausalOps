@@ -286,9 +286,9 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
 # other config value. Guarding against a fat-fingered magnitude is the
 # owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
 # intent. Unit 3b-3: raised from 2.00 to 5.00, re-derived from the smoke
-# call's measured per-call reservation size after `pricing.py`'s ratio
-# replan (see that module's `PESSIMISTIC_CHARS_PER_TOKEN` comment) --
-# `TECHNICAL_SPEC.md` §10 carries the same amendment.
+# call's measured per-call reservation size after the ratio replan; the
+# calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md` §10
+# carries the same amendment.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
@@ -462,10 +462,10 @@ def _load_stored_artifact[Artifact: BaseModel](
     blanket exception boundary uncaught -- a crashed write, a hand
     edit, or disk corruption are all real, expected ways a stored
     artifact can be broken. `LabReasonCode.INCIDENT_NOT_FOUND` already
-    covers "no such artifact" via an explicit `is_file()` check before
-    every call site below reaches this function; `CORRUPT_ARTIFACT` here
-    covers "there is one, and it cannot be read back," a distinct fact an
-    owner needs told apart from a wrong id."""
+    covers the normal incident-loading callers' explicit `is_file()` check.
+    The finalized-report retry deliberately delegates a missing report here
+    as `CORRUPT_ARTIFACT`, because a finalized directory without its report
+    is damaged state rather than a wrong incident id."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as error:

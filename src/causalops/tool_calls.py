@@ -45,10 +45,9 @@ def select_single_tool_call(calls: Sequence[NativeToolCall]) -> NativeToolCall |
 # `call.args` for a registered tool is flat: the tool's own typed fields plus
 # `evidence_gap`/`expected_observation` as siblings, with `tool` included so
 # the discriminated union below can resolve it independently of `call.name`.
-# Pydantic's discriminator lookup needs that field present in the raw dict, and
-# both variants ignore the two rationale keys they don't declare (the default
-# `extra="ignore"` on every `*Arguments` model), so this adapter cleanly pulls
-# out just the typed arguments. Same pattern as `tests/unit/test_tools.py:19`.
+# Pydantic's discriminator lookup needs that field present in the raw dict. The
+# rationale keys are removed before validating the typed arguments, so the
+# registered argument models can reject every other unknown key.
 arguments_adapter: TypeAdapter[ToolArguments] = TypeAdapter(ToolArguments)
 
 
@@ -83,8 +82,13 @@ def parse_tool_call(call: NativeToolCall) -> tuple[ToolProposal | None, str]:
     each side and ambiguous to a dispatcher, so it is refused here rather than
     left for the wrapper to guess about.
     """
+    argument_values = {
+        key: value
+        for key, value in call.args.items()
+        if key not in {"evidence_gap", "expected_observation"}
+    }
     try:
-        arguments = arguments_adapter.validate_python(call.args)
+        arguments = arguments_adapter.validate_python(argument_values)
     except ValidationError as error:
         return None, summarize_errors(error)
     if call.name != arguments.tool.value:

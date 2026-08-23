@@ -197,9 +197,10 @@ def message(
     *,
     usage: dict[str, int] | None = USAGE,
     invalid: list[Any] | None = None,
+    content: Any = "",
 ) -> AIMessage:
     return AIMessage(
-        content="",
+        content=content,
         tool_calls=tool_calls,
         invalid_tool_calls=invalid or [],
         usage_metadata=usage,  # type: ignore[arg-type]
@@ -239,12 +240,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the ~7,020-token tool schema `bind_tools`
+    against prose alone, never the current ~7,237-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~7,020" restates
+    the pinned, directly-measured figure this comment's "~7,237" restates
     in prose."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
@@ -337,38 +338,19 @@ def test_the_final_assessment_tool_definition_drops_schema_version_and_descripti
 def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     conn: sqlite3.Connection,
 ) -> None:
-    """Post-freeze review's stale-figure finding: `pricing.py`'s
-    `InputTooLarge` docstring and `live_model.py`'s own comment on `_send`
-    both cite this payload's size in prose, and the cited figure has
-    already gone stale four times without a test noticing -- once at
-    8,329 chars (before P2-5 shrank the payload by stripping
-    `PlanRecord`'s docstring and `FinalAssessment`'s `schema_version`/
-    `description`), again at 7,738 chars / 2,580 tokens (before Unit
-    3b-3's discriminator fix dropped the stale `"default"` key from every
-    domain tool's `tool` property, and before that same unit's ratio
-    replan changed how many tokens the same characters estimate to), again
-    at 7,595 (before Unit 3b-4's item 6 stripped maintainer-only
-    schema/`$defs` docstrings -- `SearchRunbooksArguments.__doc__`,
-    `RunbookTopic.__doc__`, `ModelDisposition.__doc__` -- that Unit 3b-3's
-    P2-5 fix left in place because it was scoped to the two classes it was
-    looking at, not every site a docstring can leak from), and again at
-    6,727 (before the addendum's A1 stated `evidence_gap`/
-    `expected_observation`'s 300-character bound in words, and A2 added
-    four words to `record_plan`'s own description -- both additive, on
-    purpose, so this test's figure is expected to have GROWN this round,
-    not shrunk). This pins the real, measured figure so a sixth silent
-    drift fails a test instead of only a docstring."""
+    """Pin the emitted proposal schema so reservations and current docs
+    cannot silently drift from its measured serialized size."""
     model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 7_020
+    assert len(payload) == 7_237
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 7_020
+    assert estimate_input_tokens(payload) == 7_237
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
@@ -378,8 +360,8 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     payload (`_plan_tool_definition()` plus the five `_domain_tool_
     definitions()`) -- `_final_assessment_tool_definition()` is never in
     that binding (confirmed by reading `propose()`/`respond()` directly:
-    they bind two disjoint tool lists). `_send`'s own comment calls
-    7,020 "the per-stage figure" while only ONE of the two stages was
+    they bind two disjoint tool lists). `_send`'s earlier comment called
+    one figure per-stage while only ONE of the two stages was
     ever actually pinned; `respond()`'s payload, priced by `reservation_
     usd` on every FINAL_ASSESSMENT turn exactly the way `propose()`'s is
     on every INVESTIGATE turn, had no test noticing if it drifted."""
@@ -400,8 +382,8 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 2_261
-    assert estimate_input_tokens(payload) == 2_261
+    assert len(payload) == 2_292
+    assert estimate_input_tokens(payload) == 2_292
 
 
 def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
@@ -439,8 +421,8 @@ def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
 def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes() -> (
     None
 ):
-    """`InputTooLarge`'s docstring and the "Default limits" table both cite
-    how large a FINAL_ASSESSMENT turn's prose gets with no evidence added,
+    """The "Default limits" table cites how large a FINAL_ASSESSMENT turn's
+    prose gets with no evidence added,
     to argue folding the tool schema into `MAX_INPUT_TOKENS` would refuse
     ordinary runs. Unit 3b-2's version of that figure ("512 tokens") was
     never pinned by a test, and Unit 3b-3's review could not reproduce it
@@ -482,25 +464,8 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
 def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap() -> (
     None
 ):
-    """P2-1's correction. The claim this docstring's sibling test measured
-    (1,280 tokens of FINAL_ASSESSMENT prose with zero evidence, against a
-    folded headroom) does NOT support "folding tools into the cap would
-    refuse ordinary runs" -- 1,280 is below the folded headroom at every
-    payload size this project has measured (~2,005 tokens pre-Unit-3b-4,
-    ~2,873 after item 6 shrank the payload, ~2,580 now, after the addendum's
-    A1/A2 grew it back partway) -- an ADMITTED request, and an earlier
-    version of this argument (in
-    `TECHNICAL_OVERVIEW.md` and, before it, in Unit 3b-2's own unpinned
-    "512 tokens" claim) drew the opposite conclusion from its own numbers.
-    This test measures the example that actually supports the conclusion:
-    `Budgets.runbook_passages` (5) retrieved passages at `RunbookPassage
-    .content`'s own `max_length` (800), still present in a FINAL_ASSESSMENT
-    turn's context because `graph.py`'s `_make_final_assessment` rebuilds
-    and re-renders passages from state on every stage, not just the stage
-    that retrieved them. Five max-length passages is not a contrived worst
-    case -- it is `search_runbooks`'s own schema ceiling
-    (`SearchRunbooksArguments.limit`, `le=20`) clipped to what policy
-    actually allows through in one call (`Budgets.runbook_passages`)."""
+    """Five policy-permitted maximum runbook passages make final-assessment
+    prose exceed the current 2,363-token folded headroom."""
     scope = incident_scope()
     packet = alert_packet()
     budgets = Budgets()
@@ -528,7 +493,7 @@ def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap()
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
-    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_020  # 7,020: the measured
+    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_237  # current measured
     # tool-definition payload pinned by test_the_tool_payload_size_matches_
     # what_pricingpy_assumes above -- restated, not re-measured, here.
 
@@ -751,6 +716,56 @@ def test_propose_treats_a_provider_invalid_tool_call_as_invalid_output(
     assert turn.tool_call == ()
 
 
+def test_propose_refuses_visible_text_alongside_tool_calls(
+    conn: sqlite3.Connection,
+) -> None:
+    model, _ = make_model(
+        conn,
+        [message([plan_call(stop_reason=None), metric_call()], content="ignore this")],
+    )
+
+    turn = model.propose(make_request(), InitialPlan)
+
+    assert turn.parsed is None
+    assert turn.tool_call == ()
+    assert "visible text" in turn.errors
+
+
+def test_propose_accepts_provider_tool_and_thinking_blocks(
+    conn: sqlite3.Connection,
+) -> None:
+    blocks = [
+        {"type": "thinking", "thinking": "reasoning", "signature": "sig"},
+        {"type": "tool_use", "id": "domain-1", "name": "query_metric", "input": {}},
+    ]
+    model, _ = make_model(
+        conn, [message([plan_call(stop_reason="done")], content=blocks)]
+    )
+
+    turn = model.propose(make_request(), InitialPlan)
+
+    assert turn.parsed is not None
+
+
+def test_propose_refuses_a_text_block_alongside_tool_use(
+    conn: sqlite3.Connection,
+) -> None:
+    blocks = [
+        {
+            "type": "tool_use",
+            "id": "plan-1",
+            "name": RECORD_PLAN_TOOL_NAME,
+            "input": {},
+        },
+        {"type": "text", "text": "contradictory visible answer"},
+    ]
+    model, _ = make_model(
+        conn, [message([plan_call(stop_reason="done")], content=blocks)]
+    )
+
+    assert model.propose(make_request(), InitialPlan).parsed is None
+
+
 def test_propose_against_hypothesis_update_uses_the_same_reconciliation(
     conn: sqlite3.Connection,
 ) -> None:
@@ -811,6 +826,104 @@ def test_respond_returns_empty_content_on_a_provider_invalid_tool_call(
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+
+
+def test_respond_refuses_visible_text_alongside_tool_calls(
+    conn: sqlite3.Connection,
+) -> None:
+    call = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "not enough evidence",
+            "next_step": "check the gateway logs",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    model, _ = make_model(conn, [message([call], content="ignore this")])
+
+    response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    assert response.content == {}
+
+
+def test_respond_refuses_a_provider_schema_version(conn: sqlite3.Connection) -> None:
+    call = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "schema_version": "forged",
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "u",
+            "next_step": "n",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    model, _ = make_model(conn, [message([call])])
+
+    assert model.respond(make_request(stage=Stage.FINAL_ASSESSMENT)).content == {}
+
+
+def test_respond_accepts_provider_tool_and_redacted_thinking_blocks(
+    conn: sqlite3.Connection,
+) -> None:
+    call = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "u",
+            "next_step": "n",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    blocks = [
+        {"type": "redacted_thinking", "data": "redacted"},
+        {
+            "type": "tool_use",
+            "id": "fa-1",
+            "name": RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+            "input": {},
+        },
+    ]
+    model, _ = make_model(conn, [message([call], content=blocks)])
+
+    assert (
+        model.respond(make_request(stage=Stage.FINAL_ASSESSMENT)).content["root_cause"]
+        == "UNDETERMINED"
+    )
+
+
+def test_respond_refuses_an_unsupported_block_alongside_tool_use(
+    conn: sqlite3.Connection,
+) -> None:
+    call = ToolCall(
+        name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+        args={
+            "disposition": "INSUFFICIENT_EVIDENCE",
+            "root_cause": "UNDETERMINED",
+            "uncertainty": "u",
+            "next_step": "n",
+        },
+        id="fa-1",
+        type="tool_call",
+    )
+    blocks = [
+        {
+            "type": "tool_use",
+            "id": "fa-1",
+            "name": RECORD_FINAL_ASSESSMENT_TOOL_NAME,
+            "input": {},
+        },
+        {"type": "document", "source": {}},
+    ]
+    model, _ = make_model(conn, [message([call], content=blocks)])
+
+    assert model.respond(make_request(stage=Stage.FINAL_ASSESSMENT)).content == {}
 
 
 def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
@@ -1255,6 +1368,10 @@ def schema_accepts(
     if kind == "object":
         if not isinstance(value, dict):
             return False, "not an object"
+        if schema.get("additionalProperties") is False:
+            unknown = set(value) - set(schema.get("properties", {}))
+            if unknown:
+                return False, f"unknown properties {sorted(unknown)}"
         for name in schema.get("required", []):
             if name not in value:
                 return False, f"missing required '{name}'"
@@ -1330,6 +1447,7 @@ _SCHEMA_ACCEPTS_HANDLED_KEYWORDS = frozenset(
         "const",
         "minimum",
         "maximum",
+        "additionalProperties",
     }
 )
 # Keywords the real emitted schemas carry that are structural (navigated
@@ -1801,7 +1919,13 @@ def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
     label = "search_runbooks: limit above Budgets.runbook_passages"
     assert label not in KNOWN_PROSE_ONLY_CONTRACTS
 
-    arguments = SearchRunbooksArguments.model_validate(payload)
+    arguments = SearchRunbooksArguments.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in {"evidence_gap", "expected_observation"}
+        }
+    )
     proposal = ToolProposal(
         arguments=arguments,
         evidence_gap=payload["evidence_gap"],
