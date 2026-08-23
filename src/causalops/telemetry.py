@@ -22,7 +22,7 @@ from causalops.domain import (
     ToolOutcome,
     ToolProposal,
 )
-from causalops.evidence import executed_check, failed_check, trim_to_bytes
+from causalops.evidence import executed_check, failed_check, fits, trim_to_bytes
 from causalops.prometheus import run_metric_check
 from causalops.tools import (
     GetTopologyArguments,
@@ -241,9 +241,42 @@ def run_changes_check(
         "truncated": False,
     }
     payload = trim_to_bytes(payload, "changes", changes, "change_count")
-    # Post-freeze review, P3-1. Same fix as `run_logs_check` above:
-    # `len(changes)` is the PRE-trim count; `payload["change_count"]` is
-    # what `trim_to_bytes` keeps honest throughout.
+    # Round 6 review, item 2. `summaries` (above) has the same pre-trim-
+    # aggregate shape already fixed twice this round elsewhere
+    # (`event_codes`, `max_value`): it was joined from EVERY matched
+    # change before `trim_to_bytes` ran and never rebuilt, so it could
+    # still name changes no longer present in `payload["changes"]` after
+    # trimming -- worst case, `change_count: 0` with `summaries` still
+    # listing changes for an empty list. Rebuilt below from
+    # `payload["changes"]`, the POST-trim list.
+    #
+    # Unlike `event_codes`/`max_value`, this rebuild is not simply
+    # guaranteed smaller by construction without checking: `trim_to_bytes`
+    # pops rows from the END of the list, so `kept_summaries` is always a
+    # PREFIX (in original order) of the full `summaries` this scalar was
+    # first built from -- if `changes` still holds any rows, `summaries`
+    # was never touched during the row-popping loop above, so the payload
+    # already fit WITH the full string present, and a prefix of it can
+    # only be smaller or equal. If `changes` was fully emptied, the
+    # scalar-shrinking fallback already halved `summaries` down before
+    # this rebuild replaces it with an even shorter (or empty) string.
+    # Both branches can only shrink the payload -- but that reasoning is
+    # exactly the shape of claim a previous fix in THIS SAME FUNCTION made
+    # about seeding order and shipped wrong (F1, round 3), so it is
+    # checked with `fits()` below rather than trusted silently.
+    kept_changes = payload["changes"]
+    assert isinstance(kept_changes, list)
+    kept_summaries: list[str] = []
+    for kept_change in kept_changes:
+        if isinstance(kept_change, dict):
+            kept_summary = kept_change.get("summary")
+            if isinstance(kept_summary, str):
+                kept_summaries.append(kept_summary)
+    payload["summaries"] = "; ".join(kept_summaries)
+    assert fits(payload), (
+        "rebuilding summaries from the post-trim changes list must not "
+        "grow the payload back over the byte bound"
+    )
     truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.CHANGE,
@@ -334,10 +367,17 @@ def run_topology_check(
     }
     payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
     payload = trim_to_bytes(payload, "services", service_list, "service_count")
+    # Round 6 review, the P1. Same gap as `run_metric_check`: `payload
+    # ["truncated"]` already carries whether either list above was cut,
+    # but this summary string never rendered it, and the summary is the
+    # only part of a `CheckOutcome` `prompts.py` puts in front of the
+    # model. A truncated topology read as complete with no signal that
+    # edges or services were dropped.
+    truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.TOPOLOGY,
         source,
-        f"{payload['edge_count']} service edges in this incident",
+        f"{payload['edge_count']} service edges in this incident{truncated_note}",
         payload,
         started,
     )

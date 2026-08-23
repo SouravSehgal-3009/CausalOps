@@ -209,9 +209,18 @@ def run_metric_check(
     # below the `MAX_METRIC_SAMPLES` cap already applied above), but fixed
     # anyway: the owner ruled this closes the CLASS, not just the
     # reachable instance. Rebuilt from `payload["samples"]`, the POST-trim
-    # list -- can only shrink or hold `max_value` (every kept row was
-    # already in the pre-trim set), never grow the payload back over
-    # budget.
+    # list.
+    #
+    # Round 6 review. The comment here used to also claim rebuilding
+    # `max_value` "can only shrink or hold... never grow the payload back
+    # over budget" -- true of the NUMERIC value (every kept sample was
+    # already in the pre-trim set, so the max can only fall or stay the
+    # same), but not a safe claim about JSON BYTE LENGTH: `900.0`
+    # serializes to 5 bytes, `0.30000000000000004` to 19, so a smaller
+    # float is not guaranteed to serialize to fewer bytes. The real safety
+    # argument is unreachability, stated above, not this false general
+    # property -- the same shape of overclaiming this round's own review
+    # was about.
     kept_samples = payload["samples"]
     assert isinstance(kept_samples, list)
     kept_values: list[float] = []
@@ -221,11 +230,19 @@ def run_metric_check(
             if isinstance(value, int | float):
                 kept_values.append(float(value))
     payload["max_value"] = max(kept_values, default=0.0)
+    # Round 6 review, the P1. `payload["truncated"]` already carries whether
+    # this check's data was cut, but only `run_logs_check`/`run_changes_check`
+    # rendered that into their summary string -- the only field of a
+    # `CheckOutcome` `prompts.py`'s `render_context` puts in front of the
+    # model. A truncated metric window read as complete with no signal the
+    # true peak might lie outside what was kept.
+    truncated_note = " (truncated)" if payload["truncated"] else ""
     return executed_check(
         EvidenceKind.METRIC,
         source,
         f"{arguments.template.value} for {arguments.service}: "
-        f"{payload['sample_count']} samples, peak {payload['max_value']}",
+        f"{payload['sample_count']} samples, peak {payload['max_value']}"
+        f"{truncated_note}",
         payload,
         started,
     )

@@ -1495,7 +1495,16 @@ _WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
 # contract here, with a stated reason, is how it opts out of the wire-
 # proof requirement without silently defeating this test for a future
 # contract that legitimately needs to.
-_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF: frozenset[str] = frozenset()
+#
+# Round 6 review. This registry was a bare `frozenset[str]`, its two
+# siblings above (`KNOWN_PROSE_ONLY_CONTRACTS`, `_WIRE_VISIBLE_PROSE_
+# PROOF`) both force a reason/pointer alongside every entry; a frozenset
+# has no room for one, so a future exemption added here would carry no
+# stated reason at all -- exactly the discipline this comment already
+# describes but the type could not enforce. `dict[str, str]` (label ->
+# reason) matches its siblings' shape; empty today, so this is a type
+# change with no data migration.
+_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF: dict[str, str] = {}
 
 
 def test_wire_visible_prose_proof_only_names_registered_contracts() -> None:

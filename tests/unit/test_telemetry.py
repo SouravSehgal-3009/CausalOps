@@ -115,6 +115,63 @@ def test_a_metric_query_returns_bounded_samples(
     assert f"{MAX_METRIC_SAMPLES} samples" in outcome.summary
 
 
+@pytest.fixture
+def small_fake_prometheus() -> Iterator[str]:
+    """A loopback stand-in returning fewer samples than `MAX_METRIC_SAMPLES`
+    -- unlike `fake_prometheus`, this one is genuinely NOT truncated. The
+    negative case for the truncated-summary tests below, without which
+    nothing could tell "always renders (truncated)" apart from correctly
+    rendering it only when it is actually true."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            payload = prometheus_body(sample_count=3)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_metric_summary_names_truncation_when_samples_were_cut(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    """Round 6 review, the P1. `prompts.py`'s `render_context` puts only
+    `CheckOutcome.summary` in front of the model -- the full payload
+    (which correctly carries `payload["truncated"]`) never reaches it.
+    `run_logs_check`/`run_changes_check` already named truncation in
+    their summary strings this round; `run_metric_check` did not, so a
+    cut metric window read as complete with no signal the true peak
+    might lie outside what survived."""
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), fake_prometheus.url, 5
+    )
+
+    assert outcome.payload["truncated"] is True
+    assert outcome.summary.endswith("(truncated)")
+
+
+def test_a_metric_summary_names_no_truncation_when_nothing_was_cut(
+    small_fake_prometheus: str,
+) -> None:
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), small_fake_prometheus, 5
+    )
+
+    assert outcome.payload["truncated"] is False
+    assert not outcome.summary.endswith("(truncated)")
+
+
 def test_a_metric_summary_reports_the_post_trim_count_not_the_pre_trim_one(
     monkeypatch: pytest.MonkeyPatch, fake_prometheus: RecordingPrometheus
 ) -> None:
@@ -449,6 +506,70 @@ def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
     assert outcome.summary == "0 recent changes on orders (truncated)"
     assert isinstance(outcome.payload["summaries"], str)
     assert len(outcome.payload["summaries"]) < MAX_RESULT_BYTES
+    # Round 6 review, item 2. `changes` was fully emptied here, so the
+    # rebuild below (built from the post-trim `changes` list) replaces
+    # whatever text the scalar-shrinking fallback left in `summaries` with
+    # an empty string -- there is nothing left to summarize.
+    assert outcome.payload["summaries"] == ""
+
+
+def test_changes_summaries_only_name_changes_still_present_after_trimming(
+    tmp_path: Path,
+) -> None:
+    """Round 6 review, item 2. `summaries` is joined from EVERY matched
+    change before `trim_to_bytes` runs and is a scalar, not a row list --
+    the same pre-trim-aggregate shape already fixed twice this round for
+    `event_codes` and `max_value`. Unlike the single-oversized-summary
+    case above (where `changes` is fully emptied), this scenario is the
+    more common partial trim: enough changes to force byte trimming, but
+    not so much oversized text that popping rows alone cannot bring the
+    payload back under budget. `trim_to_bytes` pops rows from the END of
+    the list, so `changes` 000 through 006 survive and 007 through 029 do
+    not -- reproduced directly against the real function (not asserted
+    blindly): 30 changes here reduce to `change_count == 7`, with
+    `summaries` still holding the text of every one of the 30 (only
+    `changes` had been trimmed) before this fix's rebuild. `summaries`
+    must name only the survivors, and the payload must still fit."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": f"change-{index:03d}: " + "s" * 300,
+                }
+                for index in range(30)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert outcome.payload["truncated"] is True
+    change_count = outcome.payload["change_count"]
+    assert isinstance(change_count, int)
+    assert 0 < change_count < 30
+    surviving_indices = {
+        change["summary"][:10]  # type: ignore[index]
+        for change in outcome.payload["changes"]  # type: ignore[union-attr]
+    }
+    summaries = str(outcome.payload["summaries"])
+    for index in range(30):
+        marker = f"change-{index:03d}"
+        if marker in surviving_indices:
+            assert marker in summaries, f"{marker} survived trimming but is missing"
+        else:
+            assert marker not in summaries, (
+                f"{marker} was trimmed away but still named in summaries"
+            )
 
 
 def test_recent_changes_are_filtered_by_service_and_window(tmp_path: Path) -> None:
@@ -499,6 +620,28 @@ def test_topology_reads_the_run_manifest(tmp_path: Path) -> None:
     assert outcome.outcome is ToolOutcome.EXECUTED
     assert outcome.payload["edge_count"] == 1
     assert "1 service edges" in outcome.summary
+    assert outcome.payload["truncated"] is False
+    assert not outcome.summary.endswith("(truncated)")
+
+
+def test_topology_summary_names_truncation_when_the_payload_was_cut(
+    tmp_path: Path,
+) -> None:
+    """Round 6 review, the P1. Same gap as the metric case: `payload
+    ["truncated"]` already carried whether trimming cut this topology, but
+    `run_topology_check`'s summary string never rendered it -- the only
+    part of a `CheckOutcome` `prompts.py`'s `render_context` puts in front
+    of the model."""
+    paths = RunPaths(root=tmp_path)
+    edges = [f"service-{i}>service-{i + 1}" for i in range(600)]
+    paths.topology_file.write_text(
+        json.dumps({"services": [], "edges": edges}), encoding="utf-8"
+    )
+
+    outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
+
+    assert outcome.payload["truncated"] is True
+    assert outcome.summary.endswith("(truncated)")
 
 
 def test_topology_summary_reports_the_post_trim_edge_count(tmp_path: Path) -> None:
@@ -536,11 +679,30 @@ def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) ->
     long service names really do exceed it. Not reachable through any of
     the four shipped lab topologies (all under 100 bytes total) -- this
     is a defensive bound, not a scenario this project's own lab can
-    trigger, per the owner's P3 severity ruling."""
+    trigger, per the owner's P3 severity ruling.
+
+    Round 6 review, item 3. This test used to pair the oversized `services`
+    list with an EMPTY `edges` list (`"edges": []`) -- a degenerate shape
+    that pinned nothing about what happens to a genuinely non-empty `edges`
+    list under the same oversized-services condition, which is exactly the
+    kind of gap that let the round-3 regression (F1: an all-`services`,
+    no-`edges` case masking what a real, non-empty `edges` list does) ship
+    unnoticed. `edges` here is a handful of real, short edges -- reproduced
+    directly against the real function before writing this assertion (not
+    assumed): under the shipped edges-first call order, `edges`-first
+    pops the whole (small, cheap) `edges` list to empty without ever
+    bringing the still-huge `services`-dominated payload under budget, so
+    `edge_count` goes to zero; `services`, trimmed second against a payload
+    that no longer carries any `edges` weight, still comes away non-empty
+    and reduced. That is the documented tradeoff (`edges` absorbs the loss
+    so the short, bounded `services` list does not) -- pinned explicitly
+    here rather than left implicit via an empty list nobody could tell
+    apart from "not tested"."""
     paths = RunPaths(root=tmp_path)
     services = [f"service-with-a-long-descriptive-name-{i}" for i in range(400)]
+    edges = [f"edge-{i}" for i in range(8)]
     paths.topology_file.write_text(
-        json.dumps({"services": services, "edges": []}), encoding="utf-8"
+        json.dumps({"services": services, "edges": edges}), encoding="utf-8"
     )
 
     outcome = run_topology_check(GetTopologyArguments(incident_id=INCIDENT_ID), paths)
@@ -549,8 +711,13 @@ def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) ->
     assert outcome.payload["truncated"] is True
     kept_service_count = outcome.payload["service_count"]
     assert isinstance(kept_service_count, int)
-    assert kept_service_count < len(services)
+    assert 0 < kept_service_count < len(services)
     assert kept_service_count == len(outcome.payload["services"])  # type: ignore[arg-type]
+    # `edges` is sacrificed to zero under the shipped edges-first order --
+    # small enough (8 real edges) to lose entirely while `services` (the
+    # field actually responsible for the overage) still survives trimmed
+    # rather than wiped. See this test's own docstring for why.
+    assert outcome.payload["edge_count"] == 0
 
 
 def test_a_small_services_list_survives_an_oversized_edges_list(tmp_path: Path) -> None:

@@ -205,7 +205,17 @@ def test_stored_incident_refuses_an_evidence_incident_id_mismatch() -> None:
     """Sibling of the packet-mismatch test above, for the third
     identity-bearing field `StoredIncident.check_identity_agrees` checks --
     a single mismatched evidence record among several is still refused,
-    not just a wholesale-wrong tuple."""
+    not just a wholesale-wrong tuple. This is the field the packet-
+    mismatch test's own docstring points here for: a mismatched
+    `evidence[i].incident_id` is what used to reach `graph.py`'s
+    `_rebuild_store`, which raises `ValueError` on it from BOTH the
+    normal `_build_report` path and the outer crash-containment path
+    meant to catch exactly that failure -- escaping `main()`'s
+    `(LabError, RunRecordError, CheckpointStoreError)` catch tuple
+    entirely (see `TECHNICAL_OVERVIEW.md`'s "Second dual review on
+    a44bf57" section for the full trace). `check_identity_agrees` refuses
+    this at load time instead, before either graph path ever sees the
+    artifact."""
     scope = incident_scope()
     packet = alert_packet()
     one_evidence, other_evidence = packet_evidence()

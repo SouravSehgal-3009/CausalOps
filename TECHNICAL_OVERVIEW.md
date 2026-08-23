@@ -2879,6 +2879,92 @@ checks see the true combined size from their first iteration.
   as a boundary on what the mechanism CAN see, not an incomplete audit of what it has looked
   at. Docstring-only; no code change.
 
+### Round 4 and round 6 review — trim-order regression, aggregate rebuilds, registry closure, truncation signal
+
+**Two more review rounds on top of `37fcfdc`, landed as `751387d` (round 4) and this round
+(round 6).** Round 5 was a confirmation pass that found nothing new. This section documents
+both landed rounds together since round 4 shipped without a `TECHNICAL_OVERVIEW.md` update of
+its own.
+
+**F1 — the services-list fix (previous round) was tested only for the case it was built for,
+and shipped a regression.** `run_topology_check`'s comment used to claim "order between the two
+[`trim_to_bytes`] calls does not matter for the final result" — true for WHETHER the combined
+payload fits (both `"services"` and `"edges"` are seeded into the payload before either call
+runs, so each call's own `fits()` check always sees the true combined size), false for WHICH
+list absorbs the trimming. `trim_to_bytes` pops rows from its own list unconditionally until
+`fits(payload)`, so whichever call runs first keeps popping against the OTHER list's still
+full weight. Reproduced directly: a realistic incident shape (4 real service names, 400
+oversized edges) under the previously-shipped services-first order reported `service_count: 0`
+— every real service name silently wiped — while `edges`, the field actually responsible for
+the overage, came away barely trimmed. **Fix: `edges` trims first**, because it is the field
+this codebase's real data grows without bound (topology connections); `services` is a short,
+bounded list that should almost never need trimming. Trimming `edges` first protects `services`
+at `edges`'s expense — the right tradeoff for that shape, though it does not eliminate the
+underlying asymmetry, only points it at the field where losing rows is safe to read.
+`test_a_small_services_list_survives_an_oversized_edges_list` pins the asymmetric case; round 6
+additionally rewrote the ORIGINAL services-fix test
+(`test_an_oversized_services_list_still_fits_the_byte_bound`), which had paired an oversized
+`services` list with a degenerate EMPTY `edges` list — exactly the shape of gap that let the
+regression itself ship undetected — to use a small but non-empty `edges` list instead, and
+pins what the shipped edges-first order actually does to it (`edge_count` goes to zero,
+sacrificed so `services` survives trimmed rather than wiped).
+
+**F2 — the registry-closure test only proved one direction.** `test_wire_visible_prose_proof_
+only_names_registered_contracts` used to assert `set(_WIRE_VISIBLE_PROSE_PROOF) <=
+set(KNOWN_PROSE_ONLY_CONTRACTS)` — every PROOF entry is registered, but not the reverse. A
+fifth prose-only contract added to `KNOWN_PROSE_ONLY_CONTRACTS` without a matching proof entry
+would pass silently, with no wire-proof requirement on it at all — the exact shape of gap N2
+(previous round) closed for the first four. Tightened to an exact-set check across
+`_WIRE_VISIBLE_PROSE_PROOF` plus a new, explicitly reasoned exemption registry,
+`_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF`, for the rare contract whose prose is a Python error
+string rather than schema text (empty today). Round 6 changed that exemption registry's type
+from a bare `frozenset[str]` to `dict[str, str]` (label -> reason), matching its two siblings —
+a frozenset had no room to carry the "stated reason" the surrounding comment already demanded
+of every entry.
+
+**F3 — the pre-trim-aggregate bug, two more instances closed, a third found this round.**
+`event_codes` (`run_logs_check`) and `max_value` (`run_metric_check`) were built from local
+loop state entirely before `trim_to_bytes` ran, the same shape already fixed once for
+`row_count`/`change_count`/`edge_count` (Unit 3b-4 addendum, C3) — a row popped by BYTE
+trimming (not just a count cap) could still be reported in the aggregate even though it no
+longer appears in the trimmed row list. Both rebuilt from the POST-trim row list. `event_codes`
+is reachable with real lab-shaped data; `max_value` is not reachable with this suite's current
+data shape (`MetricSample.at`/`.value` are always small floats) but was fixed anyway per the
+owner's ruling to close the class, not just the reachable instance.
+
+Round 6 found a third instance: `summaries` (`run_changes_check`) has the identical shape,
+joined from every matched change before `trim_to_bytes` ran and never rebuilt — worst case,
+`change_count: 0` with `summaries` still listing changes for an empty list. Rebuilt from the
+post-trim `changes` list. Unlike the first two instances, this rebuild is not simply safe by
+inspection without checking: `trim_to_bytes` pops from the END of the row list, so the rebuilt
+string is always a PREFIX of the original (if `changes` still holds rows, `summaries` was never
+touched by trimming, so the payload already fit with the full string present; if `changes` was
+fully emptied, the scalar-shrinking fallback had already reduced `summaries`, and the rebuild
+from an empty list can only be shorter still) — safe by construction, but that is exactly the
+shape of claim F1's own comment made and shipped wrong, so an explicit `fits(payload)` assertion
+checks it at runtime rather than resting on the argument alone.
+`test_changes_summaries_only_name_changes_still_present_after_trimming` reproduces the ordinary
+partial-trim case (30 changes reduce to `change_count == 7`) and confirms `summaries` only names
+the survivors.
+
+**The P1 — the model never saw the truncation signal for two of four check types.**
+`prompts.py`'s `render_context` puts only `CheckOutcome.summary` in front of the model — the
+full JSON payload, which correctly carries `payload["truncated"]`, never reaches it.
+`run_logs_check`/`run_changes_check` already appended `" (truncated)"` to their summary strings
+when cut; `run_metric_check` and `run_topology_check` did not, so a truncated metric window or
+topology read as complete with no signal the true peak (or the full edge/service set) might lie
+outside what survived. Both now append the same `" (truncated)"` note, reading
+`payload["truncated"]` directly.
+
+**Cleanup.** `run_metric_check`'s `max_value`-rebuild comment claimed rebuilding "can only
+shrink or hold `max_value`... never grow the payload back over budget" — true of the NUMERIC
+value, not of JSON byte length (`900.0` serializes to 5 bytes, `0.30000000000000004` to 19), so
+the false general claim was dropped in favor of the comment's own already-stated unreachability
+argument. `test_stored_incident_refuses_an_evidence_incident_id_mismatch`'s docstring, which the
+sibling packet-mismatch test's docstring points readers to for the `_rebuild_store` double-fault
+explanation, did not actually contain it — fixed by stating the explanation there directly
+(see "Second dual review on `a44bf57`" above for the full trace).
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"
