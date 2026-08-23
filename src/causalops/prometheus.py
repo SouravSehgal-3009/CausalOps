@@ -5,6 +5,7 @@ untrusted, so it is validated into typed samples before anything else touches it
 """
 
 import json
+import math
 import re
 import time
 import urllib.error
@@ -70,9 +71,23 @@ def read_sample(pair: JsonValue) -> MetricSample | None:
     ):
         return None
     try:
-        return MetricSample(at=float(moment), value=float(reading))
+        at = float(moment)
+        value = float(reading)
     except ValueError:
         return None
+    # `float()` parses "NaN", "Infinity", and an overflow literal like
+    # "1e400" without raising -- and `histogram_quantile` (GATEWAY_LATENCY_P95)
+    # is documented to return NaN over an all-zero-rate bucket, a realistic
+    # quiet-minute case, not an exotic one. A NaN sample makes `max()` in
+    # `run_metric_check` order-dependent (a genuine peak can be silently
+    # replaced depending only on where the NaN sample sits in the fetched
+    # list), and both non-finite kinds serialize outside the JSON spec
+    # (Python's own encoder/decoder tolerate them; nothing else reading
+    # evidence.jsonl is obliged to). Same "unreadable field -> None, skip
+    # this row" contract this function already applies to unparsable rows.
+    if not math.isfinite(at) or not math.isfinite(value):
+        return None
+    return MetricSample(at=at, value=value)
 
 
 def parse_samples(answered: JsonValue) -> list[MetricSample] | None:

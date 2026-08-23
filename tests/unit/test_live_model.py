@@ -1528,6 +1528,25 @@ def test_wire_visible_prose_proof_only_names_registered_contracts() -> None:
     )
 
 
+def test_every_wire_proof_exemption_carries_a_real_reason() -> None:
+    """Round 7 review. `_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` became a
+    `dict[str, str]` in round 6 so an exemption could not be added without
+    a stated reason, matching its two sibling registries -- but the test
+    above only ever reads `set(_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF)`,
+    the dict's KEYS, and never looks at the values it exists to force. A
+    future entry like `{"some_new_contract": ""}` would pass every
+    existing test in this file. The registry is empty today, so this
+    needs no data migration -- it only closes the enforcement gap for
+    whenever an entry is first added."""
+    for label, reason in _PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF.items():
+        assert reason.strip(), (
+            f"{label!r} is exempted from the wire-proof requirement with "
+            "no stated reason -- every exemption in this registry must "
+            "say why, matching KNOWN_PROSE_ONLY_CONTRACTS and "
+            "_WIRE_VISIBLE_PROSE_PROOF"
+        )
+
+
 def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
     """The N2 fix itself. For each known prose-only contract that claims a
     specific field's own description carries the rule, this looks up the

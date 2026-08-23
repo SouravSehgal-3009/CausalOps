@@ -2,6 +2,7 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,7 +29,13 @@ from causalops.domain import (
     ToolProposal,
 )
 from causalops.evidence import MAX_RESULT_BYTES
-from causalops.prometheus import MAX_METRIC_SAMPLES, parse_samples, run_metric_check
+from causalops.prometheus import (
+    MAX_METRIC_SAMPLES,
+    MetricSample,
+    parse_samples,
+    read_sample,
+    run_metric_check,
+)
 from causalops.telemetry import (
     MAX_LOG_ROWS,
     RunPaths,
@@ -299,6 +306,89 @@ def test_an_unreadable_prometheus_answer_is_an_error() -> None:
     assert parse_samples({"status": "error"}) is None
     assert parse_samples({"status": "success", "data": {"result": []}}) == []
     assert parse_samples("nonsense") is None
+
+
+def test_read_sample_rejects_non_finite_readings() -> None:
+    """Round 7 review. `float()` parses "NaN", "Infinity", and an overflow
+    literal like "1e400" into non-finite floats without raising -- so
+    those used to become an ordinary-looking `MetricSample`. `float()`
+    also accepts a bare numeric NaN/inf for the timestamp field, so both
+    positions are checked."""
+    assert read_sample([0, "NaN"]) is None
+    assert read_sample([0, "Infinity"]) is None
+    assert read_sample([0, "-Infinity"]) is None
+    assert read_sample([0, "1e400"]) is None  # overflows to inf
+    assert read_sample([float("nan"), "0.5"]) is None
+    assert read_sample([float("inf"), "0.5"]) is None
+    assert read_sample([0, "0.5"]) == MetricSample(at=0.0, value=0.5)
+
+
+def test_a_nan_sample_does_not_win_the_reported_peak_regardless_of_position() -> None:
+    """`histogram_quantile` (GATEWAY_LATENCY_P95) is documented to return
+    NaN over an all-zero-rate bucket -- a quiet minute, not an exotic
+    input. Before this fix, `max()` over a sample list containing NaN
+    was order-dependent: whether the reported peak survived depended on
+    whether the NaN sample happened to sit before or after it in the
+    fetched list. Both orderings are checked so a fix that only handles
+    one of them cannot pass silently."""
+    nan_after_the_peak = {
+        "status": "success",
+        "data": {"result": [{"values": [[0, "0.1"], [1, "0.9"], [2, "NaN"]]}]},
+    }
+    nan_before_the_peak = {
+        "status": "success",
+        "data": {"result": [{"values": [[0, "NaN"], [1, "0.1"], [2, "0.9"]]}]},
+    }
+    for answer in (nan_after_the_peak, nan_before_the_peak):
+        samples = parse_samples(answer)
+        assert samples is not None
+        assert len(samples) == 2
+        assert max(sample.value for sample in samples) == 0.9
+
+
+@contextmanager
+def _serve_fixed_prometheus_body(body: bytes) -> Iterator[str]:
+    """Same loopback pattern as `fake_prometheus`/`stalled_prometheus`
+    above, but for a caller-supplied raw body instead of `prometheus_body`'s
+    fixed shape -- used once, for the end-to-end NaN test below, so it is a
+    plain context manager rather than another named fixture."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_metric_checks_reported_peak_survives_a_nan_sample_end_to_end() -> None:
+    """Same claim as the `parse_samples`-level test above, exercised through
+    `run_metric_check`'s full pipeline (including the post-trim
+    `payload["max_value"]` rebuild) rather than only the parsing layer."""
+    body = json.dumps(
+        {
+            "status": "success",
+            "data": {"result": [{"values": [[0, "NaN"], [1, "0.1"], [2, "0.9"]]}]},
+        }
+    ).encode("utf-8")
+    with _serve_fixed_prometheus_body(body) as url:
+        outcome = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert outcome.payload["sample_count"] == 2
+    assert outcome.payload["max_value"] == 0.9
 
 
 def test_a_log_query_returns_only_matching_rows_in_the_window(tmp_path: Path) -> None:

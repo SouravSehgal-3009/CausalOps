@@ -273,6 +273,14 @@ def run_changes_check(
             if isinstance(kept_summary, str):
                 kept_summaries.append(kept_summary)
     payload["summaries"] = "; ".join(kept_summaries)
+    # Round 7 review confirmed this check is genuinely unreachable here
+    # (this function always has a string-valued field -- `summaries` --
+    # for `trim_to_bytes`'s own scalar fallback to shrink, so `fits()`
+    # cannot come back `False` at this point). Kept anyway as harmless
+    # defense-in-depth: it costs nothing at runtime and would catch a
+    # future change to this rebuild that broke the reasoning above. The
+    # genuinely load-bearing sibling of this check is in
+    # `run_topology_check`, the one function with no string field at all.
     assert fits(payload), (
         "rebuilding summaries from the post-trim changes list must not "
         "grow the payload back over the byte bound"
@@ -367,6 +375,27 @@ def run_topology_check(
     }
     payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
     payload = trim_to_bytes(payload, "services", service_list, "service_count")
+    # Round 7 review. This payload has NO string-valued field at all
+    # (`services`/`edges` are lists, `service_count`/`edge_count`/
+    # `truncated` are int/bool) -- unlike every other `trim_to_bytes`
+    # caller in this codebase, `trim_to_bytes`'s own scalar-shrinking
+    # fallback (see its docstring) is a true no-op here, not a second
+    # layer of defense. A reviewer measured directly that the fallback's
+    # `widest_key is None` escape IS reached in normal operation (a
+    # realistic small-services/large-edges shape hits it inside the
+    # `edges` call, while `services` is still its full, untrimmed size) --
+    # not just hypothetically. The two-call sequence still converges to a
+    # fitting payload in every case tried (300+ random trials plus several
+    # adversarial ones, see this round's freeze report), because each
+    # list can always be popped to empty and the remaining fixed structure
+    # is tiny -- but nothing else in this function proves that, so this
+    # assert is the actual safety net for the one payload shape in this
+    # codebase where the fallback cannot help.
+    assert fits(payload), (
+        "trimming both edges and services down to empty must still leave "
+        "a payload under the byte bound -- this function has no string "
+        "field for trim_to_bytes's own fallback to shrink instead"
+    )
     # Round 6 review, the P1. Same gap as `run_metric_check`: `payload
     # ["truncated"]` already carries whether either list above was cut,
     # but this summary string never rendered it, and the summary is the
