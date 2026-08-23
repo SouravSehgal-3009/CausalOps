@@ -9,61 +9,25 @@ investigation by `cli.py`'s `_build_model_and_registry`, the same way
 Tool schemas for the five registered checks are derived from `tools.py`'s
 `ToolArguments` union (`tools.py:135`'s own comment: "a second lookup table
 would be a competing source of truth") -- never hand-written a second time
-here. `evidence_gap`/`expected_observation` are injected as required
-properties of every one of them, and the `tool` discriminator is kept
-required too, because `tool_calls.py`'s `parse_tool_call` resolves the
-union from `call.args["tool"]` before comparing it to `call.name` -- the
-same wire shape the replay adapter's `to_tool_call` already produces
-(`tool_calls.py`'s own comment on `arguments_adapter`).
+here. Every domain tool carries the required ranked hypotheses as well as its
+check rationale. The provider's native tool name is the wire discriminator;
+`tool_calls.py` restores the internal `ToolArguments.tool` field after
+checking that name is registered.
 
-Reconciling Claude's two output channels
------------------------------------------
-`InitialPlan`/`HypothesisUpdate` need `hypotheses` (2-3 ranked causes) and
-*exactly one* of `proposal`/`stop_reason` on every turn. A live provider
-gives that to us across two independent channels: Claude's native tool-use
-channel (one of the five domain tools, when it wants to propose a check) and
-whatever structured content carries `hypotheses`/`stop_reason`. Naively
-trusting both channels is exactly `TECHNICAL_OVERVIEW.md`'s recorded Unit
-3b-2 gap: "a live model can contradict itself across channels."
+Single native-call proposal protocol
+------------------------------------
+`InitialPlan`/`HypothesisUpdate` need 2-3 ranked hypotheses and exactly one
+of a check proposal or a stop reason. The live adapter receives both fields
+through one native tool call, never a second structured-content channel.
 
-This adapter closes that gap with a *sixth*, adapter-internal tool,
-`record_plan` (`PlanRecord` below), that Claude must call every turn
-alongside at most one domain tool. It is deliberately **not** part of
-`ToolName`/`ToolArguments`: it carries no check semantics at all, only
-`hypotheses` and an optional `stop_reason`, so it is not a second source of
-truth about which *checks* exist -- only a structured-output channel for the
-two schema fields a domain tool call cannot express. `parse_tool_call`
-proves this at the boundary, not just by convention: even if this module's
-own splitting logic below mis-classified a `record_plan` call as a domain
-one, `record_plan`'s args (`hypotheses`/`stop_reason`) cannot validate
-against `ToolArguments`'s discriminated union -- there is no `tool` field
-naming any registered `ToolName`, and no variant with a `hypotheses` field
--- so `parse_tool_call` would refuse it before it ever reached a policy
-wrapper or a tool backend. Stripping it correctly here is a robustness
-improvement, not the only thing standing between it and `ToolNode`.
-
-Nor does offering `record_plan` alongside the five domain tools weaken
-`TECHNICAL_SPEC.md` §5's "a model turn may propose exactly one tool call"
-rule: that rule constrains *registered* tool requests -- the five checks a
-policy wrapper can dispatch to a backend -- and `record_plan` is not one.
-`select_single_tool_call` (`tool_calls.py`, unchanged by this unit) is
-handed only the *domain* tool-use blocks this module extracts below,
-`record_plan` filtered out first; it still sees at most one candidate on a
-well-formed turn, exactly as it does against replay.
-
-**A forced `tool_choice` cannot guarantee `record_plan` is called.**
-`langchain_anthropic.ChatAnthropic.bind_tools`'s own docstring (installed
-package: `langchain-anthropic==1.6.1`) states that a forced `tool_choice`
-"does not apply when `thinking` is enabled, as the forced choice is
-discarded before the request is sent" -- and Claude Sonnet 5 runs adaptive
-thinking by default (omitting `thinking` still runs adaptive; disabling it
-is accepted but is a documented Opus-5 pitfall this adapter does not take on
-for an unverified-safe alternative). So `tool_choice` stays at its default
-(`'auto'`, parallel tool use allowed) and a turn that omits `record_plan`
-is handled the same way a malformed tool call already is: invalid output,
-consuming the one repair slot, not a crash. This reuses the graph's
-existing repair machinery instead of fighting an API guarantee that does
-not exist.
+This adapter uses six tools but requires *exactly one* native call per turn.
+The five real checks include hypotheses in their own arguments. The sixth,
+adapter-internal `record_stop`, carries those hypotheses plus a required,
+non-empty reason for ending investigation. It is deliberately not part of
+`ToolName`/`ToolArguments`, and is never passed to a policy wrapper or tool
+backend. `parallel_tool_calls=False` asks the provider for the same one-call
+shape; cardinality, unknown names, malformed calls, and visible content are
+still rejected locally and use the graph's normal repair path.
 """
 
 import json
@@ -118,57 +82,33 @@ MODEL_NAME = "claude-sonnet-5"
 # back exactly the tool name it was given, so this module's own
 # classification of which channel a call belongs to is a simple name
 # comparison, not a heuristic.
-RECORD_PLAN_TOOL_NAME = "record_plan"
+RECORD_STOP_TOOL_NAME = "record_stop"
 RECORD_FINAL_ASSESSMENT_TOOL_NAME = "record_final_assessment"
 
 
-# The `record_plan` tool's schema. Reuses `domain.Hypothesis` directly
-# rather than redeclaring its fields -- the same "one source of truth for
-# what a hypothesis looks like" reasoning `ToolArguments` gets for tools.
-# Deliberately excludes `InitialPlan`/`HypothesisUpdate`'s `proposal` field:
-# a live proposal arrives through a genuine tool-use block for one of the
-# five domain tools instead, this schema's `hypotheses`/`stop_reason` cover
-# only what a domain tool call cannot express, and `schema_version` is
-# application bookkeeping the model has no business setting.
-#
-# Unit 3b-2, P2-5: no class docstring, on purpose. `model_json_schema()`
-# promotes a docstring to `input_schema["description"]` in the Anthropic
-# tool definition below (`_plan_tool_definition`), which would ship this
-# entire engineering rationale to Claude as tool-description text -- tokens
-# billed on every call for reasoning aimed at a maintainer, not the model.
-# `_plan_tool_definition`'s hand-written `"description"` string is the only
-# text about this tool that reaches Claude; `Hypothesis`'s own docstring
-# ("Rank is not a probability") stays, nested under this schema's
-# `hypotheses` field, because that one genuinely is guidance about how to
-# fill the field in, not implementation trivia.
-class PlanRecord(BaseModel):
+# Reuse `domain.Hypothesis` rather than redeclaring its fields. These models
+# are only tool-input records: domain tools use `HypothesesRecord`; the
+# adapter-internal stop tool adds its required reason in `StopRecord`.
+# Neither exposes application `schema_version` to the provider. They have no
+# class docstrings because Pydantic would include that maintainer prose in the
+# billed provider schema; the tool definitions supply concise model guidance.
+class HypothesesRecord(BaseModel):
     # `extra="forbid"` rationale: see `tools.py`'s `QueryMetricArguments`.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
-    # Unit 3b-4, item 1: the second live run's first new failure was
-    # `record_plan` omitting this field entirely on a turn that also
-    # proposed no check -- legal under the OLD schema, where `= None` gave
-    # `stop_reason` a Python-level default that (per Unit 3b-3's own
-    # discriminator finding) reads as an omittable field even though
-    # `str | None` still lets the model send an explicit `null`. Dropping
-    # only the default here, without touching `required` some other way,
-    # would NOT reproduce that fix: `tool` worked because it was already in
-    # `required` and only its `default` was extra; `stop_reason` was never
-    # in `required` in the first place, so removing `default` alone leaves
-    # it exactly as omittable as before. Removing the `= None` assignment
-    # is what makes pydantic mark it required (confirmed in
-    # `test_the_plan_tool_definition_states_stop_reason_as_required_and_
-    # nullable`, below in `test_live_model.py`) -- the model must now emit
-    # the key on every turn and consciously choose `null` (this turn also
-    # proposes a check) or a string (this turn is stopping), rather than
-    # relying on an affordance to omit it that this schema no longer offers.
-    stop_reason: str | None = Field(
+
+
+class StopRecord(HypothesesRecord):
+    # A stop turn is the alternative to a domain-tool proposal, so this field
+    # is required and non-empty rather than a conditional field shared with
+    # check calls.
+    stop_reason: str = Field(
+        min_length=1,
         max_length=300,
         description=(
             "Why you are stopping instead of proposing a check, in 300 "
-            "characters or fewer. Use null only when you are also calling "
-            "a check tool this turn."
+            "characters or fewer. This must be a non-empty reason."
         ),
     )
 
@@ -253,20 +193,26 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     """Anthropic-format tool definitions for the five registered checks,
     derived from `ToolArguments` so code and wire schemas cannot drift.
 
-    Keep `tool` required on the wire while removing its Python convenience
-    default; preserve the independent name/discriminator validation.
+    The provider tool name selects the internal argument variant, so the
+    duplicate internal `tool` discriminator is deliberately not exposed.
     """
     definitions: list[dict[str, Any]] = []
     for arguments_cls, tool_name, description in _DOMAIN_TOOL_SPECS:
         schema = _strip_maintainer_prose(arguments_cls.model_json_schema())
         properties = dict(schema.get("properties", {}))
-        tool_property = dict(properties["tool"])
-        tool_property.pop("default", None)
-        properties["tool"] = tool_property
+        properties.pop("tool")
+        hypotheses_schema = HypothesesRecord.model_json_schema()
+        properties["hypotheses"] = hypotheses_schema["properties"]["hypotheses"]
         properties.update(_RATIONALE_PROPERTIES)
         schema["properties"] = properties
+        schema["$defs"] = {
+            **schema.get("$defs", {}),
+            **hypotheses_schema.get("$defs", {}),
+        }
         required = list(schema.get("required", []))
-        for name in ("tool", *_RATIONALE_PROPERTIES):
+        if "tool" in required:
+            required.remove("tool")
+        for name in ("hypotheses", *_RATIONALE_PROPERTIES):
             if name not in required:
                 required.append(name)
         schema["required"] = required
@@ -280,33 +226,21 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     return definitions
 
 
-def _plan_tool_definition() -> dict[str, Any]:
+def _stop_tool_definition() -> dict[str, Any]:
     # Unit 3b-4, item 6: keeps `Hypothesis.__doc__` ("Rank is not a
     # probability") -- genuine guidance about how to fill the field in --
-    # while stripping any other class-level docstring `PlanRecord`'s own
+    # while stripping any other class-level docstring `StopRecord`'s own
     # `$defs` might carry (`RootCauseCode` has none today; this keeps the
     # function correct if that ever changes).
     schema = _strip_maintainer_prose(
-        PlanRecord.model_json_schema(), keep_defs=frozenset({"Hypothesis"})
+        StopRecord.model_json_schema(), keep_defs=frozenset({"Hypothesis"})
     )
     return {
-        "name": RECORD_PLAN_TOOL_NAME,
+        "name": RECORD_STOP_TOOL_NAME,
         "description": (
-            # Unit 3b-4 addendum, A2: propose()'s own refusal for a second
-            # `record_plan` call in one turn already says "call it exactly
-            # once" (below); `record_final_assessment`'s description already
-            # says "Call this once" -- this tool's own description said
-            # "every turn" but never "once per turn," so it stated the
-            # cadence without stating the count.
-            "Call this exactly once on every turn, in addition to any check "
-            "tool you call. Record 2-3 ranked hypotheses about the root "
-            "cause. If you are also calling a check tool this turn, set "
-            "stop_reason to null -- the check call itself is your proposal, "
-            "and calling a check while also setting stop_reason to a "
-            "non-null value is treated as a mistake. If you are not calling "
-            "a check tool, stop_reason must explain why you are stopping "
-            "(either you are ready to give a final assessment, or no "
-            "remaining check would help)."
+            "Use this instead of a check tool when no safe check would help. "
+            "Record 2-3 ranked hypotheses and a non-empty stop reason. "
+            "Call exactly one tool total on each turn."
         ),
         "input_schema": schema,
     }
@@ -314,14 +248,14 @@ def _plan_tool_definition() -> dict[str, Any]:
 
 def _final_assessment_schema() -> dict[str, Any]:
     """Unit 3b-2, P2-5, generalized by Unit 3b-4's item 6. `domain.py`'s
-    `FinalAssessment` -- unlike this module's own `PlanRecord` -- is a
+    `FinalAssessment` -- unlike this module's own `StopRecord` -- is a
     shared domain model, not written just for this tool definition, so its
     `model_json_schema()` carries two things this tool's `input_schema`
     must not ship to Claude as-is:
 
     - `schema_version`: application bookkeeping (`domain.SCHEMA_VERSION`)
       the model has no business setting. Every domain tool
-      (`_domain_tool_definitions`) and `PlanRecord` already omit it; this
+      (`_domain_tool_definitions`) and `StopRecord` already omit it; this
       is `FinalAssessment`'s own equivalent.
     - `description` (this schema's own, and every nested `$defs` entry's,
       per `_strip_maintainer_prose`): pydantic promotes `FinalAssessment
@@ -450,35 +384,6 @@ def _has_visible_content(content: object) -> bool:
     )
 
 
-def _split_tool_calls(
-    tool_calls: Sequence[ToolCall],
-) -> tuple[list[ToolCall], list[ToolCall]]:
-    """Separates every `record_plan` call from every domain tool call.
-    Anything named something other than `record_plan` or a registered
-    `ToolName` is folded into the domain list too -- Claude was offered
-    only those six names, so an unrecognised one reaching here is either an
-    SDK/provider anomaly or a future tool this module has not been told
-    about; either way `parse_tool_call` downstream refuses it by
-    name/discriminator mismatch rather than this module trying to guess
-    what it meant.
-
-    Unit 3b-2, P3-2: returns every `record_plan` call, not just the last
-    one seen. A caller (`propose`, below) that kept only the most recent
-    match (`plan_call = call`, unconditionally, in a loop) would silently
-    discard an earlier one on a turn where Claude called it twice -- every
-    *other* malformed shape this module sees gets an explicit, named
-    refusal; a second `record_plan` call deserves the same rather than
-    quietly vanishing."""
-    plan_calls: list[ToolCall] = []
-    domain_calls: list[ToolCall] = []
-    for call in tool_calls:
-        if call["name"] == RECORD_PLAN_TOOL_NAME:
-            plan_calls.append(call)
-        else:
-            domain_calls.append(call)
-    return plan_calls, domain_calls
-
-
 def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     """The real transport `LiveClaudeModel` sends through, module-level so
     `tests/unit/test_live_model.py` can assert on its return value directly
@@ -572,8 +477,8 @@ class LiveClaudeModel:
         # keyword keeps behaving exactly as it did before this fix.
         self._credential_present = credential_present
         # Test seam: `tests/unit/test_live_model.py` passes a fake here so
-        # this module's logic (schema derivation, the two-channel
-        # reconciliation, the cost gate) is exercised without constructing
+        # this module's logic (schema derivation, single-call validation,
+        # and the cost gate) is exercised without constructing
         # a real `ChatAnthropic` -- no test ever reaches `tests/conftest.
         # py`'s network guard through this path, because nothing beneath
         # it ever tries to connect. `_build_chat_anthropic` above is what a
@@ -614,11 +519,8 @@ class LiveClaudeModel:
         # on the wire: prose *plus* the tool schema `bind_tools` sends on
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
-        # binds `_plan_tool_definition()` plus the five `_domain_tool_
-        # definitions()`, 7,237 tokens in the current emitted schema;
-        # item 6 stripped ~1.2K characters of maintainer-only schema/
-        # `$defs` docstrings and A1/A2 then added back ~293 characters
-        # stating two fields' 300-char bounds and a 4-word "exactly once");
+        # binds `_stop_tool_definition()` plus the five `_domain_tool_
+        # definitions()`, 12,011 tokens in the current emitted schema;
         # `respond()` binds only `_final_assessment_tool_definition()`,
         # 2,292 tokens in the current emitted schema.
         # `test_live_model.py` pins both figures separately, so this
@@ -672,7 +574,9 @@ class LiveClaudeModel:
         # with the reservation intact for accounting, exactly
         # `TECHNICAL_SPEC.md` §5's "a timeout, crash, or missing provider
         # usage never reissues that key" rule.
-        message = self._client.bind_tools(tools).invoke(messages)
+        message = self._client.bind_tools(tools, parallel_tool_calls=False).invoke(
+            messages
+        )
         usage = message.usage_metadata
         if usage is None:
             raise MissingProviderUsage(
@@ -722,8 +626,7 @@ class LiveClaudeModel:
         # this used to take the FIRST matching call via `next(...)`,
         # silently discarding a second, possibly conflicting, call NAMED
         # `record_final_assessment` -- the same shape `propose()`'s own
-        # `record_plan` duplicate check (`len(plan_calls) > 1`, above)
-        # already refuses on the proposal side. Zero or two-or-more
+        # proposal path's exact-one-call validation already refuses. Zero or two-or-more
         # MATCHING calls are refused the same way, through the same repair
         # path, rather than the codebase silently picking a winner.
         #
@@ -754,10 +657,9 @@ class LiveClaudeModel:
         self, request: ModelRequest, schema: type[StageModel]
     ) -> ProposedTurn[StageModel]:
         """`schema` is `InitialPlan` or `HypothesisUpdate`, the same
-        contract `ReplayToolCallingModel.propose` documents. See this
-        module's docstring for the two-channel reconciliation this
-        implements."""
-        tools = [_plan_tool_definition(), *_domain_tool_definitions()]
+        contract `ReplayToolCallingModel.propose` documents. The one native
+        call carries either the check proposal or the stop record."""
+        tools = [_stop_tool_definition(), *_domain_tool_definitions()]
         message = self._send(request, tools)
         usage = self._usage(message)
         if _has_visible_content(message.content):
@@ -779,85 +681,53 @@ class LiveClaudeModel:
                 tool_call=(),
                 usage=usage,
             )
-        plan_calls, domain_calls = _split_tool_calls(message.tool_calls)
-        if not plan_calls:
+        if len(message.tool_calls) != 1:
             return ProposedTurn(
                 parsed=None,
                 errors=(
-                    f"you must call {RECORD_PLAN_TOOL_NAME} every turn to "
-                    "record your hypotheses, whether or not you also "
-                    "propose a check"
+                    f"the model called {len(message.tool_calls)} tools in one turn; "
+                    "exactly one is required"
                 ),
                 tool_call=(),
                 usage=usage,
             )
-        if len(plan_calls) > 1:
-            # Unit 3b-2, P3-2. Named separately from the zero-call case
-            # above so an owner reading `errors` can tell "never called"
-            # apart from "called twice" -- the same "name the actual
-            # outcome" reasoning every other invalid shape in this module
-            # gets, not a shared generic message.
-            return ProposedTurn(
-                parsed=None,
-                errors=(
-                    f"{RECORD_PLAN_TOOL_NAME} was called {len(plan_calls)} times "
-                    "in one turn; call it exactly once"
-                ),
-                tool_call=(),
-                usage=usage,
-            )
-        plan_call = plan_calls[0]
-        try:
-            plan = PlanRecord.model_validate(plan_call["args"])
-        except ValidationError as error:
-            return ProposedTurn(
-                parsed=None, errors=summarize_errors(error), tool_call=(), usage=usage
-            )
-        native_calls = tuple(_to_native_tool_call(call) for call in domain_calls)
-        if not native_calls:
-            if plan.stop_reason is None:
+        call = message.tool_calls[0]
+        if call["name"] == RECORD_STOP_TOOL_NAME:
+            try:
+                stop = StopRecord.model_validate(call["args"])
+            except ValidationError as error:
                 return ProposedTurn(
                     parsed=None,
-                    errors=(
-                        f"{RECORD_PLAN_TOOL_NAME} must set stop_reason when "
-                        "no check is proposed this turn"
-                    ),
+                    errors=summarize_errors(error),
                     tool_call=(),
                     usage=usage,
                 )
             parsed, errors = _finish_plan(
-                schema, plan.hypotheses, None, plan.stop_reason
+                schema, stop.hypotheses, None, stop.stop_reason
             )
             return ProposedTurn(parsed=parsed, errors=errors, tool_call=(), usage=usage)
-        if plan.stop_reason is not None:
+        if call["name"] not in {tool.value for tool in ToolName}:
             return ProposedTurn(
                 parsed=None,
-                errors=(
-                    f"{RECORD_PLAN_TOOL_NAME} set stop_reason but a check "
-                    "was also proposed this turn -- propose a check or stop, "
-                    "not both"
-                ),
-                tool_call=native_calls,
+                errors=f"unknown proposal tool {call['name']!r}",
+                tool_call=(),
                 usage=usage,
             )
-        # Decode the first candidate for `parsed.proposal`'s sake even when
-        # `native_calls` holds more than one -- deliberately: with 2+ domain
-        # calls there is no single correct choice, but every entry in
-        # `native_calls` still reaches `graph.py`'s own `select_single_tool_
-        # call` unchanged, which is what actually produces the specific "N
-        # checks in one turn" refusal (`ask_once`, `graph.py`) once `parsed`
-        # is non-`None`. Leaving `parsed=None` here instead would suppress
-        # that specific message in favour of this module's own generic one.
-        # The field is populated with genuinely decoded data either way,
-        # never a fabricated placeholder.
-        proposal, reason = parse_tool_call(native_calls[0])
+        native_call = _to_native_tool_call(call)
+        proposal, reason = parse_tool_call(native_call)
         if proposal is None:
+            return ProposedTurn(parsed=None, errors=reason, tool_call=(), usage=usage)
+        try:
+            hypotheses = HypothesesRecord.model_validate(
+                {"hypotheses": call["args"].get("hypotheses")}
+            ).hypotheses
+        except ValidationError as error:
             return ProposedTurn(
-                parsed=None, errors=reason, tool_call=native_calls, usage=usage
+                parsed=None, errors=summarize_errors(error), tool_call=(), usage=usage
             )
-        parsed, errors = _finish_plan(schema, plan.hypotheses, proposal, None)
+        parsed, errors = _finish_plan(schema, hypotheses, proposal, None)
         return ProposedTurn(
-            parsed=parsed, errors=errors, tool_call=native_calls, usage=usage
+            parsed=parsed, errors=errors, tool_call=(native_call,), usage=usage
         )
 
 

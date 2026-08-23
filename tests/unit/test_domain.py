@@ -21,6 +21,7 @@ from causalops.domain import (
     Evidence,
     FinalAssessment,
     GraphPhase,
+    HypothesisUpdate,
     IncidentScope,
     InitialPlan,
     InvestigationReport,
@@ -157,6 +158,14 @@ def test_a_stage_proposes_a_check_or_stops_but_not_both() -> None:
         InitialPlan(
             hypotheses=hypotheses(), proposal=metric_proposal(), stop_reason="both"
         )
+
+
+@pytest.mark.parametrize("stage", [InitialPlan, HypothesisUpdate])
+def test_a_stage_stop_reason_cannot_be_empty(
+    stage: type[InitialPlan] | type[HypothesisUpdate],
+) -> None:
+    with pytest.raises(ValidationError):
+        stage(hypotheses=hypotheses(), stop_reason="")
 
 
 def test_a_plan_keeps_two_or_three_hypotheses() -> None:

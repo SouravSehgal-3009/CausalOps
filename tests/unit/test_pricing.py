@@ -121,10 +121,10 @@ def test_a_settled_request_never_costs_more_than_its_own_reservation() -> None:
     request at the measured 2.26 chars/token ratio. Omitting the tool schema
     makes the real settlement exceed the reservation."""
     snapshot = CLAUDE_SONNET_5_PRICING
-    # The emitted proposal schema is pinned at 7,237 by test_live_model;
+    # The emitted proposal schema is pinned at 12,011 by test_live_model;
     # representative initial-plan prose is 1,512 characters.
     prose = "x" * 1_512
-    tool_definitions = "x" * 7_237
+    tool_definitions = "x" * 12_011
 
     reserved = snapshot.reservation_usd(
         estimate_input_tokens(prose) + estimate_input_tokens(tool_definitions)

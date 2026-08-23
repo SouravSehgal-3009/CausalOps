@@ -58,9 +58,9 @@ def test_system_text_forbids_narrative_alongside_a_tool_call() -> None:
     exists to prevent it. The wording was reworded post-review from "the
     tool call alone" (ambiguous between "no narrative text" and "exactly
     one tool call", the latter reading being wrong -- this architecture
-    requires `record_plan` plus at most one domain tool on every
-    INITIAL_PLAN/HYPOTHESIS_UPDATE turn) to a phrasing that cannot be
-    misread as a cardinality limit."""
+    now requires exactly one native call on every
+    INITIAL_PLAN/HYPOTHESIS_UPDATE turn) to a phrasing that does not blur
+    the no-narrative rule with the cardinality rule."""
     assert "do not add narrative text" in SYSTEM_TEXT
 
 

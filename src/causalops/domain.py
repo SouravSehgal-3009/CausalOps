@@ -479,7 +479,7 @@ class InitialPlan(BaseModel):
     schema_version: str = SCHEMA_VERSION
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
     proposal: ToolProposal | None = None
-    stop_reason: str | None = Field(default=None, max_length=300)
+    stop_reason: str | None = Field(default=None, min_length=1, max_length=300)
 
     @model_validator(mode="after")
     def check_proposal_or_stop(self) -> Self:
@@ -495,7 +495,7 @@ class HypothesisUpdate(BaseModel):
     schema_version: str = SCHEMA_VERSION
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
     proposal: ToolProposal | None = None
-    stop_reason: str | None = Field(default=None, max_length=300)
+    stop_reason: str | None = Field(default=None, min_length=1, max_length=300)
 
     @model_validator(mode="after")
     def check_proposal_or_stop(self) -> Self:

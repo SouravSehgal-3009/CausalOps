@@ -49,15 +49,14 @@ from causalops.domain import (
 )
 from causalops.live_model import (
     RECORD_FINAL_ASSESSMENT_TOOL_NAME,
-    RECORD_PLAN_TOOL_NAME,
+    RECORD_STOP_TOOL_NAME,
     LiveClaudeModel,
     MissingCredential,
     MissingProviderUsage,
-    PlanRecord,
     _build_chat_anthropic,
     _domain_tool_definitions,
     _final_assessment_tool_definition,
-    _plan_tool_definition,
+    _stop_tool_definition,
 )
 from causalops.models import ModelRequest, Stage
 from causalops.policy import authorize
@@ -70,7 +69,6 @@ from causalops.pricing import (
     estimate_input_tokens,
 )
 from causalops.prompts import STAGE_INSTRUCTIONS, SYSTEM_TEXT, render_context
-from causalops.tool_calls import select_single_tool_call
 from causalops.tools import SearchRunbooksArguments, ToolName
 
 NOW = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
@@ -106,9 +104,11 @@ class FakeChatAnthropic:
         self._queue = responses
         self.sent: list[Any] = []
         self.bound_tools: list[list[dict[str, Any]]] = []
+        self.bind_kwargs: list[dict[str, Any]] = []
 
     def bind_tools(self, tools: list[dict[str, Any]], **kwargs: Any) -> _FakeBoundModel:
         self.bound_tools.append(tools)
+        self.bind_kwargs.append(kwargs)
         return _FakeBoundModel(self._queue, self.sent)
 
 
@@ -166,9 +166,9 @@ def hypotheses_args() -> list[dict[str, Any]]:
     ]
 
 
-def plan_call(*, stop_reason: str | None, call_id: str = "plan-1") -> ToolCall:
+def stop_call(*, stop_reason: str | None, call_id: str = "stop-1") -> ToolCall:
     return ToolCall(
-        name=RECORD_PLAN_TOOL_NAME,
+        name=RECORD_STOP_TOOL_NAME,
         args={"hypotheses": hypotheses_args(), "stop_reason": stop_reason},
         id=call_id,
         type="tool_call",
@@ -179,11 +179,11 @@ def metric_call(call_id: str = "domain-1", service: str = "gateway") -> ToolCall
     return ToolCall(
         name=ToolName.QUERY_METRIC.value,
         args={
-            "tool": ToolName.QUERY_METRIC.value,
             "template": "gateway_error_rate",
             "service": service,
             "window_start": "2026-08-16T10:00:00+00:00",
             "window_end": "2026-08-16T10:10:00+00:00",
+            "hypotheses": hypotheses_args(),
             "evidence_gap": "whether gateway errors are elevated",
             "expected_observation": "an error rate spike",
         },
@@ -217,37 +217,38 @@ def conn() -> sqlite3.Connection:
 # --- propose(): tool binding shape --------------------------------------
 
 
-def test_propose_binds_the_plan_tool_and_all_five_domain_tools(
+def test_propose_binds_the_stop_tool_and_all_five_domain_tools(
     conn: sqlite3.Connection,
 ) -> None:
-    model, fake = make_model(conn, [message([plan_call(stop_reason="no more checks")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="no more checks")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
     names = {tool["name"] for tool in tools}
     assert names == {
-        RECORD_PLAN_TOOL_NAME,
+        RECORD_STOP_TOOL_NAME,
         ToolName.QUERY_METRIC.value,
         ToolName.QUERY_LOGS.value,
         ToolName.LIST_RECENT_CHANGES.value,
         ToolName.GET_TOPOLOGY.value,
         ToolName.SEARCH_RUNBOOKS.value,
     }
+    assert fake.bind_kwargs == [{"parallel_tool_calls": False}]
 
 
 def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the current ~7,237-token tool schema `bind_tools`
+    against prose alone, never the current ~12,011-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~7,237" restates
+    the pinned, directly-measured figure this comment's "~12,011" restates
     in prose."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
@@ -262,48 +263,34 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     assert row[0] >= minimum_expected_reserved_usd
 
 
-def test_the_plan_tool_definition_ships_no_leaked_engineering_docstring(
+def test_the_stop_tool_definition_ships_no_leaked_engineering_docstring(
     conn: sqlite3.Connection,
 ) -> None:
-    """P2-5's regression test for `PlanRecord`. `model_json_schema()`
-    promotes a class docstring to `input_schema["description"]`; `PlanRecord`
-    now has none, on purpose, so nothing here should either."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    """The stop-record schema keeps maintainer prose out of the request."""
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
-    (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_PLAN_TOOL_NAME]
+    (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_STOP_TOOL_NAME]
     assert "description" not in plan_tool["input_schema"]
 
 
-def test_the_plan_tool_definition_states_stop_reason_as_required_and_nullable(
+def test_the_stop_tool_definition_requires_a_non_null_stop_reason(
     conn: sqlite3.Connection,
 ) -> None:
-    """Unit 3b-4, item 1. The second live run's first new failure was
-    `record_plan` omitting `stop_reason` on a turn that proposed no check --
-    legal under the OLD schema, where `stop_reason: str | None = Field(
-    default=None, ...)` gave the field a Python-level default. Naively
-    repeating Unit 3b-3's `tool`-field fix ("drop the default") would NOT
-    have closed this: `tool` was already in `required`, so removing only
-    its `default` left an unambiguous requirement; `stop_reason` was never
-    in `required` in the first place, so removing only its `default` would
-    have left it exactly as omittable as before. The actual fix drops the
-    `= None` assignment entirely, which is what pydantic reads as
-    "required" -- asserted here directly against the emitted wire schema,
-    not inferred from a passing `propose()` call."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    """A stop is an explicit, meaningful alternative to a check call."""
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
-    (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_PLAN_TOOL_NAME]
+    (plan_tool,) = [tool for tool in tools if tool["name"] == RECORD_STOP_TOOL_NAME]
     stop_reason_property = plan_tool["input_schema"]["properties"]["stop_reason"]
     assert "default" not in stop_reason_property
-    assert stop_reason_property["anyOf"] == [
-        {"type": "string", "maxLength": 300},
-        {"type": "null"},
-    ]
+    assert stop_reason_property["type"] == "string"
+    assert stop_reason_property["minLength"] == 1
+    assert stop_reason_property["maxLength"] == 300
     assert "stop_reason" in plan_tool["input_schema"]["required"]
 
 
@@ -312,7 +299,7 @@ def test_the_final_assessment_tool_definition_drops_schema_version_and_descripti
 ) -> None:
     """P2-5's regression test for `FinalAssessment`. Verified present in
     `FinalAssessment.model_json_schema()`'s own `properties` before this
-    fix and correctly absent from every domain tool and `PlanRecord`
+    fix and correctly absent from every domain tool and `StopRecord`
     already -- this closes the one place it still leaked."""
     call = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
@@ -340,24 +327,24 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
 ) -> None:
     """Pin the emitted proposal schema so reservations and current docs
     cannot silently drift from its measured serialized size."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 7_237
+    assert len(payload) == 12_011
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 7_237
+    assert estimate_input_tokens(payload) == 12_011
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     conn: sqlite3.Connection,
 ) -> None:
     """Post-freeze review, N1. The test above pins ONLY `propose()`'s
-    payload (`_plan_tool_definition()` plus the five `_domain_tool_
+    payload (`_stop_tool_definition()` plus the five `_domain_tool_
     definitions()`) -- `_final_assessment_tool_definition()` is never in
     that binding (confirmed by reading `propose()`/`respond()` directly:
     they bind two disjoint tool lists). `_send`'s earlier comment called
@@ -386,36 +373,23 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     assert estimate_input_tokens(payload) == 2_292
 
 
-def test_domain_tool_schemas_drop_default_but_keep_const_and_required(
+def test_domain_tool_schemas_use_native_names_and_require_hypotheses(
     conn: sqlite3.Connection,
 ) -> None:
-    """Unit 3b-3's discriminator fix, tested directly against the emitted
-    wire schema rather than inferred from a passing `propose()` call. The
-    owner's first live run omitted `tool` from its arguments on both the
-    original call and the repair; `tool` was confirmed (by set
-    comprehension, not inspection) to be the ONLY property across all five
-    domain tool schemas carrying pydantic's own `"default"` key alongside
-    `"const"` on the same required field -- a required field that also
-    names its own default reads as omittable. This asserts the fix without
-    weakening the discriminator: `"const"` (the fixed value Claude must
-    send) and `tool`'s membership in `"required"` are still present; only
-    `"default"` is gone. `test_tool_calls.py`'s `test_a_call_missing_the_
-    tool_discriminator_is_refused` proves `parse_tool_call` still demands
-    the field regardless of what pydantic's own model default would have
-    supplied -- this test and that one together are the whole claim: we
-    changed what we ASK Claude to send, not how we VALIDATE what it sends."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    """Native call names select internal tool variants; check schemas require
+    hypotheses while omitting the redundant provider-facing discriminator."""
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
     (tools,) = fake.bound_tools
-    domain_tools = [tool for tool in tools if tool["name"] != RECORD_PLAN_TOOL_NAME]
+    domain_tools = [tool for tool in tools if tool["name"] != RECORD_STOP_TOOL_NAME]
     assert len(domain_tools) == 5
     for tool in domain_tools:
-        tool_property = tool["input_schema"]["properties"]["tool"]
-        assert "default" not in tool_property
-        assert "const" in tool_property
-        assert "tool" in tool["input_schema"]["required"]
+        properties = tool["input_schema"]["properties"]
+        assert "tool" not in properties
+        assert "tool" not in tool["input_schema"]["required"]
+        assert "hypotheses" in tool["input_schema"]["required"]
 
 
 def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes() -> (
@@ -461,11 +435,11 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     assert estimate_input_tokens(total) == 1_392
 
 
-def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap() -> (
-    None
-):
-    """Five policy-permitted maximum runbook passages make final-assessment
-    prose exceed the current 2,363-token folded headroom."""
+def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
+    conn: sqlite3.Connection,
+) -> None:
+    """The prose cap admits a real post-retrieval proposal; reservations
+    still price the proposal schema separately."""
     scope = incident_scope()
     packet = alert_packet()
     budgets = Budgets()
@@ -488,18 +462,32 @@ def test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap()
         evidence=[],
         markers=[],
         model_calls_left=budgets.model_calls - model_calls_used,
-        checks_left=budgets.executed_tools,
+        checks_left=budgets.executed_tools - 1,
         passages=passages,
     )
-    context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
+    context_text = (
+        f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]}"
+    )
     total = SYSTEM_TEXT + context_text
-    folded_headroom_tokens = MAX_INPUT_TOKENS - 7_237  # current measured
-    # tool-definition payload pinned by test_the_tool_payload_size_matches_
-    # what_pricingpy_assumes above -- restated, not re-measured, here.
+    proposal_schema_tokens = estimate_input_tokens(
+        json.dumps([_stop_tool_definition(), *_domain_tool_definitions()])
+    )
+    prose_tokens = estimate_input_tokens(total)
+    request = ModelRequest(
+        stage=Stage.HYPOTHESIS_UPDATE,
+        system_text=SYSTEM_TEXT,
+        context_text=context_text,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=1,
+        context_digest="post-retrieval",
+    )
+    model, fake = make_model(conn, [message([metric_call()])])
 
-    assert len(total) == 5_577
-    assert estimate_input_tokens(total) == 5_577
-    assert estimate_input_tokens(total) > folded_headroom_tokens
+    assert prose_tokens <= MAX_INPUT_TOKENS
+    assert prose_tokens + proposal_schema_tokens > MAX_INPUT_TOKENS
+    assert model.propose(request, HypothesisUpdate).parsed is not None
+    assert fake.sent
 
 
 def test_a_request_at_the_intended_9600_character_budget_is_not_refused(
@@ -512,7 +500,7 @@ def test_a_request_at_the_intended_9600_character_budget_is_not_refused(
     must still be accepted -- if a future change to `PESSIMISTIC_CHARS_
     PER_TOKEN` or `MAX_INPUT_TOKENS` alone silently shrinks the effective
     character budget, an ordinary-sized request starts refusing here."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
     at_budget = ModelRequest(
         stage=Stage.INITIAL_PLAN,
         system_text="x" * 9_600,
@@ -536,7 +524,7 @@ def test_propose_returns_a_stop_reason_turn_with_no_tool_call(
     conn: sqlite3.Connection,
 ) -> None:
     model, _ = make_model(
-        conn, [message([plan_call(stop_reason="ready for a final assessment")])]
+        conn, [message([stop_call(stop_reason="ready for a final assessment")])]
     )
 
     turn = model.propose(make_request(), InitialPlan)
@@ -552,7 +540,7 @@ def test_propose_returns_a_stop_reason_turn_with_no_tool_call(
 def test_propose_returns_a_native_tool_call_when_a_check_is_proposed(
     conn: sqlite3.Connection,
 ) -> None:
-    model, _ = make_model(conn, [message([plan_call(stop_reason=None), metric_call()])])
+    model, _ = make_model(conn, [message([metric_call()])])
 
     turn = model.propose(make_request(), InitialPlan)
 
@@ -567,24 +555,24 @@ def test_propose_returns_a_native_tool_call_when_a_check_is_proposed(
 # --- propose(): the invalid shapes, each a distinct, informative reason --
 
 
-def test_propose_is_invalid_when_record_plan_is_never_called(
+def test_propose_is_invalid_when_no_tool_is_called(
     conn: sqlite3.Connection,
 ) -> None:
-    model, _ = make_model(conn, [message([metric_call()])])
+    model, _ = make_model(conn, [message([])])
 
     turn = model.propose(make_request(), InitialPlan)
 
     assert turn.parsed is None
-    assert RECORD_PLAN_TOOL_NAME in turn.errors
+    assert "exactly one" in turn.errors
     assert turn.tool_call == ()
 
 
-def test_propose_is_invalid_when_record_plan_args_fail_validation(
+def test_propose_is_invalid_when_record_stop_args_fail_validation(
     conn: sqlite3.Connection,
 ) -> None:
     bad_plan = ToolCall(
-        name=RECORD_PLAN_TOOL_NAME,
-        # Only one hypothesis -- `PlanRecord.hypotheses` requires 2-3.
+        name=RECORD_STOP_TOOL_NAME,
+        # Only one hypothesis -- `StopRecord.hypotheses` requires 2-3.
         args={"hypotheses": hypotheses_args()[:1], "stop_reason": "done"},
         id="plan-1",
         type="tool_call",
@@ -597,59 +585,57 @@ def test_propose_is_invalid_when_record_plan_args_fail_validation(
     assert turn.errors
 
 
-def test_propose_is_invalid_when_record_plan_is_called_twice_in_one_turn(
+def test_propose_is_invalid_when_two_tools_are_called(
     conn: sqlite3.Connection,
 ) -> None:
-    """P3-2's regression test. `_split_tool_calls` used to keep only the
-    most recently seen `record_plan` call (`plan_call = call`,
-    unconditionally, in a loop), silently discarding an earlier one --
-    mutation-verified: reverting to that assignment leaves this test
-    passing on the *second* call's `stop_reason` (the one the loop saw
-    last) instead of refusing, so the error-message assertion below is
-    what actually catches the regression, not merely `turn.parsed is
-    None`."""
-    first = plan_call(stop_reason="first attempt", call_id="plan-1")
-    second = plan_call(stop_reason="second attempt", call_id="plan-2")
+    """The live adapter rejects all multi-call shapes before graph dispatch."""
+    first = stop_call(stop_reason="first attempt", call_id="stop-1")
+    second = stop_call(stop_reason="second attempt", call_id="stop-2")
     model, _ = make_model(conn, [message([first, second])])
 
     turn = model.propose(make_request(), InitialPlan)
 
     assert turn.parsed is None
-    assert RECORD_PLAN_TOOL_NAME in turn.errors
-    assert "2 times" in turn.errors
+    assert "2 tools" in turn.errors
 
 
-def test_propose_is_invalid_when_neither_check_nor_stop_reason_is_given(
+def test_propose_is_invalid_when_stop_reason_is_null(
     conn: sqlite3.Connection,
 ) -> None:
-    model, _ = make_model(conn, [message([plan_call(stop_reason=None)])])
+    model, _ = make_model(conn, [message([stop_call(stop_reason=None)])])
 
     turn = model.propose(make_request(), InitialPlan)
 
     assert turn.parsed is None
-    assert "stop_reason" in turn.errors
+    assert "string" in turn.errors
     assert turn.tool_call == ()
 
 
-def test_propose_is_invalid_when_a_check_and_a_stop_reason_both_appear(
+def test_propose_is_invalid_when_stop_reason_is_empty(
     conn: sqlite3.Connection,
 ) -> None:
-    """The reconciliation this adapter exists for: Claude's two channels
-    (`record_plan`'s `stop_reason` and a genuine domain tool call)
-    contradicting each other in the same turn."""
+    model, _ = make_model(conn, [message([stop_call(stop_reason="")])])
+
+    turn = model.propose(make_request(), InitialPlan)
+
+    assert turn.parsed is None
+    assert "at least 1 character" in turn.errors
+    assert turn.tool_call == ()
+
+
+def test_propose_is_invalid_when_stop_and_check_are_both_called(
+    conn: sqlite3.Connection,
+) -> None:
+    """A stop call and a check call violate the exact-one-call protocol."""
     model, _ = make_model(
-        conn, [message([plan_call(stop_reason="actually stopping"), metric_call()])]
+        conn, [message([stop_call(stop_reason="actually stopping"), metric_call()])]
     )
 
     turn = model.propose(make_request(), InitialPlan)
 
     assert turn.parsed is None
-    assert "not both" in turn.errors
-    # The domain call still travels through `tool_call` even though this
-    # turn is invalid -- nothing downstream needs it here, but withholding
-    # it would not be more correct, just less informative if a caller ever
-    # wanted to log what was actually proposed alongside the contradiction.
-    assert len(turn.tool_call) == 1
+    assert "2 tools" in turn.errors
+    assert turn.tool_call == ()
 
 
 def test_propose_is_invalid_when_the_domain_call_args_are_malformed(
@@ -657,11 +643,11 @@ def test_propose_is_invalid_when_the_domain_call_args_are_malformed(
 ) -> None:
     bad_metric = ToolCall(
         name=ToolName.QUERY_METRIC.value,
-        args={"tool": ToolName.QUERY_METRIC.value},  # missing every other field
+        args={"hypotheses": hypotheses_args()},  # missing every check field
         id="domain-1",
         type="tool_call",
     )
-    model, _ = make_model(conn, [message([plan_call(stop_reason=None), bad_metric])])
+    model, _ = make_model(conn, [message([bad_metric])])
 
     turn = model.propose(make_request(), InitialPlan)
 
@@ -669,22 +655,15 @@ def test_propose_is_invalid_when_the_domain_call_args_are_malformed(
     assert turn.errors
 
 
-def test_propose_with_two_domain_calls_leaves_select_single_tool_call_to_refuse(
+def test_propose_refuses_two_domain_calls_before_graph_dispatch(
     conn: sqlite3.Connection,
 ) -> None:
-    """Two domain tool calls in one turn is a live provider's own version
-    of the multi-call case replay cannot produce. This adapter still
-    returns a valid `parsed` (decoded from the first candidate, genuinely,
-    not a placeholder) and *all* candidates in `tool_call`, so `graph.py`'s
-    own `select_single_tool_call` -- unchanged by this unit -- is the thing
-    that actually refuses it, with its own specific "N checks in one turn"
-    message, exactly as it does against replay."""
+    """The adapter rejects two native calls before graph dispatch."""
     model, _ = make_model(
         conn,
         [
             message(
                 [
-                    plan_call(stop_reason=None),
                     metric_call(call_id="domain-1", service="gateway"),
                     metric_call(call_id="domain-2", service="billing"),
                 ]
@@ -694,16 +673,16 @@ def test_propose_with_two_domain_calls_leaves_select_single_tool_call_to_refuse(
 
     turn = model.propose(make_request(), InitialPlan)
 
-    assert turn.parsed is not None
-    assert len(turn.tool_call) == 2
-    assert select_single_tool_call(turn.tool_call) is None
+    assert turn.parsed is None
+    assert turn.tool_call == ()
+    assert "2 tools" in turn.errors
 
 
 def test_propose_treats_a_provider_invalid_tool_call_as_invalid_output(
     conn: sqlite3.Connection,
 ) -> None:
     invalid = invalid_tool_call(
-        name=RECORD_PLAN_TOOL_NAME,
+        name=RECORD_STOP_TOOL_NAME,
         args="{not valid json",
         id="bad-1",
         error="could not parse arguments",
@@ -721,7 +700,7 @@ def test_propose_refuses_visible_text_alongside_tool_calls(
 ) -> None:
     model, _ = make_model(
         conn,
-        [message([plan_call(stop_reason=None), metric_call()], content="ignore this")],
+        [message([metric_call()], content="ignore this")],
     )
 
     turn = model.propose(make_request(), InitialPlan)
@@ -739,7 +718,7 @@ def test_propose_accepts_provider_tool_and_thinking_blocks(
         {"type": "tool_use", "id": "domain-1", "name": "query_metric", "input": {}},
     ]
     model, _ = make_model(
-        conn, [message([plan_call(stop_reason="done")], content=blocks)]
+        conn, [message([stop_call(stop_reason="done")], content=blocks)]
     )
 
     turn = model.propose(make_request(), InitialPlan)
@@ -754,22 +733,22 @@ def test_propose_refuses_a_text_block_alongside_tool_use(
         {
             "type": "tool_use",
             "id": "plan-1",
-            "name": RECORD_PLAN_TOOL_NAME,
+            "name": RECORD_STOP_TOOL_NAME,
             "input": {},
         },
         {"type": "text", "text": "contradictory visible answer"},
     ]
     model, _ = make_model(
-        conn, [message([plan_call(stop_reason="done")], content=blocks)]
+        conn, [message([stop_call(stop_reason="done")], content=blocks)]
     )
 
     assert model.propose(make_request(), InitialPlan).parsed is None
 
 
-def test_propose_against_hypothesis_update_uses_the_same_reconciliation(
+def test_propose_against_hypothesis_update_uses_the_same_single_call_protocol(
     conn: sqlite3.Connection,
 ) -> None:
-    model, _ = make_model(conn, [message([plan_call(stop_reason=None), metric_call()])])
+    model, _ = make_model(conn, [message([metric_call()])])
 
     turn = model.propose(make_request(stage=Stage.HYPOTHESIS_UPDATE), HypothesisUpdate)
 
@@ -1008,7 +987,7 @@ def test_respond_refuses_a_matching_call_alongside_an_unbound_extra_call(
 
 def test_the_cost_ceiling_refuses_before_sending(conn: sqlite3.Connection) -> None:
     model, fake = make_model(
-        conn, [message([plan_call(stop_reason="done")])], ceiling_usd=0.0
+        conn, [message([stop_call(stop_reason="done")])], ceiling_usd=0.0
     )
 
     with pytest.raises(CostCeilingExceeded):
@@ -1041,7 +1020,7 @@ def test_a_pending_reservation_refuses_to_resend_without_touching_the_transport(
     every `invoke()` call `_send` makes, so `fake.sent == []` here is
     direct proof the provider was never touched, not an inference from
     ledger state."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
     record_reservation_before_request(
         conn,
         run_id="run-1",
@@ -1077,7 +1056,7 @@ def test_a_settled_reservation_also_refuses_to_resend(conn: sqlite3.Connection) 
     pre-existing row first (mirroring a real earlier `_send` call that
     completed normally) proves the refusal does not depend on which state
     the stale reservation is in."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
     record_reservation_before_request(
         conn,
         run_id="run-1",
@@ -1124,7 +1103,7 @@ def test_a_missing_credential_refuses_before_reserving_or_sending(
     without the check, `record_reservation_before_request` runs and writes
     a row before `MissingCredential` would have been raised."""
     model, fake = make_model(
-        conn, [message([plan_call(stop_reason="done")])], credential_present=False
+        conn, [message([stop_call(stop_reason="done")])], credential_present=False
     )
 
     with pytest.raises(MissingCredential):
@@ -1139,7 +1118,7 @@ def test_a_present_credential_does_not_refuse(conn: sqlite3.Connection) -> None:
     """The default (`credential_present=True`, matching every other test in
     this file) must not be affected by this check -- a real key present
     proceeds exactly as before."""
-    model, _ = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, _ = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     turn = model.propose(make_request(), InitialPlan)
 
@@ -1149,7 +1128,7 @@ def test_a_present_credential_does_not_refuse(conn: sqlite3.Connection) -> None:
 def test_an_oversized_request_refuses_before_reserving_or_sending(
     conn: sqlite3.Connection,
 ) -> None:
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
     oversized = ModelRequest(
         stage=Stage.INITIAL_PLAN,
         system_text="x" * (MAX_INPUT_TOKENS * 3 + 100),
@@ -1186,7 +1165,7 @@ def test_a_failed_send_leaves_the_reservation_reserved(
 def test_missing_usage_metadata_leaves_the_reservation_reserved(
     conn: sqlite3.Connection,
 ) -> None:
-    model, _ = make_model(conn, [message([plan_call(stop_reason="done")], usage=None)])
+    model, _ = make_model(conn, [message([stop_call(stop_reason="done")], usage=None)])
 
     with pytest.raises(MissingProviderUsage):
         model.propose(make_request(), InitialPlan)
@@ -1199,7 +1178,7 @@ def test_missing_usage_metadata_leaves_the_reservation_reserved(
 
 
 def test_a_successful_call_reserves_then_settles(conn: sqlite3.Connection) -> None:
-    model, _ = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, _ = make_model(conn, [message([stop_call(stop_reason="done")])])
 
     model.propose(make_request(), InitialPlan)
 
@@ -1226,8 +1205,8 @@ def test_two_distinct_turns_settle_two_distinct_rows(conn: sqlite3.Connection) -
     model, _ = make_model(
         conn,
         [
-            message([plan_call(stop_reason="first")]),
-            message([plan_call(stop_reason="second")]),
+            message([stop_call(stop_reason="first")]),
+            message([stop_call(stop_reason="second")]),
         ],
     )
 
@@ -1254,7 +1233,7 @@ def test_a_repair_turns_estimate_counts_the_correction_header(
     three-way sum leaves this assertion computing a `reserved_usd` 23
     characters (`ceil(23/3) = 8` tokens' worth of reservation, at
     `CHEAP_PRICING`'s rates) below what this test expects."""
-    model, fake = make_model(conn, [message([plan_call(stop_reason="done")])])
+    model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
     repaired = make_request(repair_errors="fix the tool call", digest="digest-repair")
 
     model.propose(repaired, InitialPlan)
@@ -1309,7 +1288,7 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
 # schema against itself ("is `default` consistent with `required`?"), never
 # against the application code that actually refuses a run. `schema_accepts`
 # below is a small, dependency-free validator over exactly the JSON Schema
-# keywords these seven tool schemas use -- adapted from
+# keywords these seven current tool schemas use -- adapted from
 # `3b4-KEEP-schema_gap_check.py` (the investigation's own working
 # prototype, verified there to reproduce all five contracts) into a real,
 # asserting test. `KNOWN_PROSE_ONLY_CONTRACTS` is the registry every
@@ -1325,12 +1304,9 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
 # `schema_accepts`, and none can ever appear in `KNOWN_PROSE_ONLY_
 # CONTRACTS` via this mechanism, no matter how thoroughly the registry is
 # audited:
-# - `record_plan` setting `stop_reason` to a non-null value WHILE also
-#   proposing a domain-tool check in the same turn ("propose a check or
-#   stop, not both") -- a rule about the RELATIONSHIP between two separate
-#   tool calls, not either one's own schema.
-# - Two domain-tool calls proposed in one turn (`select_single_tool_call`'s
-#   own refusal) -- same shape, a cross-call count, not a single payload.
+# - A provider response calling more than one tool -- a cross-call count,
+#   not a single payload. `LiveClaudeModel.propose()` rejects it before the
+#   graph sees a candidate.
 # - A forged evidence-id citation (`ReasonCode.FORGED_EVIDENCE_REFERENCE`)
 #   -- refused by cross-referencing a live evidence STORE built from the
 #   run so far, external to any tool's own schema entirely.
@@ -1352,7 +1328,7 @@ def schema_accepts(
 ) -> tuple[bool, str]:
     """True if `value` satisfies `schema`, covering only the keywords
     `query_metric`/`query_logs`/`list_recent_changes`/`get_topology`/
-    `search_runbooks`/`record_plan`/`record_final_assessment`'s emitted
+    `search_runbooks`/`record_stop`/`record_final_assessment`'s emitted
     schemas actually use -- not a general-purpose JSON Schema validator."""
     root = root or schema
     schema = resolve_schema_ref(schema, root)
@@ -1396,6 +1372,8 @@ def schema_accepts(
     if kind == "string":
         if not isinstance(value, str):
             return False, "not a string"
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            return False, "too short"
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             return False, "too long"
         if "enum" in schema and value not in schema["enum"]:
@@ -1417,13 +1395,13 @@ def schema_accepts(
 
 
 # Post-freeze review, P2-4. `schema_accepts` above is a hand-maintained
-# mirror of the JSON Schema keywords the seven real emitted tool schemas
+# mirror of the JSON Schema keywords the seven current emitted tool schemas
 # use, not a general-purpose validator -- and a hand-maintained mirror can
 # silently narrow: `minItems`/`maxItems`/`minimum`/`maximum` were dropped
 # somewhere between `3b4-KEEP-schema_gap_check.py` (the investigation's own
 # scratch script, which already implements all four) and this file, in the
 # WEAKENING direction. Correctness measured the concrete consequence:
-# `record_plan` with a single hypothesis, `Hypothesis.rank=0`, and
+# `record_stop` with a single hypothesis, `Hypothesis.rank=0`, and
 # `search_runbooks.limit=999` are all real pydantic rejections that
 # `schema_accepts` reported as "accepted." Nothing among the known
 # contracts below happened to depend on any of the four, so nothing was
@@ -1442,6 +1420,7 @@ _SCHEMA_ACCEPTS_HANDLED_KEYWORDS = frozenset(
         "required",
         "minItems",
         "maxItems",
+        "minLength",
         "maxLength",
         "enum",
         "const",
@@ -1532,8 +1511,8 @@ def _collect_schema_keywords(node: dict[str, Any]) -> tuple[set[str], set[str]]:
 
 
 def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
-    """The coverage assertion itself: walks all seven real emitted tool
-    schemas (five domain tools, `record_plan`, `record_final_assessment`),
+    """The coverage assertion itself: walks all seven current emitted tool
+    schemas (five domain tools, `record_stop`, `record_final_assessment`),
     collects every keyword actually present, and fails -- naming the
     specific keyword -- if one is neither handled by `schema_accepts` nor
     explicitly allowlisted as non-constraining. Mutation-verified: removing
@@ -1548,7 +1527,7 @@ def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
     not just a keyword the mirror above recognizes by name."""
     tools = [
         *_domain_tool_definitions(),
-        _plan_tool_definition(),
+        _stop_tool_definition(),
         _final_assessment_tool_definition(),
     ]
     real_keywords: set[str] = set()
@@ -1591,12 +1570,6 @@ def test_the_type_coverage_check_catches_an_unhandled_type_value() -> None:
 # schema itself cannot express it. Every payload exercised by the two tests
 # below must have an entry here.
 KNOWN_PROSE_ONLY_CONTRACTS: dict[str, str] = {
-    "record_plan: stop_reason explicitly null, no check proposed": (
-        "live_model.py's propose(): 'record_plan must set stop_reason "
-        "when no check is proposed this turn' -- and PlanRecord."
-        "stop_reason's own description, 'Use null only when you are "
-        "also calling a check tool this turn.'"
-    ),
     "record_final_assessment: DIAGNOSED, no supporting_evidence_ids": (
         "domain.py's FinalAssessment.check_terminal_invariants -- "
         "'a diagnosis must cite supporting evidence' -- and "
@@ -1635,11 +1608,6 @@ KNOWN_PROSE_ONLY_CONTRACTS: dict[str, str] = {
 # stays free text for a human to read; this is its machine-checkable
 # other half).
 _WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
-    "record_plan: stop_reason explicitly null, no check proposed": (
-        RECORD_PLAN_TOOL_NAME,
-        ("stop_reason",),
-        "Use null only when you are also calling a check tool this turn.",
-    ),
     "record_final_assessment: DIAGNOSED, no supporting_evidence_ids": (
         RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         ("supporting_evidence_ids",),
@@ -1741,7 +1709,7 @@ def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
         tool["name"]: tool["input_schema"]
         for tool in (
             *_domain_tool_definitions(),
-            _plan_tool_definition(),
+            _stop_tool_definition(),
             _final_assessment_tool_definition(),
         )
     }
@@ -1786,52 +1754,15 @@ _HYPOTHESES_PAYLOAD = [
 ]
 
 
-def test_the_stop_reason_omission_gap_is_now_closed_at_the_schema_level() -> None:
-    """Unit 3b-4, item 1's structural effect, seen through the same
-    mechanical checker item 5 uses: the very first payload this
-    investigation found (`record_plan` called with no `stop_reason` key at
-    all, no check proposed) used to be schema-accepted and app-refused --
-    a genuine prose-only contract. Item 1 made `stop_reason` required, so
-    the schema itself now refuses this shape too; it is no longer a gap
-    `schema_accepts` finds, and so it is correctly absent from
-    `KNOWN_PROSE_ONLY_CONTRACTS` above. Mutation-verified: temporarily
-    reverting `PlanRecord.stop_reason` to `Field(default=None, ...)` flips
-    `accepted` back to `True` for this exact payload."""
-    plan_schema = _plan_tool_definition()["input_schema"]
+def test_the_stop_reason_omission_is_refused_at_the_schema_level() -> None:
+    """The single-call stop schema requires an explicit stop reason."""
+    plan_schema = _stop_tool_definition()["input_schema"]
     payload = {"hypotheses": _HYPOTHESES_PAYLOAD}
 
     accepted, why = schema_accepts(plan_schema, payload)
 
     assert accepted is False
     assert why == "missing required 'stop_reason'"
-
-
-def test_a_record_plan_null_stop_reason_with_no_check_is_a_documented_gap(
-    conn: sqlite3.Connection,
-) -> None:
-    """The one `record_plan` prose-only contract item 1 does NOT close:
-    Claude can still explicitly send `stop_reason: null` on a turn that
-    proposes no check. The schema cannot forbid this by itself -- "a check
-    was proposed" is a fact about a *different* tool call in the same turn,
-    not about this tool's own arguments -- so the rule has to live in
-    `propose()`'s own code, confirmed here against the real method rather
-    than only against `PlanRecord.model_validate`."""
-    plan_schema = _plan_tool_definition()["input_schema"]
-    payload = {"hypotheses": _HYPOTHESES_PAYLOAD, "stop_reason": None}
-    label = "record_plan: stop_reason explicitly null, no check proposed"
-
-    # The schema, and pydantic underneath it, both accept this shape --
-    # confirming the gap is real, not a typo in the payload.
-    PlanRecord.model_validate(payload)
-
-    model, _ = make_model(conn, [message([plan_call(stop_reason=None)])])
-    turn = model.propose(make_request(), InitialPlan)
-    app_refuses = turn.parsed is None and "stop_reason" in (turn.errors or "")
-
-    assert_documented_prose_only_contract(
-        label, plan_schema, payload, app_refuses=app_refuses
-    )
-    assert app_refuses
 
 
 @pytest.mark.parametrize(
@@ -1910,9 +1841,9 @@ def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
     ]
     schema = search_runbooks_tool["input_schema"]
     payload = {
-        "tool": ToolName.SEARCH_RUNBOOKS.value,
         "topic": "gateway_errors",
         "limit": 6,
+        "hypotheses": _HYPOTHESES_PAYLOAD,
         "evidence_gap": "whether known gateway-error causes match this incident",
         "expected_observation": "guidance naming a matching known cause",
     }
@@ -1921,9 +1852,12 @@ def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
 
     arguments = SearchRunbooksArguments.model_validate(
         {
-            key: value
-            for key, value in payload.items()
-            if key not in {"evidence_gap", "expected_observation"}
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"evidence_gap", "expected_observation", "hypotheses"}
+            },
+            "tool": ToolName.SEARCH_RUNBOOKS.value,
         }
     )
     proposal = ToolProposal(

@@ -2187,13 +2187,17 @@ it is written.
   call that never reaches `.connect()` could still leak a hostname to a
   resolver. Harmless while nothing in the suite resolves a real hostname;
   becomes live the moment `api.anthropic.com` appears.
-- **A live model can contradict itself across channels** — a native tool
-  call alongside structured content that also carries `stop_reason`, a
-  combination replay cannot produce by construction. Unit 3b-1 treats
-  `turn.tool_call`'s non-emptiness as authoritative for "was a check
-  proposed," identical to today's behaviour (the node never reads
-  `parsed.proposal` directly) — not a new gap, but 3b-2's adapter design
-  must resolve it for a live provider.
+- **Current live proposal protocol — single native call.** Each
+  INITIAL_PLAN/HYPOTHESIS_UPDATE turn binds the five registered check tools
+  plus adapter-internal `record_stop`, with `parallel_tool_calls=False`.
+  Exactly one native call is accepted: a check includes 2–3 hypotheses and
+  its rationale; `record_stop` includes 2–3 hypotheses and a required,
+  non-empty stop reason. The provider-facing check schemas omit the duplicate
+  `tool` field; `tool_calls.parse_tool_call` validates the registered native
+  name and restores the internal discriminator so policy and fingerprints are
+  unchanged. Zero, multiple, unknown, malformed, or visible mixed output is
+  repaired through the normal model-output path. This supersedes the historic
+  two-call `record_plan` reconciliation described below.
 
 ### Unit 3b-2 — running the live smoke call
 
@@ -2465,31 +2469,25 @@ into the cap "would refuse ordinary runs." That conclusion did not follow
 from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
 7,595 = 2,005-token folded headroom, that specific turn was *admitted*
 (1,280 < 2,005), not refused — the same defect (512 < 620) was present in
-the original figure and survived the rewrite to the new one. The claim is
-still true, on the right example: `Budgets.runbook_passages` (5) retrieved
-passages at `RunbookPassage.content`'s own `max_length` (800) are still
-present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
-`_make_final_assessment` rebuilds and re-renders passages from state on
-every stage, not just the one that retrieved them — and measure to 5,577
-characters/tokens (grew from 5,465 to 5,589 once the review round that
-closed the mixed-content/unknown-field gaps added one sentence to
-`SYSTEM_TEXT` forbidding narrative text alongside a tool call, then
-shrank to 5,577 once a later round reworded that same sentence -- it read
-ambiguously as either "no narrative text" or "exactly one tool call," and
-the second reading is wrong for this architecture -- to remove the
-cardinality misreading without changing its intent; `SYSTEM_TEXT` is part
-of every rendered prose total, so each wording change moves this figure).
-Measured directly and pinned by `test_live_model.py`'s
-`test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
-not asserted from the zero-evidence case that cannot support it. Unit
+the original figure and survived the rewrite to the new one. The valid
+example is a HYPOTHESIS_UPDATE after runbook retrieval: one check remains,
+it can retain all five `Budgets.runbook_passages`, and its proposal-tool
+binding is 12,011 characters/tokens. By
+contrast, FINAL_ASSESSMENT binds its 2,292-token schema, and its
+5,577-character full-runbook context fits the resulting 7,308-token folded
+headroom. `test_live_model.py`'s
+`test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap`
+renders that real proposal-stage shape, proves its prose fits the cap while
+prose plus tools does not, and proves the fake transport is still sent. Unit
 3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 7,237, leaving 9,600 − 7,237 = 2,363 tokens; 5,577 still clears either
-headroom value, so this conclusion is unaffected across every revision;
-the test above re-measures both figures directly rather than either one
-being carried by hand.
+is 12,011, which is already larger than the 9,600-token prose cap. Folding
+proposal schemas into that cap would therefore refuse even an empty proposal
+request; final-assessment schemas do not have that problem. The test derives
+the proposal-stage folded headroom from emitted definitions instead of
+carrying it by hand.
 
 ### The second live run and its root-cause investigation — Unit 3b-4
 
@@ -2514,6 +2512,11 @@ tested the schema against itself ("is `default` consistent with
 from `required` as evidence the field was optional, which is not true for
 a conditionally-required one.
 
+**Historical protocol note.** The following Unit 3b-4 details describe the
+then-current two-call `record_plan` protocol. They preserve the live-run and
+review evidence, but its implementation and test names are superseded by the
+single-call `record_stop` protocol documented above.
+
 **Six items landed, all prose/schema-shaping only except item 1:**
 
 1. **`PlanRecord.stop_reason` (`live_model.py`) is now required-and-nullable
@@ -2525,9 +2528,8 @@ a conditionally-required one.
    already in `required`; `stop_reason` was not, so dropping only its
    default would have left it exactly as omittable as before. The field's
    `= None` assignment is gone instead, which pydantic marks required; the
-   emitted schema is asserted directly by
-   `test_the_plan_tool_definition_states_stop_reason_as_required_and_
-   nullable`.
+   emitted schema was asserted directly by that unit's then-current
+   live-model test.
 2. **`record_final_assessment`'s three terminal-disposition invariants**
    (`domain.check_terminal_invariants`: a diagnosis needs a root cause and
    supporting evidence; an abstention needs `UNDETERMINED`) are now stated
@@ -2558,8 +2560,8 @@ a conditionally-required one.
 5. **A schema-vs-application cross-check landed as a real test**
    (`tests/unit/test_live_model.py`: `assert_documented_prose_only_contract`
    plus `test_each_known_final_assessment_contract_is_schema_accepted_and_
-   app_refused`, `test_a_record_plan_null_stop_reason_with_no_check_is_a_
-   documented_gap`, and `test_an_undocumented_prose_only_contract_fails_
+   app_refused`, its then-current stop-record gap regression, and
+   `test_an_undocumented_prose_only_contract_fails_
    the_check`, which demonstrates the guard against a real, currently
    unlisted gap on `search_runbooks.limit` exceeding `Budgets.
    runbook_passages` — `contrary_evidence_ids` was this demonstration's
@@ -2622,9 +2624,9 @@ against the actual code before being approved — one codex claim (an append-onl
   two are synthetic properties this module injects, outside that sweep's scope. More
   exposed than any field item 3 already fixed: both are REQUIRED on every domain-tool
   call, not once per run.
-- **A2.** `record_plan`'s own description said "every turn" but never "once per
-  turn" — `propose()`'s own refusal for a second `record_plan` call already says
-  "call it exactly once"; the tool description now does too.
+- **A2.** In the then-current `record_plan` protocol, the tool description said
+  "every turn" but never "once per turn"; its duplicate-call refusal already
+  said "call it exactly once," and the description was updated to match.
 - **A3, record only.** `DUPLICATE_PROPOSAL` (`policy.py`) has no prose anywhere —
   not fixed this round; it has no live-run precedent yet, and the fact is not
   expressible in schema (repetition across turns, not a payload shape).
@@ -2731,9 +2733,8 @@ two observed live-run failures.**
   story so it is not rediscovered.
 - **C4 (P2).** `live_model.py`'s `respond()` used `next(...)` to silently take the
   first of two or more `record_final_assessment` calls in one message, discarding a
-  conflicting second one instead of refusing — the one case `propose()`'s own
-  `record_plan` duplicate check (`len(plan_calls) > 1`) already covers on the
-  proposal side. Two-or-more matches now refuse the same way zero matches already
+  conflicting second one instead of refusing — analogous to the then-current
+  proposal-side duplicate-call refusal. Two-or-more matches now refuse the same way zero matches already
   did (empty `content`, routed through the existing repair path).
 - **C5 (P2).** `cli.py`'s `main()` catches only `(LabError, RunRecordError,
   CheckpointStoreError)`; three call sites read and validated a stored JSON artifact
@@ -2811,12 +2812,12 @@ round.
   out. Fixed with the exact shape codex proposed:
   `if len(message.tool_calls) != 1 or len(matching_calls) != 1 or message.invalid_tool_calls`.
 - **N1.** `test_the_tool_payload_size_matches_what_pricingpy_assumes` pins only `propose()`'s
-  payload (`_plan_tool_definition()` plus the five `_domain_tool_definitions()`) —
+  payload (`_stop_tool_definition()` plus the five `_domain_tool_definitions()`) —
   `_final_assessment_tool_definition()` was never in that binding, so `respond()`'s own
   payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
   unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
   assumes`, pinned the final schema at **2,261 characters/tokens** at that
-  historical point. The current strict-schema measurements are 7,237 for
+  historical point. The current single-call proposal measurement is 12,011 for
   proposals and 2,292 for final assessments; `_send` names them separately.
 - **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
   mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
@@ -2879,7 +2880,7 @@ checks see the true combined size from their first iteration.
   traversal string cannot forge one. Not exploitable today; recorded, not fixed.
 - **N4.** `schema_accepts`/item 5's cross-check (`test_live_model.py`) structurally cannot
   detect any rule spanning more than one tool schema or more than one call in a turn —
-  `record_plan` setting `stop_reason` while also proposing a check, two domain calls in one
+  the then-current `record_plan` plus check shape, multiple domain calls in one
   turn, and the forged-citation refusal (which needs a live evidence store, not any one
   schema) are all real prose-only contracts this mechanism can never express, let alone list
   in the registry. The module-level comment above `schema_accepts` now names this explicitly
@@ -3092,9 +3093,10 @@ line is intentionally skipped individually so valid log rows still produce evide
 `settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
 caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
 
-**Post-review strict-schema update.** Current proposal tool schemas are 7,237 serialized
-characters/tokens, leaving 2,363 tokens under the prose-only 9,600-token cap; the final-assessment
-schema is 2,292. Strict schemas reject unknown tool, plan, hypothesis, and final-assessment fields.
+**Post-review single-call schema update.** Current proposal tool schemas are 12,011 serialized
+characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
+schema is 2,292. The cap intentionally excludes tool schemas while reservations include them.
+Strict schemas reject unknown tool, stop, hypothesis, and final-assessment fields.
 Native Anthropic tool-use responses may include `tool_use`, `thinking`, and `redacted_thinking`
 blocks, but visible text and unsupported blocks remain refused.
 
@@ -3111,7 +3113,8 @@ pin the corrected behaviour, and `test_propose_refuses_a_text_block_alongside_to
 `test_respond_refuses_an_unsupported_block_alongside_tool_use` confirm a genuine text or
 unsupported block is still refused alongside a real tool call. Second, an early pass applied
 `extra="forbid"` to only some of the eight schema classes it now covers (`tools.py`'s five
-argument classes, `domain.py`'s `Hypothesis`/`FinalAssessment`, `live_model.py`'s `PlanRecord`) —
+argument classes, `domain.py`'s `Hypothesis`/`FinalAssessment`, `live_model.py`'s
+then-current `PlanRecord`) —
 the same "fix scoped to the instance touched, not every instance of the class" shape this
 document has recorded before (see "Round 4 and round 6 review" above). A model call reaching one
 of the missed classes could still smuggle an unrecognized field in and have it silently dropped
