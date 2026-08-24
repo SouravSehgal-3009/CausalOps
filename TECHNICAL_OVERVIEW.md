@@ -3095,7 +3095,12 @@ caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain
 
 **Post-review single-call schema update.** Current proposal tool schemas are 12,011 serialized
 characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
-schema is 2,292. The cap intentionally excludes tool schemas while reservations include them.
+schema is 2,292. The gap between the two is mechanical, not five independently large tools:
+Anthropic tool schemas are self-contained, with no cross-tool `$ref`, so each of the five
+domain tools embeds its own full copy of the hypotheses schema (`live_model.py`'s
+`_domain_tool_definitions()`) rather than sharing one — that five-fold duplication of one
+shared schema is essentially the whole size increase. The cap intentionally excludes tool
+schemas while reservations include them.
 Strict schemas reject unknown tool, stop, hypothesis, and final-assessment fields.
 Native Anthropic tool-use responses may include `tool_use`, `thinking`, and `redacted_thinking`
 blocks, but visible text and unsupported blocks remain refused.
@@ -3132,6 +3137,117 @@ does not exist; the real sibling, a few hundred lines above, is
 suffix (that suffix is real on the analogous cost-ceiling pair, which this docstring appears to
 have been copied from). Citation corrected.
 
+### Unit 3c — the paired live comparison
+
+The last piece of Milestone 3: wiring `evaluation.py`'s scoring machinery (`score_run`, built in
+an earlier milestone with zero callers until this unit) into a real, cost-bounded run of
+`TECHNICAL_SPEC.md` §10's paired live comparison, plus the reproducibility manifest fields §10
+requires on every scored record.
+
+**A scored-run mode, not a new orchestrator.** `build_graph`/`run_graph_investigation` gained two
+independent, keyword-only, default-`False` flags rather than a second graph implementation.
+`suppress_escalation=True` changes exactly one thing: `_make_route_after_final_assessment`'s
+router returns `"final_report"` unconditionally, without ever calling `_escalation_reason` at all
+-- not "compute the reason but ignore it," which would leave a way for a future edit to
+accidentally wire the result back in. A confinement test (`test_a_scored_run_suppresses_
+escalation_while_an_ordinary_run_still_escalates`, `test_graph.py`) runs the same
+`service_out_of_scope.json` fixture twice, unmodified except for the flag: the ordinary run
+still pauses with `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING` exactly as before this unit, while
+the scored run reaches a terminal report with `escalation is None` -- proving the suppression is
+scoped to the flag, not a change to escalation behaviour generally.
+
+**The no-tool baseline is a smaller graph, not a starved one.** `no_tool_baseline=True` never adds
+the `investigate`/`dispatch_tool`/`normalize_evidence` nodes at all -- `START` edges directly to
+`final_assessment` -- rather than binding the same five domain tools and hoping a zero
+`executed_tools` budget keeps the model from trying them. The distinction matters: a model that
+can still see tool schemas but has its proposals denied for budget exhaustion is not "no tools,"
+it is "tools that always fail," a different and noisier comparison. `_make_final_assessment`
+already tolerated empty receipts/evidence/passages at `model_turn=0` on every pre-existing call
+path, so no node factory needed to change, only which edges `build_graph` wires. A topology test
+(`test_a_no_tool_baseline_never_offers_a_domain_tool_and_skips_straight_to_assessment`) proves
+this directly by asserting `ReplayToolCallingModel.requests` contains exactly one
+`Stage.FINAL_ASSESSMENT` request and nothing else, reusing `valid_diagnosis.json`'s
+`initial_plan`/`hypothesis_update` entries unmodified specifically so a regression that started
+calling `investigate` again would consume them and pass silently if this test only checked the
+final report's shape instead.
+
+**The frozen four-pair corpus needed no new lab or scenario-controller work.** Every
+`lab/scenarios/*.json` family already carried a `seed_variants.evaluation` block distinct from
+`seed_variants.development`, and `start_scenario(root, family, seed="evaluation")` was already a
+real, tested path. `causalops-evaluate` drives exactly the four existing families
+(`ambiguous_telemetry`, `configuration_change`, `downstream_timeout_retry_amplification`,
+`resource_pool_saturation`) through that seed, one incident per family, investigated twice each
+(no-tool baseline, then tool-enabled) rather than two separate scenario starts -- `scenario_
+control.py`'s "one active scenario at a time" rule makes two concurrent incidents structurally
+impossible anyway, and §10's own "one no-tool baseline and one tool-enabled run *per incident*"
+wording already says the pairing is same-incident, not same-family-different-incident.
+Held-out enforcement reuses the existing evaluator/investigator boundary unchanged: `start_
+scenario` already writes `runs/<incident_id>/evaluator/expected.json` for every scenario, and
+`telemetry.RunPaths` still has no accessor for that directory. `causalops-evaluate` reads that
+file directly by constructing the path itself, staying on the evaluator side of the same line
+`tests/security/test_ground_truth_isolation.py` already polices, rather than widening
+`RunPaths`.
+
+**`causalops-evaluate` is a genuinely separate binary.** Registered in `pyproject.toml`'s
+`[project.scripts]` as `causalops-evaluate` (a `[project.scripts]` key becomes an executable
+filename on `PATH`, which cannot contain the literal space `causalops evaluate`'s prose
+implied). `causalops.cli` never imports `causalops.evaluate_cli`, and the reverse also holds
+(unstated by `CLAUDE.md` but just as load-bearing, since either direction would form the same
+coupling). Both scripts share their live-model/tool-registry construction and cost-ceiling
+parsing through a new neutral module, `causalops.live_setup` -- `cli.py`'s former `_build_model_
+and_registry`/`_live_evaluation_ceiling_usd` extracted verbatim, renamed public, and imported by
+both, so isolation did not force the alternative of copy-pasting that wiring into
+`evaluate_cli.py`. `tests/security/test_evaluate_cli_isolation.py` proves the isolation two ways:
+`import_scan.imported_modules`'s full-AST walk (`ast.walk`, not just top-level statements) so a
+lazy import buried in a function body or a conditional is still caught, plus a plain substring
+check on `cli.py`'s own source text that also closes a dynamic `importlib.import_module(...)`
+loophole the AST scan alone cannot see -- the two-tier approach this project's own history (see
+`CLAUDE.md`'s uv-run-pytest note) argues is necessary whenever "never imported" needs to survive
+someone's later attempt to satisfy the letter of that rule while defeating its purpose.
+
+**`EvaluationRecord` gained the reproducibility manifest §10 asks for.** Beyond the previously
+missing `retrieval_mode`: `git_sha`/`git_dirty` (captured via `git rev-parse HEAD`/`git status
+--porcelain` at evaluate-run time, not stored anywhere durable before this unit), the run's
+`Versions` (prompt/policy/tool-registry, already computed per-run but never surfaced past
+`InvestigationReport.versions`), `runbook_corpus_version` (from `RunbookIndex.corpus_version`,
+now actually read and stringified instead of deliberately discarded -- the comment at its own
+`__init__` had named this unit as the first real consumer since Unit 3a), `fixture_sha256` (a
+SHA-256 of the exact `lab/scenarios/<family>.json` bytes an incident's family was started from --
+a content hash chosen over a hand-maintained version string specifically so it cannot drift
+silently and needs no edit to the frozen scenario files), `model_name`, `pricing_source`/
+`pricing_verified_on` (from `CLAUDE_SONNET_5_PRICING`, already existed, now carried onto the
+record), `configured_ceiling_usd`, and `reserved_usd`/`actual_usd`. "Raw artifact references"
+needed no new field: `investigation_id` alone already names the deterministic `results/
+investigations/<investigation_id>/` directory `run_records.finalize_investigation` writes every
+raw artifact to. `EvaluationRecord` also gained `extra="forbid"`, matching the project-wide
+tightening the immediately preceding unit applied to every other wire-facing model.
+
+**Cost is read from the existing ledger, not tracked twice.** `cost_ledger.run_cost_totals(conn,
+run_id)` sums `reserved_usd`/`actual_usd` scoped to one `run_id`, a different question from
+`_reserved_and_settled_total`'s application-wide ceiling sum beside it -- both read the same
+table through the same connection every other live call already uses. One real gap surfaced
+during implementation: `run_id` is internal bookkeeping, deliberately absent from
+`InvestigationReport` (a caller has no legitimate reason to see it -- it is never cited, never
+displayed). `causalops-evaluate` still needs it to query the ledger, so `run_graph_investigation`
+now records it as an extra field on the `investigation_started` event it already emits first --
+`events.jsonl` is not schema-frozen the way `InvestigationReport` is, and no test pinned that
+event's exact field set, making this a smaller, more honest fix than adding a field to the report
+schema that nothing else in this unit needs. `_run_one` (`evaluate_cli.py`) passes no
+`checkpointer` to `run_graph_investigation`, so each scored run gets a fresh, process-local
+`InMemorySaver()`: a suppressed run never pauses, so there is nothing to resume across a process
+boundary, and this keeps scored-run graph checkpoints out of the shared `checkpoints.db`
+entirely -- the cost ledger is a separate connection to that same file, unrelated to the graph
+checkpointer.
+
+**Verified before freezing**: 579 pre-existing tests plus this unit's additions all pass; `ruff
+check`/`ruff format --check` and `mypy --strict` are clean on every touched file; the confinement
+test and both isolation tests were mutation-tested by reverting each guard in turn and confirming
+the corresponding test fails for the right reason, then restored. `causalops-evaluate` itself was
+never run against a live model or the Docker lab during this unit's own development --
+`test_evaluate_cli.py`'s orchestration test monkeypatches `build_model_and_registry`/
+`start_scenario`/`reset_scenario`, the same seam-testing approach `test_live_model.py` already
+uses for `LiveClaudeModel` itself, so the whole fast suite stays network-free.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"
@@ -3157,9 +3273,9 @@ The rest of the original evaluation design — mechanical scores (diagnosis
 correctness, disposition correctness, citation validity, citation
 sufficiency, control behavior, efficiency), the reproducibility manifest
 fields, and the "do not use an LLM judge, do not report p95 from a small
-sample" publication rules — remains accurate design intent for whichever
-milestone eventually builds the live adapter. It is not implemented; see
-Part I, Phase 3.
+sample" publication rules — is now implemented, by Unit 3c ("Unit 3c — the
+paired live comparison," above). Mechanical scoring (`score_run`) predates
+this unit and is otherwise unchanged; Unit 3c is what actually calls it.
 
 ## Remaining deferred extensions
 

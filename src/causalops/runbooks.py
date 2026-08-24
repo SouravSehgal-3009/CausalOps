@@ -82,13 +82,20 @@ class RunbookIndex:
     """
 
     def __init__(self, corpus_path: Path = CORPUS_PATH) -> None:
-        # `corpus_version` (the JSON's own top-level key) is deliberately
-        # not read here: nothing in this unit consumes it yet -- Unit 3c's
-        # reproducibility manifest (`TECHNICAL_SPEC.md` §10) is the first
-        # real consumer. Parsing and storing it now, unread, would be dead
-        # code; the key stays in the JSON file itself as forward-compatible
-        # metadata for that unit to read directly.
         loaded = json.loads(corpus_path.read_text(encoding="utf-8"))
+        # Unit 3c. `corpus_version` is the JSON's own top-level key -- an
+        # int in `runbook_corpus.json` today (`1`), stringified here to
+        # match every other "_version" field in this codebase
+        # (`SCHEMA_VERSION`, `SCORER_VERSION`, `prompt_version`, ...), all
+        # of which are strings regardless of how small the underlying
+        # number is. `TECHNICAL_SPEC.md` §10's reproducibility manifest is
+        # the first real reader, via `EvaluationRecord.runbook_corpus_
+        # version`. `None` for a corpus file that predates this key rather
+        # than a hard `KeyError`, so an older checked-in corpus still loads.
+        raw_corpus_version = loaded.get("corpus_version")
+        self.corpus_version: str | None = (
+            str(raw_corpus_version) if raw_corpus_version is not None else None
+        )
         self._connection = sqlite3.connect(":memory:")
         self._connection.execute(
             "CREATE VIRTUAL TABLE runbook USING fts5("

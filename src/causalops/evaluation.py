@@ -19,8 +19,10 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
     RootCauseCode,
     ToolReceipt,
+    Versions,
 )
 
 SCORER_VERSION = "1"
@@ -104,7 +106,28 @@ class MechanicalScores(BaseModel):
 
 
 class EvaluationRecord(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    """One scored run of the Unit 3c paired live comparison.
+
+    The reproducibility fields below are `TECHNICAL_SPEC.md` §10's own list
+    verbatim ("Record Git SHA, clean/dirty status, fixture/prompt/policy/
+    tool versions, retrieval mode/corpus version, exact model, tokens,
+    latency, cost, and raw artifact references. Include the pricing
+    source/date and configured ceiling."). Tokens and latency are already
+    on `scores.efficiency`, so they are not repeated here. "Raw artifact
+    references" is `investigation_id` itself, not a separate field:
+    `run_records.finalize_investigation` already writes every raw artifact
+    for a run to a deterministic path this id alone names
+    (`results/investigations/<investigation_id>/`), so a second pointer
+    field would only ever repeat what `investigation_id` already says.
+
+    `extra="forbid"` matches the project-wide tightening every other
+    wire-facing model already carries (Unit `single-turn-tool-protocol`):
+    this record is written to and read back from disk the same way those
+    models are, so an unrecognized field on read is a real, actionable
+    surprise, not something to silently drop.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: str = SCHEMA_VERSION
     scorer_version: str = SCORER_VERSION
@@ -113,6 +136,32 @@ class EvaluationRecord(BaseModel):
     incident_id: str
     expected: ExpectedOutcome
     scores: MechanicalScores
+
+    # Reproducibility manifest, §10.
+    git_sha: str
+    git_dirty: bool
+    versions: Versions
+    retrieval_mode: RetrievalMode
+    # `RunbookIndex.corpus_version`, `None` only for a corpus file that
+    # predates the `corpus_version` key -- see that class's own docstring.
+    runbook_corpus_version: str | None = None
+    # SHA-256 of the exact `lab/scenarios/<family>.json` bytes this
+    # incident's family was started from -- a content hash rather than a
+    # hand-maintained version string, so it cannot silently drift from what
+    # was actually used and needs no change to the frozen scenario files
+    # themselves.
+    fixture_sha256: str
+    model_name: str
+    pricing_source: str
+    pricing_verified_on: str
+    configured_ceiling_usd: float
+    # From `cost_ledger.run_cost_totals` for this run's `run_id` -- the
+    # existing reservation/settlement ledger, not a second cost-tracking
+    # mechanism. `actual_usd` is `None` only for a run whose model call(s)
+    # never settled (reserved, then a crash/timeout/refusal before the
+    # provider responded) -- an honest partial-cost case, not hidden as 0.0.
+    reserved_usd: float
+    actual_usd: float | None = None
 
 
 def satisfies(predicate: RequiredEvidencePredicate, evidence: Evidence) -> bool:

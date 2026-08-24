@@ -98,7 +98,7 @@ The sentence the previous round added was ambiguous: "respond with the
 tool call alone" reads naturally either as "no narrative text alongside
 the tool call" (the intended meaning) or as "make only one tool call"
 (wrong -- `live_model.py` requires exactly one native call on every
-  INITIAL_PLAN/HYPOTHESIS_UPDATE turn). Reworded to "do not add
+INITIAL_PLAN/HYPOTHESIS_UPDATE turn). Reworded to "do not add
 narrative text, explanation, or commentary outside the tool call's own
 fields," which keeps the original intent and removes the cardinality
 reading. `system_text` is identical across every stage in every scenario

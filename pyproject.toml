@@ -33,6 +33,13 @@ dependencies = [
 
 [project.scripts]
 causalops = "causalops.cli:main"
+# Unit 3c. A genuinely separate binary, not a `causalops` subcommand:
+# `causalops.cli` never imports `causalops.evaluate_cli`, and this module
+# never imports `causalops.cli` -- `tests/security/test_evaluate_cli_isolation.py`
+# proves the first half directly. A hyphenated name because a
+# `[project.scripts]` key becomes an executable filename on `PATH`, which
+# cannot contain a space.
+causalops-evaluate = "causalops.evaluate_cli:main"
 
 [build-system]
 requires = ["hatchling"]

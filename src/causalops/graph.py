@@ -1415,7 +1415,21 @@ def _make_route_after_normalize(
     return route_after_normalize
 
 
-def _make_route_after_final_assessment(budgets: Budgets) -> Callable[[GraphState], str]:
+def _make_route_after_final_assessment(
+    budgets: Budgets, *, suppress_escalation: bool = False
+) -> Callable[[GraphState], str]:
+    """`suppress_escalation` (Unit 3c) is the scored-run mode's only real
+    mechanism: `TECHNICAL_SPEC.md` §10 requires the paired live comparison to
+    "not invoke the escalation path." Set `True`, this router never reaches
+    `_escalation_reason` at all -- not "compute the reason but ignore it,"
+    which would still leave a way for a future edit to accidentally wire the
+    result back in, but skip the call entirely, so a scored run's route to
+    `"final_report"` cannot depend on what the trigger check would have said.
+    `causalops.evaluate_cli` is the only caller that ever passes `True`;
+    every other caller (through `build_graph`'s own default) gets today's
+    unmodified escalation behaviour.
+    """
+
     def route_after_final_assessment(state: GraphState) -> str:
         if state["failure_reason"] is not None:
             # A crashed, invalid, or forged-citation `final_assessment` has
@@ -1424,6 +1438,8 @@ def _make_route_after_final_assessment(budgets: Budgets) -> Callable[[GraphState
             # `final_assessment`'s own `failed_state`). A failed-safe run is
             # never escalated, the same bypass rule `route_after_investigate`
             # and `route_after_normalize` already apply.
+            return "final_report"
+        if suppress_escalation:
             return "final_report"
         receipts = _rebuild_receipts(state)
         assessment = FinalAssessment.model_validate(state["assessment"])
@@ -1449,6 +1465,8 @@ def build_graph(
     checkpointer: BaseCheckpointSaver[str],
     *,
     event_clock: Clock,
+    suppress_escalation: bool = False,
+    no_tool_baseline: bool = False,
 ) -> CompiledStateGraph[GraphState, None, GraphState, GraphState]:
     """`clock` times domain data -- budget expiry, tool duration, timestamps
     a report or a citation might carry. `event_clock` times `RunEvent.at`
@@ -1461,25 +1479,34 @@ def build_graph(
     on every read regardless of purpose, so entangling the two would shift
     evidence timestamps by however many events happened to be recorded
     first, for a reason that has nothing to do with the evidence itself.
+
+    `suppress_escalation` and `no_tool_baseline` (Unit 3c) are independent
+    switches for `causalops.evaluate_cli`'s paired live comparison, both
+    defaulted `False` so every existing caller -- `run_graph_investigation`'s
+    own default, `cli.py`, and every test that predates this unit -- keeps
+    today's graph unchanged.
+
+    `no_tool_baseline=True` builds a strictly smaller graph -- `investigate`,
+    `dispatch_tool`, and `normalize_evidence` are never added as nodes at
+    all, not merely left unreached, and `START` edges directly to
+    `final_assessment` -- because `TECHNICAL_SPEC.md` §10's no-tool baseline
+    has to mean the model never sees a domain-tool schema, not "tools bound
+    but budget exhausted." `_make_final_assessment` already tolerates empty
+    receipts/evidence/passages at `model_turn=0` on every existing call
+    path (a `final_assessment` reached after zero investigate turns is not a
+    new state this graph has never produced), so no node factory changes are
+    needed for this topology, only which edges are wired.
+
+    `suppress_escalation=True` is unrelated to topology -- see
+    `_make_route_after_final_assessment`'s own docstring for the mechanism.
+    Both flags are set together for the baseline run (a model working from
+    zero evidence commonly lands on `INSUFFICIENT_EVIDENCE` with checks
+    still available, which would otherwise trigger
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`) and for the tool-enabled
+    scored run alike -- both must stay unpaused for a scored evaluation to
+    run unattended.
     """
     graph: StateGraph[GraphState, None, GraphState, GraphState] = StateGraph(GraphState)
-    graph.add_node(
-        "investigate",
-        _make_investigate(
-            scope, packet, budgets, clock=clock, event_clock=event_clock, model=model
-        ),
-    )
-    graph.add_node(
-        "dispatch_tool",
-        _make_dispatch_tool(
-            scope,
-            budgets,
-            clock=clock,
-            event_clock=event_clock,
-            registry=dispatch_registry,
-        ),
-    )
-    graph.add_node("normalize_evidence", _make_normalize_evidence(event_clock))
     graph.add_node(
         "final_assessment",
         _make_final_assessment(
@@ -1493,29 +1520,58 @@ def build_graph(
         "final_report", _make_final_report(budgets, clock, event_clock=event_clock)
     )
 
-    graph.add_edge(START, "investigate")
-    graph.add_conditional_edges(
-        "investigate",
-        route_after_investigate,
-        {
-            "dispatch_tool": "dispatch_tool",
-            "final_assessment": "final_assessment",
-            "final_report": "final_report",
-        },
-    )
-    graph.add_edge("dispatch_tool", "normalize_evidence")
-    graph.add_conditional_edges(
-        "normalize_evidence",
-        _make_route_after_normalize(budgets, clock),
-        {
-            "investigate": "investigate",
-            "final_assessment": "final_assessment",
-            "final_report": "final_report",
-        },
-    )
+    if no_tool_baseline:
+        graph.add_edge(START, "final_assessment")
+    else:
+        graph.add_node(
+            "investigate",
+            _make_investigate(
+                scope,
+                packet,
+                budgets,
+                clock=clock,
+                event_clock=event_clock,
+                model=model,
+            ),
+        )
+        graph.add_node(
+            "dispatch_tool",
+            _make_dispatch_tool(
+                scope,
+                budgets,
+                clock=clock,
+                event_clock=event_clock,
+                registry=dispatch_registry,
+            ),
+        )
+        graph.add_node("normalize_evidence", _make_normalize_evidence(event_clock))
+
+        graph.add_edge(START, "investigate")
+        graph.add_conditional_edges(
+            "investigate",
+            route_after_investigate,
+            {
+                "dispatch_tool": "dispatch_tool",
+                "final_assessment": "final_assessment",
+                "final_report": "final_report",
+            },
+        )
+        graph.add_edge("dispatch_tool", "normalize_evidence")
+        graph.add_conditional_edges(
+            "normalize_evidence",
+            _make_route_after_normalize(budgets, clock),
+            {
+                "investigate": "investigate",
+                "final_assessment": "final_assessment",
+                "final_report": "final_report",
+            },
+        )
+
     graph.add_conditional_edges(
         "final_assessment",
-        _make_route_after_final_assessment(budgets),
+        _make_route_after_final_assessment(
+            budgets, suppress_escalation=suppress_escalation
+        ),
         {
             "escalation_interrupt": "escalation_interrupt",
             "final_report": "final_report",
@@ -1695,8 +1751,18 @@ def run_graph_investigation(
     investigation_id: str | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
     model_name: str = REPLAY_MODEL_NAME,
+    suppress_escalation: bool = False,
+    no_tool_baseline: bool = False,
 ) -> InvestigationResult | EscalatedInvestigation:
     """Run one investigation to completion, or to its first pause.
+
+    `suppress_escalation`/`no_tool_baseline` (Unit 3c) pass straight through
+    to `build_graph` -- see its own docstring for what each one does. Both
+    default `False`, so this function's behaviour is unchanged for every
+    caller written before this unit. Only `causalops.evaluate_cli` ever
+    passes either as `True`; `resume_graph_investigation` below never takes
+    these two, because a scored run that never pauses has nothing to
+    resume.
 
     `investigation_id` doubles as LangGraph's own `thread_id`
     (`TECHNICAL_SPEC.md:140-142`). It is `None` for every caller today --
@@ -1751,7 +1817,20 @@ def run_graph_investigation(
     started_at = clock()
     seed_recorder = RunRecorder(event_clock)
     seed_recorder.event(
-        GraphPhase.CREATED.value, "investigation_started", incident=scope.incident_id
+        GraphPhase.CREATED.value,
+        "investigation_started",
+        incident=scope.incident_id,
+        # Unit 3c. `run_id` is internal bookkeeping and deliberately absent
+        # from `InvestigationReport` itself (see this function's own
+        # comment on `run_id`, above) -- but `causalops.evaluate_cli` needs
+        # it to look up this run's own cost from `cost_ledger.
+        # run_cost_totals`, which is keyed by `run_id`, not
+        # `investigation_id`. Recording it on this one event (`events.jsonl`
+        # is not schema-frozen the way `InvestigationReport` is; no test
+        # pins this event's exact field set) is a smaller, more honest fix
+        # than adding a field to the report schema that Unit 3c does not
+        # otherwise need.
+        run_id=run_id,
     )
     initial_state: GraphState = {
         "investigation_id": investigation_id,
@@ -1790,6 +1869,8 @@ def run_graph_investigation(
         dispatch_registry,
         checkpointer if checkpointer is not None else InMemorySaver(),
         event_clock=event_clock,
+        suppress_escalation=suppress_escalation,
+        no_tool_baseline=no_tool_baseline,
     )
     config: RunnableConfig = {
         "recursion_limit": GRAPH_RECURSION_LIMIT,

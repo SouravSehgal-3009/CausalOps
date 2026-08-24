@@ -20,10 +20,7 @@ from langchain_core.runnables import RunnableConfig
 
 from causalops import cli
 from causalops.cli import (
-    DEFAULT_LIVE_EVALUATION_MAX_USD,
-    LIVE_EVALUATION_MAX_USD_VARIABLE,
     MODEL_CHECK_NOTE,
-    _live_evaluation_ceiling_usd,
     _load_stored_artifact,
     build_parser,
     exit_code,
@@ -142,9 +139,9 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
     assert (parsed.incident_id, parsed.model) == ("abc", "replay")
 
     # Unit 3b-2. `--model claude` is now a real dispatch choice -- see
-    # `_build_model_and_registry`'s docstring -- so this parses instead of
-    # exiting, unlike before this unit; only a genuinely unknown model name
-    # is still refused.
+    # `live_setup.build_model_and_registry`'s docstring -- so this parses
+    # instead of exiting, unlike before this unit; only a genuinely unknown
+    # model name is still refused.
     parsed = parser.parse_args(["investigate", "abc", "--model", "claude"])
     assert (parsed.incident_id, parsed.model) == ("abc", "claude")
 
@@ -154,73 +151,8 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
         parser.parse_args(["scenario", "start", "a_family"])
 
 
-def test_live_evaluation_ceiling_reads_a_valid_value() -> None:
-    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "0.50"}) == (
-        0.50
-    )
-
-
-def test_live_evaluation_ceiling_defaults_when_absent() -> None:
-    assert _live_evaluation_ceiling_usd({}) == DEFAULT_LIVE_EVALUATION_MAX_USD
-
-
-def test_live_evaluation_ceiling_falls_back_on_a_malformed_value() -> None:
-    """Deliberately silent, unlike most malformed-input handling in this
-    project: the fallback (`DEFAULT_LIVE_EVALUATION_MAX_USD`) is the
-    *smallest* plausible ceiling, so defaulting here can only make the gate
-    stricter than a typo intended, never more permissive -- see
-    `cli.py`'s own comment on `DEFAULT_LIVE_EVALUATION_MAX_USD`."""
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "not-a-number"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-
-
-def test_live_evaluation_ceiling_falls_back_on_a_non_positive_value() -> None:
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "-1"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "0"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-
-
-def test_live_evaluation_ceiling_falls_back_on_a_non_finite_value() -> None:
-    """P3-4's regression test. `float("inf")` passes `> 0` (`inf > 0` is
-    `True`), so before this fix `LIVE_EVALUATION_MAX_USD=inf` disabled the
-    cost ceiling entirely rather than falling back to the smallest plausible
-    default -- mutation-verified below. `-inf` is covered by the same
-    `math.isfinite` guard, not by `> 0` (`-inf > 0` is already `False`), so
-    it is asserted here too rather than left to the other branch's luck.
-    `nan` already fails `> 0` (every comparison against `nan` is `False`),
-    so it was already covered before this fix -- pinned here explicitly so
-    a future refactor that touches the comparison cannot silently drop that
-    coverage without a test noticing."""
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "inf"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "-inf"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-    assert (
-        _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "nan"})
-        == DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-
-
-def test_live_evaluation_ceiling_honours_a_well_formed_typo() -> None:
-    """The boundary P3-4 does *not* move: `500` typed for `5.00` (Unit
-    3b-3's default, raised from 2.00) is a well-formed positive, finite
-    number and is honoured as written, same as any other config value --
-    guarding against a fat-fingered magnitude is the owner's job, not this
-    parser's. This test exists so the boundary is documented, not implied."""
-    assert _live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "500"}) == (
-        500.0
-    )
+# Unit 3c moved the cost-ceiling parsing tests to `test_live_setup.py`,
+# alongside the `causalops.live_setup` extraction those tests now cover.
 
 
 def test_a_lab_command_reports_a_refusal_with_its_code(

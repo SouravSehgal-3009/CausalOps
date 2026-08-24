@@ -17,6 +17,7 @@ from causalops.cost_ledger import (
     CostLedgerRow,
     ensure_cost_ledger_table,
     record_reservation_before_request,
+    run_cost_totals,
     settle_reservation,
 )
 
@@ -269,3 +270,82 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
         "SELECT state, actual_usd, input_tokens, output_tokens FROM cost_ledger"
     ).fetchone()
     assert row == ("SETTLED", 0.01, 100, 50)
+
+
+def test_run_cost_totals_sums_only_one_run_id(conn: sqlite3.Connection) -> None:
+    """Unit 3c. A different question from `_reserved_and_settled_total`'s
+    application-wide ceiling sum: two turns of `run-1`, settled, plus one
+    turn of an unrelated `run-2` that must not leak into `run-1`'s
+    totals."""
+    _reserve(conn, run_id="run-1", model_turn=0, context_digest="d0", reserved_usd=0.02)
+    settle_reservation(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="d0",
+        actual_usd=0.015,
+        input_tokens=900,
+        output_tokens=100,
+        settled_at=NOW,
+    )
+    _reserve(
+        conn,
+        run_id="run-1",
+        graph_phase="FINAL_ASSESSMENT",
+        model_turn=1,
+        context_digest="d1",
+        reserved_usd=0.03,
+    )
+    settle_reservation(
+        conn,
+        run_id="run-1",
+        graph_phase="FINAL_ASSESSMENT",
+        model_turn=1,
+        context_digest="d1",
+        actual_usd=0.021,
+        input_tokens=1200,
+        output_tokens=150,
+        settled_at=NOW,
+    )
+    _reserve(conn, run_id="run-2", model_turn=0, context_digest="d0", reserved_usd=0.05)
+    settle_reservation(
+        conn,
+        run_id="run-2",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="d0",
+        actual_usd=0.04,
+        input_tokens=2000,
+        output_tokens=200,
+        settled_at=NOW,
+    )
+
+    reserved_usd, actual_usd = run_cost_totals(conn, "run-1")
+
+    assert reserved_usd == pytest.approx(0.05)
+    assert actual_usd == pytest.approx(0.036)
+
+
+def test_run_cost_totals_counts_a_never_settled_reservation_only_as_reserved(
+    conn: sqlite3.Connection,
+) -> None:
+    """A `RESERVED` row that never settles still counts toward
+    `reserved_usd` (matching `_reserved_and_settled_total`'s own "a crash
+    loop must not silently forget a reservation" rule) but contributes
+    nothing to `actual_usd` -- there is no real cost yet to report."""
+    _reserve(conn, run_id="run-1", reserved_usd=0.07)
+
+    reserved_usd, actual_usd = run_cost_totals(conn, "run-1")
+
+    assert reserved_usd == pytest.approx(0.07)
+    assert actual_usd == 0.0
+
+
+def test_run_cost_totals_for_an_unknown_run_id_is_zero(
+    conn: sqlite3.Connection,
+) -> None:
+    reserved_usd, actual_usd = run_cost_totals(conn, "no-such-run")
+
+    assert reserved_usd == 0.0
+    assert actual_usd == 0.0

@@ -1,12 +1,13 @@
 from datetime import timedelta
 
+import pytest
 from fake_incident import (
     INCIDENT_ID,
     WINDOW_END,
     WINDOW_START,
     packet_evidence,
 )
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from causalops.domain import (
     Budgets,
@@ -22,6 +23,7 @@ from causalops.domain import (
     PolicyResult,
     ReasonCode,
     ReceiptState,
+    RetrievalMode,
     RootCauseCode,
     ToolOutcome,
     ToolReceipt,
@@ -350,6 +352,29 @@ def test_efficiency_reports_what_the_run_actually_spent() -> None:
     assert efficiency.output_tokens == 300
 
 
+def reproducibility_manifest_kwargs() -> dict[str, JsonValue]:
+    """The §10 reproducibility fields `EvaluationRecord` requires beyond the
+    scoring triple every test above already builds -- one place to keep
+    them so a field this unit adds only has to be threaded through here,
+    not at every call site that builds a record."""
+    return {
+        "git_sha": "0" * 40,
+        "git_dirty": False,
+        "versions": Versions(
+            prompt_version="1", policy_version="1", tool_registry_version="1"
+        ).model_dump(mode="json"),
+        "retrieval_mode": RetrievalMode.DISABLED.value,
+        "runbook_corpus_version": "1",
+        "fixture_sha256": "a" * 64,
+        "model_name": "claude-sonnet-5",
+        "pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "pricing_verified_on": "2026-08-22",
+        "configured_ceiling_usd": 5.00,
+        "reserved_usd": 0.01,
+        "actual_usd": 0.008,
+    }
+
+
 def test_an_evaluation_record_keeps_the_expected_outcome_beside_the_scores() -> None:
     evidence = timeout_evidence()
     report = diagnosed_report((evidence.evidence_id,))
@@ -361,12 +386,95 @@ def test_an_evaluation_record_keeps_the_expected_outcome_beside_the_scores() -> 
         incident_id=report.incident_id,
         expected=expected_diagnosis(),
         scores=scores,
+        **reproducibility_manifest_kwargs(),
     )
     restored = EvaluationRecord.model_validate_json(record.model_dump_json())
 
     assert restored == record
     assert restored.scorer_version == SCORER_VERSION
     assert restored.expected.predicates[0].field == "timeouts_per_minute"
+
+
+def test_an_evaluation_record_carries_the_full_reproducibility_manifest() -> None:
+    """`TECHNICAL_SPEC.md` §10: "Record Git SHA, clean/dirty status,
+    fixture/prompt/policy/tool versions, retrieval mode/corpus version,
+    exact model, tokens, latency, cost, and raw artifact references.
+    Include the pricing source/date and configured ceiling." Tokens and
+    latency are proven on `scores.efficiency` by
+    `test_efficiency_reports_what_the_run_actually_spent` above; this test
+    proves the rest actually lands on the record, not just that the record
+    accepts them."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+
+    record = EvaluationRecord(
+        run_key="evaluation-1/causalops/1",
+        investigation_id=report.investigation_id,
+        incident_id=report.incident_id,
+        expected=expected_diagnosis(),
+        scores=scores,
+        **reproducibility_manifest_kwargs(),
+    )
+
+    assert record.git_sha == "0" * 40
+    assert record.git_dirty is False
+    assert record.versions.prompt_version == "1"
+    assert record.retrieval_mode is RetrievalMode.DISABLED
+    assert record.runbook_corpus_version == "1"
+    assert record.fixture_sha256 == "a" * 64
+    assert record.model_name == "claude-sonnet-5"
+    assert record.pricing_source.startswith("https://")
+    assert record.pricing_verified_on == "2026-08-22"
+    assert record.configured_ceiling_usd == 5.00
+    assert record.reserved_usd == 0.01
+    assert record.actual_usd == 0.008
+
+
+def test_an_evaluation_record_allows_a_never_settled_actual_cost() -> None:
+    """A reservation that never settled (crash, timeout, missing usage) has
+    no real cost yet to report -- `actual_usd` stays `None` rather than
+    being hidden as `0.0`, the same "ambiguous requests retain the
+    reservation, never silently resolved" honesty `cost_ledger.py`'s own
+    reservation machinery already keeps."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+    kwargs = reproducibility_manifest_kwargs()
+    kwargs["actual_usd"] = None
+
+    record = EvaluationRecord(
+        run_key="evaluation-1/causalops/1",
+        investigation_id=report.investigation_id,
+        incident_id=report.incident_id,
+        expected=expected_diagnosis(),
+        scores=scores,
+        **kwargs,
+    )
+
+    assert record.actual_usd is None
+
+
+def test_an_evaluation_record_rejects_an_unknown_field() -> None:
+    """`extra="forbid"` matches every other wire-facing model this project
+    hardened in the immediately preceding unit -- a record read back with a
+    field nothing here defines is a real surprise, not something to drop
+    silently."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+    payload = {
+        "run_key": "evaluation-1/causalops/1",
+        "investigation_id": report.investigation_id,
+        "incident_id": report.incident_id,
+        "expected": expected_diagnosis().model_dump(mode="json"),
+        "scores": scores.model_dump(mode="json"),
+        **reproducibility_manifest_kwargs(),
+        "unexpected_field": "should be refused",
+    }
+
+    with pytest.raises(ValidationError):
+        EvaluationRecord.model_validate(payload)
 
 
 def test_a_run_with_no_assessment_cites_nothing() -> None:

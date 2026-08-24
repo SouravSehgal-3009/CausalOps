@@ -96,10 +96,20 @@ def adversarial_passage(content: str) -> RunbookPassage:
 
 
 def test_no_investigator_module_imports_the_evaluator() -> None:
+    """The rule this test actually enforces is narrower than "nothing but
+    `evaluation.py` imports `causalops.evaluation`": it is "no INVESTIGATOR
+    module does." Unit 3c's `evaluate_cli.py` is legitimately evaluator-side
+    too -- it is the one place `score_run` is finally called, reading
+    evaluator-only `expected.json` and building `ExpectedOutcome` -- so it
+    joins `evaluation.py` itself in the allowed set rather than being a
+    second, accidental offender this test would otherwise report. Nothing
+    under `causalops.graph`, `causalops.live_model`, `causalops.tools`, or
+    any other module the LLM/registered tools/retrieval corpus can reach is
+    in this allowed set, which is the property that actually matters."""
     offenders = {
         source.name
         for source in sorted(SOURCE_DIR.rglob("*.py"))
-        if source.name != "evaluation.py"
+        if source.name not in {"evaluation.py", "evaluate_cli.py"}
         and EVALUATOR_MODULE in imported_modules(source)
     }
 

@@ -10,7 +10,7 @@ shell. This file only has to document that recommendation accurately.
 
 from pathlib import Path
 
-from causalops.cli import DEFAULT_LIVE_EVALUATION_MAX_USD
+from causalops.live_setup import DEFAULT_LIVE_EVALUATION_MAX_USD
 
 ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
 

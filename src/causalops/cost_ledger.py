@@ -197,6 +197,34 @@ def _read_row(
     )
 
 
+def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float]:
+    """`(reserved_usd, actual_usd)` summed for one `run_id` only -- the
+    per-run figure `EvaluationRecord` needs (Unit 3c), a different question
+    from `_reserved_and_settled_total`'s application-wide ceiling sum right
+    below. Reads the same table through the same connection every other
+    reservation/settlement call already uses; this adds no new tracking
+    mechanism, only a differently-scoped read of the one that exists.
+
+    `actual_usd` sums only `SETTLED` rows -- a still-`RESERVED` row for this
+    run has no real cost yet to report, and `COALESCE(SUM(...), 0.0)` on an
+    empty match returns `0.0` rather than `NULL`, so a run with no rows at
+    all (nothing ever sent) reports `(0.0, 0.0)` rather than raising.
+    """
+    ensure_cost_ledger_table(conn)
+    reserved = conn.execute(
+        "SELECT COALESCE(SUM(reserved_usd), 0.0) FROM cost_ledger WHERE run_id = ?",
+        (run_id,),
+    )
+    (reserved_usd,) = reserved.fetchone()
+    actual = conn.execute(
+        "SELECT COALESCE(SUM(actual_usd), 0.0) FROM cost_ledger "
+        "WHERE run_id = ? AND state = 'SETTLED'",
+        (run_id,),
+    )
+    (actual_usd,) = actual.fetchone()
+    return float(reserved_usd), float(actual_usd)
+
+
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
     """Every dollar this application has ever reserved, across every run --
     `TECHNICAL_SPEC.md` §10's ceiling is application-wide, not

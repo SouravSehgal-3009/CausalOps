@@ -1,10 +1,9 @@
 """Command line entry point for CausalOps."""
 
 import argparse
-import math
 import os
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -24,9 +23,7 @@ from causalops.approvals import (
     read_decision_for_thread,
     record_decision_before_resume,
 )
-from causalops.cost_ledger import ensure_cost_ledger_table
 from causalops.doctor import (
-    API_KEY_VARIABLE,
     DoctorReport,
     ProjectPaths,
     find_project_root,
@@ -34,7 +31,6 @@ from causalops.doctor import (
     run_doctor,
 )
 from causalops.domain import (
-    REPLAY_MODEL_NAME,
     Budgets,
     Disposition,
     EscalatedInvestigation,
@@ -49,16 +45,9 @@ from causalops.graph import (
     run_graph_investigation,
 )
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_model import LiveClaudeModel
-from causalops.models import (
-    ReplayReasoningModel,
-    ReplayToolCallingModel,
-    ToolCallingModel,
-)
-from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
+from causalops.live_setup import build_model_and_registry
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
-from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.scenario_control import (
     LabError,
     LabReasonCode,
@@ -69,20 +58,7 @@ from causalops.scenario_control import (
     validated_run_paths,
 )
 from causalops.system_probe import SystemProbe
-from causalops.telemetry import (
-    RunPaths,
-    run_changes_check,
-    run_logs_check,
-    run_topology_check,
-)
-from causalops.tool_wrappers import ToolWrapper, dispatch_registry
-from causalops.tools import ToolName
-
-# Unit 3b-2 moved this constant to `domain.py` (imported above): `graph.py`'s
-# `run_graph_investigation` needed it too, as `GraphState["model_name"]`'s
-# default for every caller that predates a live model, and `graph.py`
-# cannot import from `cli.py` without a cycle. See `domain.py`'s own
-# docstring on the constant for the full reasoning.
+from causalops.telemetry import RunPaths
 
 # Unit 3b-2 builds the live adapter but deliberately not this specific
 # check: the authenticated `GET /v1/models/claude-sonnet-5` metadata request
@@ -97,13 +73,6 @@ MODEL_CHECK_NOTE = (
     "authenticated claude-sonnet-5 metadata request is deliberately not "
     "part of any command yet."
 )
-
-REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
-# `dispatch_registry` wraps all four tools as of Unit 1c, so the graph
-# orchestrator runs `lab_diagnosis.json` -- two executed checks across two
-# tools -- exactly as the retired loop orchestrator did; parity between the
-# two was established in Unit 1d-1 before the loop was retired.
-REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
 # Unit 2b. `0` already means success and `1` already means `FAILED_SAFE`/a
 # `LabError`/`RunRecordError` refusal (see `main`'s `except` clause below);
@@ -143,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     investigation.add_argument("incident_id")
     # Unit 3b-2. No default, still `required=True`: a live run is never
     # accidental. `"claude"` is a CLI-facing dispatch keyword, not the real
-    # model name -- `_build_model_and_registry` maps it to
+    # model name -- `live_setup.build_model_and_registry` maps it to
     # `live_model.MODEL_NAME` ("claude-sonnet-5") for the report/artifact
     # label, the same distinction `--seed` above draws between an owner-facing
     # word and what the code actually does with it.
@@ -268,120 +237,6 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
         yield SqliteSaver(conn, serde=serde)
 
 
-# Unit 3b-2. `.env.example`-documented, application-wide, covering standalone
-# and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). This falls
-# back to the default, rather than raising, for exactly three shapes: unset
-# or blank, unparseable (`float()` raises), and non-positive or non-finite
-# (`<= 0`, `inf`, `-inf`, or `nan` -- `math.isfinite` catches the two
-# infinities `> 0` alone would let through, since `inf > 0` is `True` and an
-# infinite ceiling is not a ceiling at all; `nan` already fails every
-# comparison, including `> 0`, so it was already covered, but P3-4's fix
-# pins that explicitly rather than leaving it to a comparison's incidental
-# behaviour a future refactor could change without noticing). Each of those
-# three is the *smallest* plausible ceiling to fall back to, so silently
-# defaulting on them can only make the gate stricter than the value
-# suggested, never more permissive. What this fallback does *not* catch: a
-# well-formed positive number that is simply the wrong one -- `500` typed
-# for `5.00` parses cleanly and is honoured as written, the same as any
-# other config value. Guarding against a fat-fingered magnitude is the
-# owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
-# intent. Unit 3b-3: raised from 2.00 to 5.00, re-derived from the smoke
-# call's measured per-call reservation size after the ratio replan; the
-# calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md` §10
-# carries the same amendment.
-DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
-LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
-
-
-def _live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
-    raw = environment.get(LIVE_EVALUATION_MAX_USD_VARIABLE, "").strip()
-    if not raw:
-        return DEFAULT_LIVE_EVALUATION_MAX_USD
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_LIVE_EVALUATION_MAX_USD
-    return (
-        value if math.isfinite(value) and value > 0 else DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
-
-
-def _build_model_and_registry(
-    incident: StoredIncident,
-    paths: RunPaths,
-    budgets: Budgets,
-    model_choice: Literal["replay", "claude"],
-    db_path: Path,
-) -> tuple[
-    ToolCallingModel, Mapping[ToolName, ToolWrapper], str, sqlite3.Connection | None
-]:
-    """The model, tool registry, display model name, and (for a live model
-    only) the cost-ledger connection one incident needs -- built the same
-    way for a fresh `investigate` and for Unit 2c's `approve`/`reject`
-    resume, both of which need the exact same wiring `build_graph` requires,
-    even though a plain accept/reject resume never actually calls the model
-    or a tool again (`escalation_interrupt` routes straight to
-    `final_report`).
-
-    The cost-ledger connection is `_build_model_and_registry`'s own concern,
-    not `_sqlite_checkpointer`'s: it is a second, independent connection to
-    the same `checkpoints.db` file, matching `run_decision_command`'s own
-    `decisions_connection` pattern below rather than reusing the
-    checkpointer's connection -- `SqliteSaver`'s own transaction handling
-    around a node's execution is not part of any contract this module can
-    rely on, and a second connection is exactly how this project already
-    isolates one concern's SQLite transactions from another's on the same
-    file. Returned to the caller (`None` for replay) so its lifetime is the
-    caller's to close, the same ownership `_sqlite_checkpointer`'s `with`
-    block already has for the checkpoint connection.
-    """
-    # A fresh in-memory index per call -- the corpus is small and read-only,
-    # so rebuilding it costs nothing measurable, and it keeps this function's
-    # "everything an incident needs, built fresh" contract intact rather
-    # than reaching for a module-level singleton `search_runbooks` alone
-    # would need.
-    runbook_index = RunbookIndex()
-    registry = dispatch_registry(
-        run_metric=lambda arguments, scope: run_metric_check(
-            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
-        ),
-        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
-        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
-        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
-        ),
-    )
-    if model_choice == "replay":
-        replay_model = ReplayToolCallingModel(
-            ReplayReasoningModel(
-                REPLAY_FIXTURE,
-                substitutions={
-                    "incident_id": incident.scope.incident_id,
-                    "window_start": incident.scope.started_at.isoformat(),
-                    "window_end": incident.scope.ended_at.isoformat(),
-                    "symptom_evidence_id": incident.packet.symptom_evidence_id,
-                },
-            )
-        )
-        return replay_model, registry, REPLAY_MODEL_NAME, None
-    ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    ensure_cost_ledger_table(ledger_conn)
-    # Unit 3b-2, P3-3. Presence only, mirroring `doctor.check_api_key`'s own
-    # check -- the value itself never leaves this line. `LiveClaudeModel`
-    # never reads `ANTHROPIC_API_KEY` itself (`live_model.MissingCredential`'s
-    # docstring; `tests/security/test_credential_isolation.py` proves the
-    # module neither imports `os` nor names the variable in code), so this
-    # `bool` is the only thing that crosses that boundary.
-    credential_present = bool(os.environ.get(API_KEY_VARIABLE, "").strip())
-    live_model = LiveClaudeModel(
-        ledger_conn,
-        ceiling_usd=_live_evaluation_ceiling_usd(os.environ),
-        credential_present=credential_present,
-    )
-    return live_model, registry, LIVE_MODEL_NAME, ledger_conn
-
-
 def run_investigation(
     incident: StoredIncident,
     paths: RunPaths,
@@ -394,8 +249,8 @@ def run_investigation(
     """Returns the settled/escalated result *and* the display model name
     (`REPLAY_MODEL_NAME` or `live_model.MODEL_NAME`) this run actually used
     -- `run_investigate_command` needs that name for the artifact label, and
-    `_build_model_and_registry` is the one place that knows it."""
-    model, registry, model_name, ledger_conn = _build_model_and_registry(
+    `live_setup.build_model_and_registry` is the one place that knows it."""
+    model, registry, model_name, ledger_conn = build_model_and_registry(
         incident, paths, budgets, model_choice, db_path
     )
     try:
@@ -489,7 +344,7 @@ def _load_stored_artifact[Artifact: BaseModel](
 # job for `investigate`. `model_choice` is `arguments.model` verbatim
 # (`"replay"` or `"claude"`, `build_parser`'s own choices) -- the CLI-facing
 # dispatch keyword, not the display name that ends up in the artifact; see
-# `_build_model_and_registry`'s docstring for that distinction.
+# `live_setup.build_model_and_registry`'s docstring for that distinction.
 def _load_verified_incident(
     root: Path, incident_id: str
 ) -> tuple[RunPaths, StoredIncident]:
@@ -714,7 +569,7 @@ def run_decision_command(
             # `_load_verified_incident`'s own docstring.
             paths, incident = _load_verified_incident(root, incident_id)
             budgets = Budgets()
-            model, registry, model_name, ledger_conn = _build_model_and_registry(
+            model, registry, model_name, ledger_conn = build_model_and_registry(
                 incident, paths, budgets, model_choice, db_path
             )
             try:

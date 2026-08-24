@@ -112,6 +112,38 @@ def test_a_missing_corpus_file_fails_loudly_at_construction() -> None:
         RunbookIndex(corpus_path=Path("/nonexistent/runbook_corpus.json"))
 
 
+def test_the_checked_in_corpus_version_is_read_and_stringified() -> None:
+    """Unit 3c. `runbook_corpus.json`'s own `corpus_version` key is `1`, an
+    int -- stringified to match every other "_version" field in this
+    codebase (`SCHEMA_VERSION`, `prompt_version`, ...), all of which are
+    strings regardless of how small the underlying number is."""
+    index = RunbookIndex()
+
+    assert index.corpus_version == "1"
+
+
+def test_a_corpus_file_with_no_version_key_reports_none(tmp_path: Path) -> None:
+    corpus_path = tmp_path / "corpus.json"
+    corpus_path.write_text(
+        json.dumps(
+            {
+                "passages": [
+                    {
+                        "passage_id": "unrelated-1",
+                        "source_version": "test",
+                        "content": "xyzzy plugh unrelated filler text",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    index = RunbookIndex(corpus_path=corpus_path)
+
+    assert index.corpus_version is None
+
+
 def test_run_runbook_search_executes_and_stamps_the_retrieval_mode() -> None:
     index = RunbookIndex()
     arguments = SearchRunbooksArguments(topic=RunbookTopic.GATEWAY_LATENCY, limit=3)

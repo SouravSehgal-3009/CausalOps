@@ -195,6 +195,16 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
 
     The provider tool name selects the internal argument variant, so the
     duplicate internal `tool` discriminator is deliberately not exposed.
+
+    This is the mechanical reason the emitted schema payload is 12,011
+    tokens (`_send`'s own comment pins the exact figure): Anthropic tool
+    schemas are self-contained, with no cross-tool `$ref`, so each of the
+    five loop iterations below embeds its own full copy of
+    `HypothesesRecord`'s schema (`hypotheses_schema` and its `$defs`) rather
+    than sharing one. The five-fold duplication of that one shared schema
+    is essentially the whole size increase from the two-call protocol this
+    project used before Unit 3b-4's single-call rewrite -- not five
+    independently large tools.
     """
     definitions: list[dict[str, Any]] = []
     for arguments_cls, tool_name, description in _DOMAIN_TOOL_SPECS:
@@ -625,10 +635,11 @@ class LiveClaudeModel:
         # rather than this module fabricating one. Unit 3b-4 addendum, C4:
         # this used to take the FIRST matching call via `next(...)`,
         # silently discarding a second, possibly conflicting, call NAMED
-        # `record_final_assessment` -- the same shape `propose()`'s own
-        # proposal path's exact-one-call validation already refuses. Zero or two-or-more
-        # MATCHING calls are refused the same way, through the same repair
-        # path, rather than the codebase silently picking a winner.
+        # `record_final_assessment` -- the same rule the proposal path's
+        # exact-one-call validation in `propose()` already enforces. Zero
+        # or two-or-more MATCHING calls are refused the same way, through
+        # the same repair path, rather than the codebase silently picking
+        # a winner.
         #
         # Post-freeze review, Finding 3: C4's own fix above checked only
         # the matching-name count, still missing a turn that sends exactly

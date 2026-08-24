@@ -70,6 +70,7 @@ from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_invest
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
+    Stage,
     ToolCallingModel,
 )
 from causalops.pricing import InputTooLarge
@@ -115,6 +116,9 @@ def investigate_via_graph(
     registry: dict[ToolName, ToolWrapper] | None = None,
     budgets: Budgets | None = None,
     clock: StepClock | None = None,
+    *,
+    suppress_escalation: bool = False,
+    no_tool_baseline: bool = False,
 ) -> tuple[InvestigationResult | EscalatedInvestigation, RunRecorder]:
     ticking = clock or StepClock()
     recorder = RunRecorder(ticking)
@@ -130,6 +134,8 @@ def investigate_via_graph(
         recorder,
         budgets or Budgets(),
         ticking,
+        suppress_escalation=suppress_escalation,
+        no_tool_baseline=no_tool_baseline,
     )
     return result, recorder
 
@@ -929,6 +935,75 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
     assert isinstance(result, EscalatedInvestigation)
     assert result.reason is EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
     assert result.remaining_check_count > 0
+
+
+def test_a_scored_run_suppresses_escalation_while_an_ordinary_run_still_escalates() -> (
+    None
+):
+    """Unit 3c's mandatory confinement test. `service_out_of_scope.json`
+    denies its own proposal and abstains with a check slot still open --
+    `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`, the same trigger
+    `test_a_denied_proposal_costs_a_model_call_but_no_check_slot` above
+    already proves fires under this exact fixture. Run twice, unmodified
+    except for one flag: an ORDINARY run (the default,
+    `suppress_escalation=False`) must still pause exactly as it did before
+    this unit -- proving the flag's absence changes nothing -- while a
+    SCORED run (`suppress_escalation=True`) on the identical
+    fixture/registry shape must reach a terminal report with no escalation
+    recorded at all. Both assertions live in one test because the claim is
+    comparative: suppression is scoped to the flag, not a change to
+    ordinary escalation behaviour that happens to also affect this
+    fixture."""
+    ordinary, _ = investigate_via_graph(
+        fixture_model("service_out_of_scope.json"),
+        registry=registry_with(run_metric=RecordingMetricBackend()),
+    )
+
+    assert isinstance(ordinary, EscalatedInvestigation)
+    assert (
+        ordinary.reason is EscalationReason.INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING
+    )
+
+    scored, _ = investigate_via_graph(
+        fixture_model("service_out_of_scope.json"),
+        registry=registry_with(run_metric=RecordingMetricBackend()),
+        suppress_escalation=True,
+    )
+
+    assert isinstance(scored, InvestigationResult)
+    assert scored.report.escalation is None
+    assert scored.report.disposition is Disposition.INSUFFICIENT_EVIDENCE
+
+
+def test_a_no_tool_baseline_never_offers_a_domain_tool() -> None:
+    """Unit 3c's no-tool baseline: `build_graph(no_tool_baseline=True)`
+    never adds the `investigate`/`dispatch_tool`/`normalize_evidence` nodes
+    at all, so the model must never receive an `INITIAL_PLAN` or
+    `HYPOTHESIS_UPDATE` request -- only the one `FINAL_ASSESSMENT`
+    `respond()` call `_make_final_assessment` always makes.
+    `ReplayToolCallingModel.requests` records every `ModelRequest` a
+    fixture-driven run actually sent, in order, so it can prove this
+    directly rather than only inferring it from the final report's shape.
+    `valid_diagnosis.json` scripts `initial_plan`/`hypothesis_update`
+    entries too, deliberately reused unmodified: if this topology ever
+    regressed to also calling `investigate`, those entries would let the
+    run silently succeed anyway, masking the regression -- proving they
+    are never consumed is exactly what `model.requests`'s length asserts
+    below."""
+    model = fixture_model("valid_diagnosis.json")
+
+    result, _ = investigate_via_graph(
+        model,
+        registry=registry_with(run_metric=RecordingMetricBackend()),
+        suppress_escalation=True,
+        no_tool_baseline=True,
+    )
+
+    assert isinstance(result, InvestigationResult)
+    assert [request.stage for request in model.requests] == [Stage.FINAL_ASSESSMENT]
+    assert result.report.tools_executed == 0
+    assert result.receipts == ()
+    assert result.report.escalation is None
 
 
 def test_the_same_proposal_twice_is_denied_as_a_duplicate() -> None:
