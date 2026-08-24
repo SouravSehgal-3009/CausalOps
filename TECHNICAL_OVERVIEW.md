@@ -2307,18 +2307,25 @@ anything new this unit built:
   tool-definition schema every call sends (`live_model.py`'s `_send`; the
   input-token *cap* in "Default limits" above stays prose-only, a
   deliberately different scope) — `actual_usd` is what the request really
-  cost from the provider's own reported `input_tokens`/`output_tokens`,
-  and `actual_usd` must be `<= reserved_usd` on every row. `test_pricing.
-  py`'s `test_a_settled_request_never_costs_more_than_its_own_reservation`
-  pins this as a property of the pricing math itself, not just something
-  that happened to hold this run; `test_live_model.py`'s
+  cost from the provider's own reported `input_tokens`/`output_tokens`.
+  `actual_usd <= reserved_usd` is the ordinary case, not a code-enforced
+  invariant on every row: `cost_ledger.settle_reservation` always commits
+  the true `actual_usd` even when it comes in above `reserved_usd`, and
+  logs a warning rather than raising, because the money is already spent by
+  the time settlement runs and there is nothing left to refuse (see that
+  function's own docstring). `test_pricing.py`'s
+  `test_a_settled_request_never_costs_more_than_its_own_reservation`
+  pins `actual_usd <= reserved_usd` as a property of the pricing math under
+  the currently-calibrated token-estimate ratio — a fact about today's
+  `PESSIMISTIC_CHARS_PER_TOKEN` value, re-checked every time that constant
+  moves, not a runtime guarantee the ledger itself enforces; `test_live_model.py`'s
   `test_propose_reserves_at_least_the_full_wire_payload` additionally pins
   that a real `propose()` call's reservation genuinely counts the tool
   payload, not just prose — the P1-1 bug this unit fixed shipped past an
   earlier version of the `test_pricing.py` assertion that priced both
   sides off the identical number and so could never observe the omission.
 
-  This invariant holds whenever the pessimistic estimate
+  `actual_usd <= reserved_usd` holds whenever the pessimistic estimate
   (`pricing.estimate_input_tokens`) actually bounds the tokens the
   provider bills. **Unit 3b-3's smoke call checked it against a real
   billed request for the first time and it held on both settled rows —
@@ -2330,10 +2337,18 @@ anything new this unit built:
   `estimate_input_tokens` deliberately does not receive) first,
   and treat it as **a signal to re-derive `PESSIMISTIC_CHARS_PER_TOKEN`,
   not an incident**: the violation is bounded to a fraction of a cent per
-  row, and the application-wide ceiling still counts the *reserved*
-  amount against `LIVE_EVALUATION_MAX_USD` regardless — a mispriced row
-  does not let spend run away, it only means this one row under-priced
-  itself.
+  row, and the application-wide ceiling does not let it compound — for a
+  `SETTLED` row, `cost_ledger._reserved_and_settled_total` counts
+  `max(reserved_usd, actual_usd)` against `LIVE_EVALUATION_MAX_USD`, not
+  `reserved_usd` alone. Counting only `reserved_usd` was the earlier
+  behaviour, found unsafe (it is the original finding that started this
+  ceiling-hardening work): if a settled row's real bill lands above its own
+  reservation and the running total kept summing the smaller `reserved_usd`
+  figure, every later reservation would be authorized against a total that
+  permanently understates what has actually been billed — the exact
+  overrun that `max(reserved_usd, actual_usd)` now closes. A mispriced row
+  still does not let spend run away; it means this one row under-priced
+  itself, and the ceiling accounts for that immediately once it settles.
 
 **Record the estimate beside the settled row — every live call is a
 calibration point `pricing.py`'s own docstring asks for.** The call is
@@ -2382,9 +2397,17 @@ to require, not that anything broke.
   raises before any insert (`cost_ledger.py`, `test_cost_ledger.py`'s
   `test_a_refused_reservation_writes_nothing`). If this run was meant to
   proceed, either raise `LIVE_EVALUATION_MAX_USD` (after checking why the
-  running total is where it is, using the `uv run python` reader above
-  with `"SELECT SUM(reserved_usd) FROM cost_ledger"`) or accept that the
-  ceiling did its job.
+  running total is where it is) or accept that the ceiling did its job.
+  `"SELECT SUM(reserved_usd) FROM cost_ledger"` with the `uv run python`
+  reader above UNDERcounts what the ceiling actually enforces: it misses
+  the `max(reserved_usd, actual_usd)` bump `_reserved_and_settled_total`
+  applies to a `SETTLED` row whose real bill came in above its own
+  reservation (see the `cost_ledger` row explanation above). Read real
+  exposure the way that function does instead — sum `reserved_usd` for
+  every row still `RESERVED` plus `MAX(reserved_usd, actual_usd)` for every
+  row already `SETTLED`, e.g. `"SELECT SUM(CASE WHEN state = 'SETTLED'
+  THEN MAX(reserved_usd, actual_usd) ELSE reserved_usd END) FROM
+  cost_ledger"`.
 - **Input too large.** `reason_code: INPUT_TOKEN_CAP_EXCEEDED` — the
   rendered context exceeded the 9,600-token pessimistic estimate (Unit
   3b-3, raised from 3,200 — see "The smoke call's findings" below).

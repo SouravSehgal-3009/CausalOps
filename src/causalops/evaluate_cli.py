@@ -506,19 +506,28 @@ class PairedEvaluationSummary(BaseModel):
     rather than assuming a fixed small set of buckets that a future third
     retrieval mode or a mixed-mode batch could silently overflow.
 
-    `combined` is still reported alongside the split, since a reader may
-    still want the batch-wide total too -- but `render_paired_evaluation_
-    summary` labels it explicitly as spanning every arm and retrieval mode
-    present, never printed as if it were a single clean benchmark
-    aggregate. That label is the actual fix: the spec's rule is about not
-    silently mixing modes into a reported benchmark figure, not about
-    forbidding a clearly-labeled combined count outright.
+    A round-4 fix reported a `combined` field alongside `groups` -- a full
+    `EvaluationSummary` (diagnosis/citation/control/latency/cost figures)
+    computed across every record regardless of arm or retrieval mode, only
+    labeled in the rendered output as spanning every mode. `TECHNICAL_SPEC.
+    md` (line ~281)'s "Never silently fall back, mix modes in one benchmark
+    aggregate, or represent FTS5 as semantic retrieval" is three separate
+    prohibitions joined by "or" -- "silently" grammatically modifies only
+    "fall back," not "mix modes in one benchmark aggregate," which is its
+    own unconditional rule. A clear label does not change what `combined`
+    was: one benchmark aggregate blending records from more than one
+    retrieval mode, exactly what that clause forbids regardless of labeling.
+    `total_records` replaces it -- a plain count carries no diagnosis,
+    citation, control, latency, or cost figure, so it is not a "benchmark
+    aggregate" in the sense the spec is protecting against; it implies
+    nothing about diagnostic quality or cost under mixed conditions, only
+    how many rows the batch produced.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     groups: tuple[EvaluationGroupSummary, ...]
-    combined: EvaluationSummary
+    total_records: int
 
 
 def summarize_paired_evaluation(
@@ -527,10 +536,13 @@ def summarize_paired_evaluation(
     """Partitions `records` by the `(arm, retrieval_mode)` pair -- see
     `EvaluationGroupSummary`'s own docstring for why arm alone is not
     enough -- then calls the existing arm/mode-agnostic
-    `summarize_evaluation` once per distinct pair present, plus once more
-    for `combined`. `summarize_evaluation` itself is taught nothing about
-    arms or retrieval modes; it predates Unit 3c's paired design and stays
-    usable on any flat list of records, here or elsewhere.
+    `summarize_evaluation` once per distinct pair present.
+    `summarize_evaluation` itself is taught nothing about arms or retrieval
+    modes; it predates Unit 3c's paired design and stays usable on any flat
+    list of records, here or elsewhere. `total_records` is a bare count of
+    the whole batch, not a call to `summarize_evaluation` on the unpartitioned
+    records -- see `PairedEvaluationSummary`'s own docstring for why no
+    benchmark figure may span more than one retrieval mode.
 
     A record whose `run_key` carries neither known arm word is a data-shape
     bug upstream (a `run_key` no `_run_one` call in this script's history
@@ -568,28 +580,28 @@ def summarize_paired_evaluation(
             grouped.items(), key=lambda item: _sort_key(item[0])
         )
     )
-    return PairedEvaluationSummary(
-        groups=groups, combined=summarize_evaluation(records)
-    )
+    return PairedEvaluationSummary(groups=groups, total_records=len(records))
 
 
 def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
-    """One block per `(arm, retrieval_mode)` group, then the combined total
-    -- labeled explicitly as spanning every arm and retrieval mode present,
-    so a reader can never mistake it for one clean benchmark figure. Each
-    group's own label states both facts it was partitioned on, so two
-    tool-enabled groups that differ only in retrieval mode -- exactly the
-    case `TECHNICAL_SPEC.md` forbids blending -- render as visibly separate
-    blocks, never one merged number."""
+    """One block per `(arm, retrieval_mode)` group, then a plain batch-wide
+    record count -- never a benchmark figure that spans more than one
+    retrieval mode. Each group's own label states both facts it was
+    partitioned on, so two tool-enabled groups that differ only in
+    retrieval mode -- exactly the case `TECHNICAL_SPEC.md` forbids
+    blending -- render as visibly separate blocks, never one merged
+    number. The trailing total is a count only, not a call into
+    `render_evaluation_summary` (which reports diagnosis/citation/control/
+    latency/cost figures) -- see `PairedEvaluationSummary`'s own docstring
+    for why even a clearly labeled version of that figure is still the
+    thing the spec forbids."""
     blocks = [
         f"[{group.arm}, retrieval_mode={group.retrieval_mode.value}]\n"
         f"{render_evaluation_summary(group.summary)}"
         for group in paired.groups
     ]
     blocks.append(
-        "[combined -- spans every arm and retrieval mode above; not a "
-        "single clean benchmark figure]\n"
-        f"{render_evaluation_summary(paired.combined)}"
+        f"total_records (all arms and retrieval modes): {paired.total_records}"
     )
     return "\n\n".join(blocks)
 

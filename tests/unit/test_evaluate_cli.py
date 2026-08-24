@@ -717,33 +717,46 @@ def test_main_writes_a_summary_alongside_records(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    # Item 2 (round 3), refined by the retrieval-mode fix: `main()` prints
-    # one block per `(arm, retrieval_mode)` group plus a combined block --
-    # every run here is the replay fixture's fake model, which never calls
-    # `search_runbooks`, so both arms stay `RetrievalMode.DISABLED` and each
-    # arm still produces exactly one group of 4 records; the combined block
-    # reports all 8, never one blended "8 record(s)" alone.
+    # Item 2 (round 3), refined by the retrieval-mode fix, refined again by
+    # the round-5 fix that removed the cross-mode `combined` benchmark
+    # figure entirely: `main()` prints one block per `(arm, retrieval_mode)`
+    # group plus a plain trailing record count -- every run here is the
+    # replay fixture's fake model, which never calls `search_runbooks`, so
+    # both arms stay `RetrievalMode.DISABLED` and each arm still produces
+    # exactly one group of 4 records; the trailing count reports all 8, but
+    # carries no diagnosis/citation/control/latency/cost figure of its own.
     assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in out
     assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in out
-    assert "[combined -- spans every arm and retrieval mode above" in out
+    assert "total_records (all arms and retrieval modes): 8" in out
+    # No blended benchmark figure anywhere in the output: every
+    # "evaluation summary: N record(s)" block (produced only by
+    # `render_evaluation_summary`, one call per group) reports exactly 4,
+    # the size of one (arm, retrieval_mode) group -- never 8, which would
+    # mean a figure spanning both groups.
+    assert out.count("evaluation summary:") == 2
     assert "evaluation summary: 4 record(s)" in out
-    assert "evaluation summary: 8 record(s)" in out
+    assert "evaluation summary: 8 record(s)" not in out
     assert "summary:" in out
     summary_path = (
         next((tmp_path / "results" / "evaluations").iterdir()) / "summary.json"
     )
     assert str(summary_path) in out
     saved = json.loads(summary_path.read_text(encoding="utf-8"))
-    # `summary.json` is now `PairedEvaluationSummary`'s `groups`/`combined`
-    # shape -- each group readable separately from `combined`, not one flat,
-    # blended `EvaluationSummary`.
+    # `summary.json` is now `PairedEvaluationSummary`'s `groups`/
+    # `total_records` shape -- each group readable separately, and
+    # `total_records` is a bare count with no `diagnosis_correct_count`,
+    # `citations_valid_count`, latency, or cost figure anywhere on it, so no
+    # single reported field in this file blends records across retrieval
+    # modes.
     assert len(saved["groups"]) == 2
     groups_by_arm = {group["arm"]: group for group in saved["groups"]}
     assert groups_by_arm[MODE_NO_TOOL_BASELINE]["retrieval_mode"] == "disabled"
     assert groups_by_arm[MODE_NO_TOOL_BASELINE]["summary"]["total_records"] == 4
     assert groups_by_arm[MODE_TOOL_ENABLED]["retrieval_mode"] == "disabled"
     assert groups_by_arm[MODE_TOOL_ENABLED]["summary"]["total_records"] == 4
-    assert saved["combined"]["total_records"] == 8
+    assert saved["total_records"] == 8
+    assert "combined" not in saved
+    assert set(saved.keys()) == {"groups", "total_records"}
 
 
 def test_main_reports_a_clean_failure_when_the_summary_write_fails(
@@ -946,19 +959,25 @@ def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
     assert baseline_group.summary.diagnosis_correct_count == 1
     assert tool_enabled_group.summary.total_records == 2
     assert tool_enabled_group.summary.diagnosis_correct_count == 2
-    # The combined total is still reported too -- the per-arm split does
-    # not remove the batch-wide figure a reader may also want.
-    assert summary.combined.total_records == 4
-    assert summary.combined.diagnosis_correct_count == 3
+    # A plain batch-wide count is still reported too -- the per-arm split
+    # does not remove the total record count a reader may also want -- but,
+    # unlike the round-4 `combined` field this replaces, it carries no
+    # `diagnosis_correct_count` or other benchmark figure blending both
+    # arms into one number.
+    assert summary.total_records == 4
+    assert not hasattr(summary, "combined")
 
     rendered = render_paired_evaluation_summary(summary)
 
     assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in rendered
     assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in rendered
-    assert "[combined -- spans every arm and retrieval mode above" in rendered
+    assert "total_records (all arms and retrieval modes): 4" in rendered
+    # No merged "diagnosis_correct: 3/4" figure anywhere -- each arm's own
+    # line stays visibly separate, and the trailing total carries no
+    # diagnosis figure of its own to blend them.
     assert "diagnosis_correct:   1/2" in rendered
     assert "diagnosis_correct:   2/2" in rendered
-    assert "diagnosis_correct:   3/4" in rendered
+    assert "diagnosis_correct:   3/4" not in rendered
 
 
 def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart() -> (
@@ -975,7 +994,14 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     rule forbids blending. Before this fix, `summarize_paired_evaluation`
     partitioned by arm alone, so both records would have landed in one
     `tool_enabled` bucket with no way to tell the two retrieval modes
-    apart."""
+    apart.
+
+    Also proves the round-5 fix directly: with three records spanning two
+    retrieval modes (2 correct, 1 incorrect), a blended figure across all of
+    them would read `diagnosis_correct: 2/3` -- this test confirms that
+    exact string never appears anywhere in the structured summary or its
+    rendered text, because no field left on `PairedEvaluationSummary`
+    computes a figure across more than one `(arm, retrieval_mode)` group."""
     records = [
         _paired_record(
             run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
@@ -1010,6 +1036,14 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     assert tool_enabled_no_retrieval.summary.diagnosis_correct_count == 1
     assert tool_enabled_retrieved.summary.total_records == 1
     assert tool_enabled_retrieved.summary.diagnosis_correct_count == 0
+    # The P1 fix itself: `PairedEvaluationSummary` no longer has any field
+    # computed across the whole batch except a bare count. There is no
+    # `combined` attribute, and `total_records` (unlike the removed
+    # `combined.diagnosis_correct_count`) carries no diagnosis figure at
+    # all -- it cannot blend the two retrieval modes' correctness data
+    # because it does not report correctness data.
+    assert not hasattr(summary, "combined")
+    assert summary.total_records == 3
 
     rendered = render_paired_evaluation_summary(summary)
 
@@ -1025,6 +1059,13 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     )
     assert "diagnosis_correct:   1/1" in no_retrieval_block
     assert "diagnosis_correct:   0/1" in retrieved_block
+    # The exact blended figure a cross-mode aggregate would report (2 of
+    # the batch's 3 records are diagnosis_correct, spanning both retrieval
+    # modes and both arms) appears nowhere -- proving no reported field
+    # blends diagnosis data across the different retrieval modes present in
+    # this batch.
+    assert "diagnosis_correct:   2/3" not in rendered
+    assert "total_records (all arms and retrieval modes): 3" in rendered
 
 
 def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> None:

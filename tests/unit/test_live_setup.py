@@ -6,6 +6,10 @@ cost ceiling through this shared module now, so its tests live here rather
 than under a CLI-specific test module.
 """
 
+import pytest
+
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
+from causalops.cost_ledger import RESERVATION_CEILING_BUFFER_USD
 from causalops.live_setup import (
     DEFAULT_LIVE_EVALUATION_MAX_USD,
     LIVE_EVALUATION_MAX_USD_VARIABLE,
@@ -68,6 +72,49 @@ def test_live_evaluation_ceiling_falls_back_on_a_non_finite_value() -> None:
     assert (
         live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "nan"})
         == DEFAULT_LIVE_EVALUATION_MAX_USD
+    )
+
+
+def test_live_evaluation_ceiling_rejects_a_value_at_or_below_the_buffer() -> None:
+    """The P2 this fix exists for: `cost_ledger.record_reservation_before_
+    request` always subtracts `RESERVATION_CEILING_BUFFER_USD` ($0.10) from
+    `ceiling_usd` before checking remaining budget, so a configured ceiling
+    at or below that buffer leaves `remaining` permanently negative --
+    `CostCeilingExceeded` on literally every reservation, with nothing in
+    that error naming the real problem as the configured ceiling itself.
+    Unlike the three malformed *shapes* the tests above cover, this is a
+    well-formed positive finite number -- so it is rejected here, at
+    config-resolution time, with a `CheckpointStoreError` that names both
+    the configured value and the buffer, rather than silently falling back
+    to a much larger default (which would defeat a deliberately small
+    configured cap) or accepted and left to fail confusingly on every
+    subsequent request.
+
+    Tests both the exact boundary (`== RESERVATION_CEILING_BUFFER_USD`,
+    which still leaves zero headroom -- `ceiling - buffer - spent == 0` can
+    never authorize a positive reservation) and a value below it."""
+    for raw in (f"{RESERVATION_CEILING_BUFFER_USD:.2f}", "0.05", "0.01"):
+        with pytest.raises(CheckpointStoreError) as excinfo:
+            live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: raw})
+        assert (
+            excinfo.value.reason_code
+            == CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER
+        )
+        assert raw in str(excinfo.value) or f"{float(raw):.4f}" in str(excinfo.value)
+        assert f"{RESERVATION_CEILING_BUFFER_USD:.2f}" in str(excinfo.value)
+
+
+def test_live_evaluation_ceiling_still_accepts_a_value_above_the_buffer() -> None:
+    """Regression coverage for the existing behaviour: a ceiling well above
+    `RESERVATION_CEILING_BUFFER_USD` still resolves exactly as before this
+    fix -- both right at the boundary that first becomes valid (a cent
+    above the buffer) and the project's own real configured default."""
+    just_above_buffer = RESERVATION_CEILING_BUFFER_USD + 0.01
+    assert live_evaluation_ceiling_usd(
+        {LIVE_EVALUATION_MAX_USD_VARIABLE: f"{just_above_buffer:.2f}"}
+    ) == pytest.approx(just_above_buffer)
+    assert (
+        live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "5.00"}) == 5.00
     )
 
 

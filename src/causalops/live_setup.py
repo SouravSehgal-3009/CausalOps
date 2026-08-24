@@ -17,7 +17,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
-from causalops.cost_ledger import ensure_cost_ledger_table
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
+from causalops.cost_ledger import (
+    RESERVATION_CEILING_BUFFER_USD,
+    ensure_cost_ledger_table,
+)
 from causalops.doctor import API_KEY_VARIABLE
 from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
@@ -67,11 +71,44 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md` §10
 # carries the same amendment. Unit 3c: extracted here from `cli.py`, still
 # the one ceiling both `causalops` and `causalops-evaluate` read.
+#
+# One further case is deliberately NOT a silent fallback: a well-formed
+# positive finite value at or below `cost_ledger.RESERVATION_CEILING_
+# BUFFER_USD` ($0.10) parses cleanly, unlike the three shapes above, but
+# defaulting it the same way would silently authorize spend up to
+# `DEFAULT_LIVE_EVALUATION_MAX_USD` when the owner configured a specific,
+# deliberately smaller cap -- a more permissive, more dangerous surprise
+# than the other three cases, not a stricter one. `live_evaluation_ceiling_
+# usd` raises `CheckpointStoreError` for that case instead of returning a
+# float; see that function's own docstring.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
 
 def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
+    """Resolves `LIVE_EVALUATION_MAX_USD`, falling back to the default for
+    every malformed *shape* described in this module's own comment above --
+    but a well-formed positive finite value at or below `cost_ledger.
+    RESERVATION_CEILING_BUFFER_USD` is a different problem, not covered by
+    that fallback: `cost_ledger.record_reservation_before_request` always
+    subtracts the buffer from `ceiling_usd` before checking remaining
+    budget, so a configured ceiling that small leaves `remaining`
+    permanently negative and refuses every single reservation, with nothing
+    in `CostCeilingExceeded`'s own message naming the ceiling as the actual
+    cause. Falling back to the default here would be worse than raising --
+    it would silently authorize spend up to `DEFAULT_LIVE_EVALUATION_MAX_USD`
+    when the owner configured a specific, deliberately smaller cap (a cheap
+    smoke-test budget, for instance), which is a bigger, more dangerous
+    surprise than a config that fails fast and says exactly why. Raised as
+    `CheckpointStoreError` -- the same reusable `FAIL <CODE> <message>`
+    shape `cost_ledger.py` already reuses this type for
+    (`RESERVATION_NOT_SETTLEABLE`) -- so both `causalops.cli`'s `main` and
+    `causalops.evaluate_cli`'s `main` report this cleanly with no code
+    changes needed at either call site: `cli.py` already catches
+    `CheckpointStoreError` explicitly, and `evaluate_cli.py`'s catch-all
+    `except Exception` already turns any other raised exception into a
+    clean `FAIL INTERNAL_ERROR` rather than a raw traceback.
+    """
     raw = environment.get(LIVE_EVALUATION_MAX_USD_VARIABLE, "").strip()
     if not raw:
         return DEFAULT_LIVE_EVALUATION_MAX_USD
@@ -79,9 +116,19 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
         value = float(raw)
     except ValueError:
         return DEFAULT_LIVE_EVALUATION_MAX_USD
-    return (
-        value if math.isfinite(value) and value > 0 else DEFAULT_LIVE_EVALUATION_MAX_USD
-    )
+    if not (math.isfinite(value) and value > 0):
+        return DEFAULT_LIVE_EVALUATION_MAX_USD
+    if value <= RESERVATION_CEILING_BUFFER_USD:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER,
+            f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={value:.4f} is at or below "
+            f"the ${RESERVATION_CEILING_BUFFER_USD:.2f} reservation safety "
+            "buffer every live request is checked against -- no reservation "
+            "could ever be authorized at this ceiling. Set "
+            f"{LIVE_EVALUATION_MAX_USD_VARIABLE} comfortably above "
+            f"${RESERVATION_CEILING_BUFFER_USD:.2f} (see .env.example).",
+        )
+    return value
 
 
 def build_model_and_registry(

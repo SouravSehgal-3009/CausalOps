@@ -53,9 +53,13 @@ class CheckpointStoreReasonCode(StrEnum):
     `NO_PENDING_INTERRUPT`, `CONFLICTING_DECISION`, and
     `INVALID_REJECTION_NOTE` are reachable only through `causalops
     approve`/`reject`; `RESERVATION_NOT_SETTLEABLE` identifies an invalid
-    cost-ledger lifecycle transition; `STORE_UNAVAILABLE` is also raised by
-    `cli._sqlite_checkpointer`, reachable from a plain `causalops
-    investigate` too, since both open the same file.
+    cost-ledger lifecycle transition; `CEILING_BELOW_RESERVATION_BUFFER`
+    identifies a `LIVE_EVALUATION_MAX_USD` configured at or below
+    `cost_ledger.RESERVATION_CEILING_BUFFER_USD`, refused at config-resolution
+    time (`live_setup.live_evaluation_ceiling_usd`) because such a ceiling
+    can never authorize even a single reservation; `STORE_UNAVAILABLE` is
+    also raised by `cli._sqlite_checkpointer`, reachable from a plain
+    `causalops investigate` too, since both open the same file.
     """
 
     THREAD_NOT_FOUND = "THREAD_NOT_FOUND"
@@ -63,6 +67,7 @@ class CheckpointStoreReasonCode(StrEnum):
     CONFLICTING_DECISION = "CONFLICTING_DECISION"
     INVALID_REJECTION_NOTE = "INVALID_REJECTION_NOTE"
     RESERVATION_NOT_SETTLEABLE = "RESERVATION_NOT_SETTLEABLE"
+    CEILING_BELOW_RESERVATION_BUFFER = "CEILING_BELOW_RESERVATION_BUFFER"
     STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
 
 

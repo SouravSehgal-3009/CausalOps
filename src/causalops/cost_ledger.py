@@ -85,10 +85,15 @@ _LOGGER = logging.getLogger(__name__)
 # `ceiling_usd` before authorizing a new reservation -- see this module's
 # own "RESERVATION_CEILING_BUFFER_USD narrows that gap" paragraph above for
 # what it does and does not guarantee. Lives here, not beside
-# `DEFAULT_LIVE_EVALUATION_MAX_USD` in `live_setup.py`, because it is
-# consumed only inside this module's own ceiling check; `live_setup.py` and
-# `.env.example` still document its existence for an owner reading the
-# ceiling's own configuration story end to end.
+# `DEFAULT_LIVE_EVALUATION_MAX_USD` in `live_setup.py`, because the actual
+# per-request ceiling check happens only inside this module; `live_setup.py`
+# and `.env.example` still document its existence for an owner reading the
+# ceiling's own configuration story end to end. `live_setup.
+# live_evaluation_ceiling_usd` also imports this constant directly, to
+# reject a configured `LIVE_EVALUATION_MAX_USD` at or below it before a run
+# ever starts -- a ceiling that small would leave `remaining` permanently
+# negative here, refusing every single reservation with no indication the
+# real problem is the configured ceiling itself.
 #
 # Sized from this project's own real live-call evidence, not picked to make
 # the arithmetic merely balance:
