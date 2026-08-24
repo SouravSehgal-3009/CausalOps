@@ -33,6 +33,7 @@ from fake_incident import (
 )
 from pydantic import BaseModel
 
+import causalops.evaluate_cli as evaluate_cli
 from causalops.domain import (
     Budgets,
     Disposition,
@@ -302,6 +303,14 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
     )
+    graph_calls: list[dict[str, object]] = []
+    real_run_graph = evaluate_cli.run_graph_investigation
+
+    def spy_run_graph(*args: object, **kwargs: object) -> object:
+        graph_calls.append(kwargs)
+        return real_run_graph(*args, **kwargs)
+
+    monkeypatch.setattr("causalops.evaluate_cli.run_graph_investigation", spy_run_graph)
 
     target = _new_evaluation_target(tmp_path)
     records = run_evaluation(tmp_path, target)
@@ -312,6 +321,10 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
     assert len(records) == 2 * len(EVALUATION_FAMILIES)
     modes = [record.run_key.rsplit("/", 1)[-1] for record in records]
     assert modes == ["no_tool_baseline", "tool_enabled"] * len(EVALUATION_FAMILIES)
+    assert len(graph_calls) == len(records)
+    for index, call in enumerate(graph_calls):
+        assert call["suppress_escalation"] is True
+        assert call["no_tool_baseline"] is (index % 2 == 0)
     for record in records:
         assert record.model_name == "fake-claude-model"
         assert record.git_sha == "f" * 40

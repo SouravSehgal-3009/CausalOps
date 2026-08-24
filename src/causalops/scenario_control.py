@@ -5,6 +5,7 @@ run directory the investigator later reads, and keeps the expected outcome in a
 directory the investigator side has no accessor for.
 """
 
+import fcntl
 import json
 import os
 import shutil
@@ -12,7 +13,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -275,6 +277,24 @@ def refuse_second_scenario(root: Path) -> None:
         )
 
 
+@contextmanager
+def _scenario_lock(root: Path) -> Iterator[None]:
+    """Serialize ownership mutations across controller processes.
+
+    The active marker is the durable state visible to operators; this sibling
+    advisory lock protects the check/recover/create and reset/cleanup
+    transitions so a contender cannot act on a stale marker observation.
+    """
+    lock_path = runs_root(root) / ".active-scenario.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _claim_scenario(root: Path, incident_id: str, paths: RunPaths) -> None:
     """Atomically claim the sole active-scenario marker for this run.
 
@@ -283,35 +303,24 @@ def _claim_scenario(root: Path, incident_id: str, paths: RunPaths) -> None:
     marker is an in-progress exclusive claim and is never reclaimed.
     """
     marker = active_incident_file(root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    paths.root.mkdir(parents=True, exist_ok=False)
-    while True:
-        try:
-            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError as error:
-            active = marker.read_text(encoding="utf-8").strip()
-            if not active or (runs_root(root) / active).is_dir():
-                shutil.rmtree(paths.root)
-                raise LabError(
-                    LabReasonCode.SCENARIO_ALREADY_ACTIVE,
-                    "reset "
-                    f"{active or 'the in-progress scenario'} before "
-                    "starting another scenario",
-                ) from error
-            # A nonempty marker referencing no run directory is stale. Remove
-            # it and retry the exclusive creation; another contender still
-            # wins normally if it creates a marker first.
-            marker.unlink(missing_ok=True)
-            continue
-        try:
-            os.write(descriptor, incident_id.encode("utf-8"))
-        except BaseException:
-            marker.unlink(missing_ok=True)
-            shutil.rmtree(paths.root, ignore_errors=True)
-            raise
-        finally:
-            os.close(descriptor)
-        return
+    if marker.is_file():
+        active = marker.read_text(encoding="utf-8").strip()
+        if not active or (runs_root(root) / active).is_dir():
+            raise LabError(
+                LabReasonCode.SCENARIO_ALREADY_ACTIVE,
+                "reset "
+                f"{active or 'the in-progress scenario'} before "
+                "starting another scenario",
+            )
+        marker.unlink()
+    descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        os.write(descriptor, incident_id.encode("utf-8"))
+    except BaseException:
+        marker.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
 
 
 def write_manifests(
@@ -410,8 +419,10 @@ def start_scenario(
     definition = apply_seed_variant(load_definition(root, family), seed)
     incident_id = new_opaque_id()
     paths = run_paths(root, incident_id)
-    _claim_scenario(root, incident_id, paths)
     try:
+        with _scenario_lock(root):
+            paths.root.mkdir(parents=True, exist_ok=False)
+            _claim_scenario(root, incident_id, paths)
         paths.logs.mkdir(parents=True, exist_ok=True)
         write_json(paths.root / "lab" / "config.json", definition["healthy_config"])
         window_start = clock() - WINDOW_LEAD_IN
@@ -444,18 +455,23 @@ def start_scenario(
         )
         return incident_id
     except BaseException:
-        clear_unstarted_scenario(root, paths, incident_id)
+        with _scenario_lock(root):
+            clear_unstarted_scenario(root, paths, incident_id)
         raise
 
 
 def reset_scenario(root: Path, incident_id: str) -> None:
     """Delete only this run's transient state. Finalized results are never touched."""
-    target = validated_run_paths(root, incident_id).root
-    if not target.is_dir():
-        raise LabError(
-            LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
-        )
-    marker = active_incident_file(root)
-    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == incident_id:
-        marker.unlink()
-    shutil.rmtree(target)
+    with _scenario_lock(root):
+        target = validated_run_paths(root, incident_id).root
+        if not target.is_dir():
+            raise LabError(
+                LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
+            )
+        marker = active_incident_file(root)
+        if (
+            marker.is_file()
+            and marker.read_text(encoding="utf-8").strip() == incident_id
+        ):
+            marker.unlink()
+        shutil.rmtree(target)

@@ -48,8 +48,34 @@ def dynamically_imported_modules(source: Path) -> set[str]:
     use) cannot trigger a false positive here the way a plain substring
     scan of the whole file would.
     """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    importlib_aliases = {"importlib"}
+    import_module_aliases = {"import_module"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            importlib_aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "importlib"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            import_module_aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "import_module"
+            )
+
+    def literal_string(expression: ast.expr) -> str | None:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return expression.value
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+            left = literal_string(expression.left)
+            right = literal_string(expression.right)
+            return None if left is None or right is None else left + right
+        return None
+
     names: set[str] = set()
-    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         target = node.func
@@ -57,17 +83,15 @@ def dynamically_imported_modules(source: Path) -> set[str]:
             isinstance(target, ast.Attribute)
             and target.attr == "import_module"
             and isinstance(target.value, ast.Name)
-            and target.value.id == "importlib"
-        ) or (isinstance(target, ast.Name) and target.id == "import_module")
+            and target.value.id in importlib_aliases
+        ) or (isinstance(target, ast.Name) and target.id in import_module_aliases)
         is_dunder_import_call = (
             isinstance(target, ast.Name) and target.id == "__import__"
         )
         if not (is_import_module_call or is_dunder_import_call):
             continue
-        if (
-            node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        ):
-            names.add(node.args[0].value)
+        if node.args:
+            name = literal_string(node.args[0])
+            if name is not None:
+                names.add(name)
     return names

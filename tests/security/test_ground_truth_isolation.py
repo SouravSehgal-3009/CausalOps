@@ -125,6 +125,9 @@ def test_the_import_scan_recognises_every_form_it_has_to_catch(tmp_path: Path) -
         "from . import evaluation",
         "from .evaluation import ExpectedOutcome",
         "import importlib\nimportlib.import_module('causalops.evaluation')",
+        "import importlib as loader\nloader.import_module('causalops.evaluation')",
+        "from importlib import import_module as loader\nloader('causalops.evaluation')",
+        "__import__('causalops.' + 'evaluation')",
         "__import__('causalops.evaluation')",
     )
 

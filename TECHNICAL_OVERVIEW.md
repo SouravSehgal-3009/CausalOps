@@ -3292,11 +3292,10 @@ checkpointer.
 the documented `$5.00` default; every other malformed or unusable shape fails loudly instead of
 silently accepting it. Three distinct failure shapes, each a specific `CheckpointStoreError`
 reason code rather than one generic refusal: unparseable text or a non-finite value (`inf`,
-`-inf`, `nan`) raises `CEILING_MALFORMED`; a well-formed, finite, positive number that is still
-too small to ever authorize even the cheapest real reservation raises
-`CEILING_BELOW_RESERVATION_BUFFER`; anything else -- including a well-formed number that is
-simply the wrong magnitude (`500` typed for `5.00`) -- is honoured as configured, since guarding
-against a fat-fingered value is the owner's job, not a parser's.
+`-inf`, `nan`) raises `CEILING_MALFORMED`; a well-formed finite value at or below the fixed
+reservation buffer raises `CEILING_BELOW_RESERVATION_BUFFER`; anything else -- including a
+well-formed number that is simply the wrong magnitude (`500` typed for `5.00`) -- is honoured as
+configured, since guarding against a fat-fingered value is the owner's job, not a parser's.
 
 The design choice worth stating explicitly: silently falling back to the `$5.00` default on a
 malformed or too-small value was judged MORE dangerous than refusing outright, not safer. A

@@ -166,6 +166,16 @@ def test_a_refused_reservation_writes_nothing(conn: sqlite3.Connection) -> None:
     assert rows == 0
 
 
+@pytest.mark.parametrize("reserved_usd", [float("nan"), float("inf"), -0.01, True])
+def test_invalid_reservation_money_is_refused_before_mutation(
+    conn: sqlite3.Connection, reserved_usd: object
+) -> None:
+    with pytest.raises(CheckpointStoreError):
+        _reserve(conn, reserved_usd=reserved_usd)  # type: ignore[arg-type]
+
+    assert conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()[0] == 0
+
+
 def test_the_ceiling_accounts_for_earlier_reservations_in_the_same_run(
     conn: sqlite3.Connection,
 ) -> None:

@@ -273,6 +273,25 @@ def test_only_one_scenario_may_be_active(project: Path) -> None:
     assert refused.value.reason_code is LabReasonCode.SCENARIO_ALREADY_ACTIVE
 
 
+def test_claim_creation_failure_removes_its_candidate_directory(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = scenario_control.os.open
+
+    def failing_open(*args: object, **kwargs: object) -> int:
+        if args[0] == active_incident_file(project):
+            raise OSError("simulated marker creation failure")
+        return real_open(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(scenario_control.os, "open", failing_open)
+
+    with pytest.raises(OSError, match="marker creation"):
+        start_scenario(project, FAMILY, "development")
+
+    assert not active_incident_file(project).exists()
+    assert [path for path in runs_root(project).iterdir() if path.is_dir()] == []
+
+
 def test_an_unknown_family_is_refused(project: Path) -> None:
     with pytest.raises(LabError) as refused:
         start_scenario(project, "not_a_family", "development")

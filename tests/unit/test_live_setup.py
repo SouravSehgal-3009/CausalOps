@@ -91,24 +91,8 @@ def test_live_evaluation_ceiling_rejects_a_non_finite_value() -> None:
 
 
 def test_live_evaluation_ceiling_rejects_only_the_structural_buffer_floor() -> None:
-    """The true minimum usable ceiling is not just `RESERVATION_CEILING_
-    BUFFER_USD` ($0.10) -- `cost_ledger.record_reservation_before_request`
-    always subtracts that buffer from `ceiling_usd` before checking
-    remaining budget, but the cheapest possible real reservation is not $0
-    either, it is `MINIMUM_POSSIBLE_RESERVATION_USD` -- derived from the
-    real minimum tool-schema payload (`respond()`'s final-assessment-only
-    schema), not a zero-input approximation of one. A ceiling like $0.11 --
-    comfortably above the $0.10 buffer alone -- still leaves only $0.01 of
-    headroom once the buffer is subtracted, far less than even the
-    cheapest possible request, so it must be rejected too. Tests the
-    buffer-only boundary ($0.10, $0.11) plus the corrected boundary
-    (`MINIMUM_USABLE_CEILING_USD` itself, which still leaves zero
-    headroom). Also pins the two literal figures a zero-input floor
-    (`$0.016`) used to wrongly accept: $0.116 (the old, insufficient
-    threshold) and $0.117 (a value directly demonstrated as still broken
-    under the zero-input floor, since it clears $0.116 but not the real
-    $0.120584 minimum) -- both must now be rejected under the real,
-    tool-schema-derived floor."""
+    """Parsing rejects only the structural buffer boundary. A value above
+    it can still be rejected later by the request-time reservation check."""
     for raw in ("-1", "0", f"{RESERVATION_CEILING_BUFFER_USD:.2f}"):
         with pytest.raises(CheckpointStoreError) as excinfo:
             live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: raw})
@@ -120,10 +104,7 @@ def test_live_evaluation_ceiling_rejects_only_the_structural_buffer_floor() -> N
 
 
 def test_live_evaluation_ceiling_accepts_values_above_the_buffer() -> None:
-    """Regression coverage for the existing behaviour: a ceiling well above
-    `MINIMUM_USABLE_CEILING_USD` still resolves exactly as before this fix
-    -- both right at the boundary that first becomes valid (a cent above the
-    floor) and the project's own real configured default."""
+    """Values above the structural floor resolve for request-time checking."""
     assert live_evaluation_ceiling_usd(
         {LIVE_EVALUATION_MAX_USD_VARIABLE: "0.101"}
     ) == pytest.approx(0.101)
