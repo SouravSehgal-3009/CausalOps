@@ -5,10 +5,10 @@ run directory the investigator later reads, and keeps the expected outcome in a
 directory the investigator side has no accessor for.
 """
 
-import fcntl
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -282,17 +282,24 @@ def _scenario_lock(root: Path) -> Iterator[None]:
     """Serialize ownership mutations across controller processes.
 
     The active marker is the durable state visible to operators; this sibling
-    advisory lock protects the check/recover/create and reset/cleanup
-    transitions so a contender cannot act on a stale marker observation.
+    SQLite's cross-platform write transaction protects the
+    check/recover/create and reset/cleanup transitions so a contender cannot
+    act on a stale marker observation. It is intentionally a separate tiny
+    lock database: this controller runs before an incident exists and must
+    not depend on LangGraph's checkpoint schema.
     """
-    lock_path = runs_root(root) / ".active-scenario.lock"
+    lock_path = runs_root(root) / ".active-scenario-lock.db"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    connection = sqlite3.connect(lock_path, timeout=30)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _claim_scenario(root: Path, incident_id: str, paths: RunPaths) -> None:
