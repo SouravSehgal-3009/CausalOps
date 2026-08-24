@@ -25,12 +25,13 @@ from causalops.cost_ledger import (
 from causalops.doctor import API_KEY_VARIABLE
 from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_model import LiveClaudeModel
+from causalops.live_model import LiveClaudeModel, minimum_possible_reservation_usd
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
     ToolCallingModel,
 )
+from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
@@ -75,12 +76,47 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # was worth a dedicated review pass, is in `TECHNICAL_OVERVIEW.md`'s
 # "Live-evaluation cost ceiling validation" section.
 #
-# Values at or below the fixed reservation buffer cannot authorize any
-# request. A larger structural value is not a universal usability guarantee:
-# the exact reservation remains incident- and stage-dependent and is checked
-# immediately before provider invocation.
+# A well-formed, finite, positive value can still be unusable: `cost_ledger.
+# record_reservation_before_request` always subtracts `cost_ledger.
+# RESERVATION_CEILING_BUFFER_USD` ($0.10) from `ceiling_usd` before checking
+# remaining budget, so any value at or below that buffer leaves `remaining`
+# permanently negative and refuses every single reservation. But the buffer
+# alone is not the true floor either: the cheapest real reservation this
+# project's pricing could ever produce is not $0 -- no real call ever sends
+# zero input tokens, because every call's own system prompt and tool schema
+# are themselves billed input. `MINIMUM_POSSIBLE_RESERVATION_USD` below is
+# that cheapest-real-reservation figure; `MINIMUM_USABLE_CEILING_USD` is the
+# buffer plus that floor. A configured value at or below it can never
+# authorize even one reservation and is refused the same way the too-small
+# case always was.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
+
+# The genuine floor, not an approximation of one -- and, as of this fix, not
+# a hand-reconstruction of `live_model._send`'s reservation formula either.
+# Three earlier versions of this constant each hand-copied that formula in
+# THIS module and missed one real component of it: the first counted only
+# the tool schema (missing that every call also bills its own prose); the
+# second counted the tool schema and an empty prose string (missing that
+# `SYSTEM_TEXT` alone is 843 tokens on every real call, never zero). Each
+# fix patched the one gap found that round without any guarantee a further
+# gap did not remain -- which is exactly what happened, three times.
+# `live_model.minimum_possible_reservation_usd` closes this bug class
+# instead of extending it: it does not reconstruct `_send`'s formula at
+# all, it calls `_send`'s own, real, unmodified reservation code (through
+# `LiveClaudeModel.respond`) against a throwaway in-memory ledger and a
+# fake transport that never touches the network, and reads back whatever
+# `_send` actually reserved. Whatever `_send` bills in the future, this
+# figure moves with it automatically -- there is no formula copy left here
+# to fall out of date. Re-verify by reading `test_live_setup.py`'s own
+# pinned assertion on this figure if `_send`'s reservation formula, the
+# system prompt, or the final-assessment tool schema ever changes.
+MINIMUM_POSSIBLE_RESERVATION_USD = minimum_possible_reservation_usd(
+    CLAUDE_SONNET_5_PRICING
+)
+MINIMUM_USABLE_CEILING_USD = (
+    RESERVATION_CEILING_BUFFER_USD + MINIMUM_POSSIBLE_RESERVATION_USD
+)
 
 
 def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
@@ -94,11 +130,20 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
     1. Unparseable text (`float()` raises), or a parseable but non-finite
        value (`inf`, `-inf`, `nan`) -- not a well-formed number at all.
        Raised as `CEILING_MALFORMED`.
-    2. A well-formed, finite number at or below the fixed reservation buffer.
-       This also covers zero and negative values. Raised as
+    2. A well-formed, finite, positive number at or below
+       `MINIMUM_USABLE_CEILING_USD` -- no reservation, however small, could
+       ever be authorized under it (`cost_ledger.
+       record_reservation_before_request` always subtracts `cost_ledger.
+       RESERVATION_CEILING_BUFFER_USD` before checking remaining budget, and
+       the cheapest possible real reservation is `MINIMUM_POSSIBLE_
+       RESERVATION_USD`). This also covers zero and negative values, which
+       are trivially below a positive floor. Raised as
        `CEILING_BELOW_RESERVATION_BUFFER`.
-    3. Anything else is structurally valid and is returned as-is. Its actual
-       request-time usability remains dependent on the rendered request.
+    3. Anything else is a usable ceiling and is returned as-is -- including
+       a well-formed positive number that is simply the wrong one (`500`
+       typed for `5.00` parses cleanly and is honoured as written). Guarding
+       against a fat-fingered magnitude that is still comfortably above the
+       floor is the owner's job, not a parser's.
 
     Both raised cases use `CheckpointStoreError` -- the same reusable
     `FAIL <CODE> <message>` shape `cost_ledger.py` already reuses this type
@@ -127,14 +172,23 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
             "limit. Set it to a plain positive figure such as 5.00 (see "
             ".env.example).",
         )
-    if value <= RESERVATION_CEILING_BUFFER_USD:
+    if value <= MINIMUM_USABLE_CEILING_USD:
+        # `.6f`, not `.4f`, on the two derived-floor figures below: the real
+        # minimum reservation this module computes at import time
+        # (`minimum_possible_reservation_usd`) is small enough that `.4f`
+        # would round it away entirely and print a floor the owner could
+        # not reproduce by reading this message.
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER,
             f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={value:.4f} is at or below "
+            f"${MINIMUM_USABLE_CEILING_USD:.6f} -- the "
             f"${RESERVATION_CEILING_BUFFER_USD:.2f} reservation safety "
-            "buffer every live request is checked against. A value above it "
-            "can still be refused by the exact, incident- and stage-dependent "
-            "reservation check.",
+            f"buffer every live request is checked against, plus "
+            f"${MINIMUM_POSSIBLE_RESERVATION_USD:.6f}, the cheapest real "
+            "reservation this project's pricing could ever produce -- so no "
+            "reservation, however small, could ever be authorized at this "
+            f"ceiling. Set {LIVE_EVALUATION_MAX_USD_VARIABLE} comfortably "
+            f"above ${MINIMUM_USABLE_CEILING_USD:.6f} (see .env.example).",
         )
     return value
 

@@ -264,19 +264,6 @@ def apply_seed_variant(definition: dict[str, Any], seed: str) -> dict[str, Any]:
     return varied
 
 
-def refuse_second_scenario(root: Path) -> None:
-    """Section 12 allows one active scenario at a time."""
-    marker = active_incident_file(root)
-    if not marker.is_file():
-        return
-    active = marker.read_text(encoding="utf-8").strip()
-    if active and (runs_root(root) / active).is_dir():
-        raise LabError(
-            LabReasonCode.SCENARIO_ALREADY_ACTIVE,
-            f"reset {active} before starting another scenario",
-        )
-
-
 @contextmanager
 def _scenario_lock(root: Path) -> Iterator[None]:
     """Serialize ownership mutations across controller processes.

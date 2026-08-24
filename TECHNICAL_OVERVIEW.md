@@ -3292,10 +3292,12 @@ checkpointer.
 the documented `$5.00` default; every other malformed or unusable shape fails loudly instead of
 silently accepting it. Three distinct failure shapes, each a specific `CheckpointStoreError`
 reason code rather than one generic refusal: unparseable text or a non-finite value (`inf`,
-`-inf`, `nan`) raises `CEILING_MALFORMED`; a well-formed finite value at or below the fixed
-reservation buffer raises `CEILING_BELOW_RESERVATION_BUFFER`; anything else -- including a
-well-formed number that is simply the wrong magnitude (`500` typed for `5.00`) -- is honoured as
-configured, since guarding against a fat-fingered value is the owner's job, not a parser's.
+`-inf`, `nan`) raises `CEILING_MALFORMED`; a well-formed finite value at or below the real
+`MINIMUM_USABLE_CEILING_USD` floor (see below for how that floor is derived -- it is more than
+just the fixed reservation buffer) raises `CEILING_BELOW_RESERVATION_BUFFER`; anything else --
+including a well-formed number that is simply the wrong magnitude (`500` typed for `5.00`) -- is
+honoured as configured, since guarding against a fat-fingered value is the owner's job, not a
+parser's.
 
 The design choice worth stating explicitly: silently falling back to the `$5.00` default on a
 malformed or too-small value was judged MORE dangerous than refusing outright, not safer. A
@@ -3306,10 +3308,38 @@ to allow for the too-small case. Only unset/blank is exempt, because there both 
 owner typed" and "the value the owner is implicitly asking for" are the same thing -- nothing was
 typed, so there is no wrong signal to silently override.
 
-`CEILING_BELOW_RESERVATION_BUFFER` has a structural threshold: values at or below the fixed
-`$0.10` `RESERVATION_CEILING_BUFFER_USD` margin are rejected during configuration parsing. A
-value above the buffer is valid configuration but is not guaranteed to authorize a request: the
-exact reservation is computed before provider invocation and depends on the incident and stage.
+`CEILING_BELOW_RESERVATION_BUFFER`'s own threshold, `MINIMUM_USABLE_CEILING_USD`, went through two
+corrections across this unit's review that each fixed one gap and left another, before a third,
+structural fix that closes the whole bug class instead of patching its latest instance.
+`cost_ledger.record_reservation_before_request` always subtracts the fixed `$0.10`
+`RESERVATION_CEILING_BUFFER_USD` margin from a configured ceiling before checking remaining
+budget, so the buffer alone is not the true floor -- a ceiling just above it can still leave less
+headroom than the cheapest real request could ever cost. The first version of this floor computed
+that cheapest-request figure assuming zero input tokens (`reservation_usd(input_tokens=0)`,
+$0.016), which is not a request any real call can send. The second version fixed that by counting
+the smallest tool schema any real call ever sends (`respond()`'s final-assessment-only schema,
+2,292 tokens) but still assumed zero PROSE, missing that `prompts.SYSTEM_TEXT` alone is 843 tokens
+on every real call, never zero.
+
+Rather than hand-reconstruct `live_model._send`'s reservation formula a fourth time and risk
+missing a fourth component, `MINIMUM_POSSIBLE_RESERVATION_USD` is now derived by actually running
+`_send`'s real reservation code: `live_model.build_minimum_final_assessment_request` builds the
+smallest real FINAL_ASSESSMENT request `graph.py`'s `_render_stage_request` could ever construct
+(one INITIAL_PLAN turn already spent, no evidence gathered, a synthetic minimal incident), and
+`live_model.minimum_possible_reservation_usd` sends it through a real `LiveClaudeModel.respond()`
+call -- against a throwaway in-memory ledger and a fake, no-network transport
+(`MinimumReservationProbeTransport`) -- and reads back whatever `_send` actually reserved.
+`MINIMUM_USABLE_CEILING_USD` is the $0.10 buffer plus that figure, computed fresh at import time.
+Because this no longer copies the formula at all, it cannot silently miss a future change to that
+formula, the system prompt, or the tool schema the way the first three versions each did once.
+`tests/unit/test_live_setup.py`'s `test_accepted_ceiling_actually_authorizes_a_minimal_reservation`
+closes the loop the earlier versions' own tests could not: it sends the same minimal request
+through the same real `respond()` path under a ceiling accepted right at the computed boundary,
+proving the floor genuinely authorizes a real reservation rather than only being internally
+consistent with itself. A ceiling at or below `MINIMUM_USABLE_CEILING_USD` -- including the two
+earlier, now-corrected boundaries ($0.116 and $0.120584) -- is refused outright at
+config-resolution time rather than accepted and then silently unable to authorize a single
+reservation.
 
 ### Paired evaluation review fixes
 
@@ -3325,9 +3355,15 @@ nonempty stale marker is recovered only if its referenced run directory is absen
 removes only the incident's own marker. Ledger inputs and rows are validated before accounting;
 corrupt legacy rows fail closed, while ambiguous reservations retain their reserved cost.
 
-The ceiling configuration floor is structural: values at or below the fixed `$0.10` reservation
-buffer are rejected. A value above it may still be refused by the exact request-time reservation,
-whose size depends on the incident and graph stage.
+The ceiling configuration floor is derived from a real rendered request, not the fixed `$0.10`
+buffer alone: `MINIMUM_USABLE_CEILING_USD` is that buffer plus `MINIMUM_POSSIBLE_RESERVATION_USD`,
+the cheapest reservation this project's pricing could ever produce. That figure is no longer
+computed by reconstructing `_send`'s reservation formula in `live_setup.py` -- see the earlier
+"Live-evaluation cost ceiling validation" section for why three rounds of hand-reconstructing it
+each missed a real component -- it is read back from an actual `LiveClaudeModel.respond()` call
+against the smallest real FINAL_ASSESSMENT request, sent through a fake, no-network transport.
+Values at or below it are rejected outright at configuration time; a value above it may still be
+refused by the exact request-time reservation, whose size depends on the incident and graph stage.
 
 **Verified before freezing**: 579 pre-existing tests plus this unit's additions all pass; `ruff
 check`/`ruff format --check` and `mypy --strict` are clean on every touched file; the confinement

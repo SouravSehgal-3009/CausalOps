@@ -1,5 +1,6 @@
 import json
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -14,10 +15,12 @@ from causalops.scenario_control import (
     apply_seed_variant,
     compose,
     reset_scenario,
+    run_paths,
     runs_root,
     start_scenario,
     validated_run_paths,
 )
+from causalops.telemetry import RunPaths
 
 FAMILY = "configuration_change"
 FAMILIES = [
@@ -290,6 +293,118 @@ def test_claim_creation_failure_removes_its_candidate_directory(
 
     assert not active_incident_file(project).exists()
     assert [path for path in runs_root(project).iterdir() if path.is_dir()] == []
+
+
+def _attempt_claim(
+    root: Path,
+    incident_id: str,
+    paths: RunPaths,
+    barrier: threading.Barrier,
+    results: dict[str, object],
+    key: str,
+) -> None:
+    """One thread's side of `test_two_racing_claims_only_one_succeeds`'s
+    race. Takes every dependency as an explicit argument, not a closure over
+    the caller's loop variables -- a per-round closure would rebind on the
+    next iteration before a still-running thread from this one reads it."""
+    barrier.wait()
+    try:
+        with scenario_control._scenario_lock(root):
+            paths.root.mkdir(parents=True, exist_ok=False)
+            scenario_control._claim_scenario(root, incident_id, paths)
+        results[key] = "claimed"
+    except LabError as error:
+        results[key] = error.reason_code
+
+
+def test_two_racing_claims_only_one_succeeds(tmp_path: Path) -> None:
+    """Both reviewers proved by hand, in ad-hoc scripts never committed to the
+    suite, that `_claim_scenario` inside `_scenario_lock` correctly
+    serializes two contenders racing for the same active-scenario slot via
+    SQLite's `BEGIN IMMEDIATE`. This puts that proof in the shipped suite,
+    using real OS threads (not asyncio, not mocked timing) racing to claim
+    two DIFFERENT incidents against the SAME marker -- exactly the shape a
+    real double-launch of `causalops investigate` would take. A single race
+    is not reliable proof of correct serialization, since a lucky thread
+    interleaving can pass even with a real bug present, so this repeats the
+    race across many rounds, each against a fresh root so a round's outcome
+    can never leak into the next."""
+    rounds = 25
+    for round_index in range(rounds):
+        root = tmp_path / f"round-{round_index}"
+        incident_a = f"incident-a-{round_index}"
+        incident_b = f"incident-b-{round_index}"
+        paths_a = run_paths(root, incident_a)
+        paths_b = run_paths(root, incident_b)
+        barrier = threading.Barrier(2)
+        results: dict[str, object] = {}
+
+        thread_a = threading.Thread(
+            target=_attempt_claim,
+            args=(root, incident_a, paths_a, barrier, results, "a"),
+        )
+        thread_b = threading.Thread(
+            target=_attempt_claim,
+            args=(root, incident_b, paths_b, barrier, results, "b"),
+        )
+        thread_a.start()
+        thread_b.start()
+        thread_a.join()
+        thread_b.join()
+
+        claimed = [key for key, outcome in results.items() if outcome == "claimed"]
+        refused = [
+            key
+            for key, outcome in results.items()
+            if outcome == LabReasonCode.SCENARIO_ALREADY_ACTIVE
+        ]
+        assert len(claimed) == 1, f"round {round_index}: {results}"
+        assert len(refused) == 1, f"round {round_index}: {results}"
+
+
+def test_a_stale_nonempty_marker_is_reclaimed_when_its_run_directory_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A marker naming an incident whose run directory no longer exists (the
+    controller crashed, or cleanup already ran) is stale, not active -- the
+    next claim silently recovers it rather than permanently blocking every
+    future scenario start."""
+    marker = active_incident_file(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("an-incident-whose-directory-is-gone", encoding="utf-8")
+
+    incident_id = "a-fresh-incident"
+    paths = run_paths(tmp_path, incident_id)
+    paths.root.mkdir(parents=True)
+
+    with scenario_control._scenario_lock(tmp_path):
+        scenario_control._claim_scenario(tmp_path, incident_id, paths)
+
+    assert marker.read_text(encoding="utf-8") == incident_id
+
+
+def test_an_empty_marker_is_never_reclaimed_even_without_a_directory(
+    tmp_path: Path,
+) -> None:
+    """An empty marker means a claim is in progress (the exclusive create
+    happens before the incident_id is written), so it must never be treated
+    as stale just because there is, as yet, no run directory to check --
+    reclaiming it would let a second claimant race into an already-owned
+    slot."""
+    marker = active_incident_file(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("", encoding="utf-8")
+
+    incident_id = "a-fresh-incident"
+    paths = run_paths(tmp_path, incident_id)
+    paths.root.mkdir(parents=True)
+
+    with pytest.raises(LabError) as refused:
+        with scenario_control._scenario_lock(tmp_path):
+            scenario_control._claim_scenario(tmp_path, incident_id, paths)
+
+    assert refused.value.reason_code is LabReasonCode.SCENARIO_ALREADY_ACTIVE
+    assert marker.read_text(encoding="utf-8") == ""
 
 
 def test_an_unknown_family_is_refused(project: Path) -> None:

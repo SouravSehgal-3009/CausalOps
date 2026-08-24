@@ -60,7 +60,7 @@ import logging
 import math
 import sqlite3
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -232,6 +232,42 @@ class CostLedgerRow(BaseModel):
         return self
 
 
+# The column list every `SELECT` against `cost_ledger` reads, in the exact
+# order `_parse_cost_ledger_row` below expects -- one shared string instead
+# of the same 11 names retyped at each call site, which had drifted into
+# three verbatim copies before this fix.
+_COST_LEDGER_COLUMNS = (
+    "run_id, graph_phase, model_turn, context_digest, state, reserved_usd, "
+    "actual_usd, input_tokens, output_tokens, reserved_at, settled_at"
+)
+
+
+def _parse_cost_ledger_row(raw: tuple[Any, ...]) -> CostLedgerRow:
+    """Turns one `_COST_LEDGER_COLUMNS`-shaped fetched row into a validated
+    `CostLedgerRow`. `_read_row`, `run_cost_totals`, and
+    `_reserved_and_settled_total` each used to repeat this same 11-field
+    mapping as their own verbatim dict literal; this is the one copy.
+
+    Raises `pydantic.ValidationError` on a malformed row rather than
+    catching it -- every caller already wraps its own read in a `try` that
+    converts that into a `CheckpointStoreError` with a message naming its
+    own operation (settlement, ceiling total, per-run total), which this
+    shared helper cannot know."""
+    return CostLedgerRow(
+        run_id=raw[0],
+        graph_phase=raw[1],
+        model_turn=raw[2],
+        context_digest=raw[3],
+        state=raw[4],
+        reserved_usd=raw[5],
+        actual_usd=raw[6],
+        input_tokens=raw[7],
+        output_tokens=raw[8],
+        reserved_at=raw[9],
+        settled_at=raw[10],
+    )
+
+
 def ensure_cost_ledger_table(conn: sqlite3.Connection) -> None:
     """Idempotent, matching `approvals.py`'s `ensure_decisions_table` --
     every call site can call it before every read or write without
@@ -271,9 +307,7 @@ def _read_row(
     context_digest: str,
 ) -> CostLedgerRow | None:
     row = conn.execute(
-        "SELECT run_id, graph_phase, model_turn, context_digest, state, "
-        "reserved_usd, actual_usd, input_tokens, output_tokens, "
-        "reserved_at, settled_at FROM cost_ledger "
+        f"SELECT {_COST_LEDGER_COLUMNS} FROM cost_ledger "
         "WHERE run_id = ? AND graph_phase = ? AND model_turn = ? "
         "AND context_digest = ?",
         (run_id, graph_phase, model_turn, context_digest),
@@ -281,19 +315,7 @@ def _read_row(
     if row is None:
         return None
     try:
-        return CostLedgerRow(
-            run_id=row[0],
-            graph_phase=row[1],
-            model_turn=row[2],
-            context_digest=row[3],
-            state=row[4],
-            reserved_usd=row[5],
-            actual_usd=row[6],
-            input_tokens=row[7],
-            output_tokens=row[8],
-            reserved_at=row[9],
-            settled_at=row[10],
-        )
+        return _parse_cost_ledger_row(row)
     except ValidationError as error:
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.STORE_UNAVAILABLE,
@@ -342,29 +364,10 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
     ensure_cost_ledger_table(conn)
     try:
         rows = conn.execute(
-            "SELECT run_id, graph_phase, model_turn, context_digest, state, "
-            "reserved_usd, actual_usd, input_tokens, output_tokens, reserved_at, "
-            "settled_at FROM cost_ledger WHERE run_id = ?",
+            f"SELECT {_COST_LEDGER_COLUMNS} FROM cost_ledger WHERE run_id = ?",
             (run_id,),
         ).fetchall()
-        parsed = [
-            CostLedgerRow.model_validate(
-                {
-                    "run_id": row[0],
-                    "graph_phase": row[1],
-                    "model_turn": row[2],
-                    "context_digest": row[3],
-                    "state": row[4],
-                    "reserved_usd": row[5],
-                    "actual_usd": row[6],
-                    "input_tokens": row[7],
-                    "output_tokens": row[8],
-                    "reserved_at": row[9],
-                    "settled_at": row[10],
-                }
-            )
-            for row in rows
-        ]
+        parsed = [_parse_cost_ledger_row(row) for row in rows]
     except ValidationError as error:
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.STORE_UNAVAILABLE,
@@ -414,20 +417,28 @@ def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
     from the one needed here -- each row's own `(reserved_usd, actual_usd)`
     pair has to be compared independently, and only then summed.
     """
-    rows = conn.execute(
-        "SELECT run_id, graph_phase, model_turn, context_digest, state, reserved_usd, "
-        "actual_usd, input_tokens, output_tokens, reserved_at, settled_at "
-        "FROM cost_ledger"
-    )
     total = 0.0
-    for raw in rows.fetchall():
-        row = _read_row(conn, raw[0], raw[1], raw[2], raw[3])
-        assert row is not None
-        if row.state == "SETTLED":
-            assert row.actual_usd is not None
-            total += max(row.reserved_usd, row.actual_usd)
-        else:
-            total += row.reserved_usd
+    try:
+        rows = conn.execute(
+            f"SELECT {_COST_LEDGER_COLUMNS} FROM cost_ledger"
+        ).fetchall()
+        for raw in rows:
+            row = _parse_cost_ledger_row(raw)
+            if row.state == "SETTLED":
+                assert row.actual_usd is not None
+                total += max(row.reserved_usd, row.actual_usd)
+            else:
+                total += row.reserved_usd
+    except ValidationError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"cost_ledger contains an invalid row: {error}",
+        ) from error
+    except sqlite3.Error as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"cost_ledger unreadable for ceiling total: {error}",
+        ) from error
     return total
 
 

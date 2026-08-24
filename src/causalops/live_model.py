@@ -33,7 +33,7 @@ still rejected locally and use the graph's normal repair path.
 import json
 import sqlite3
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
@@ -43,18 +43,30 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from causalops.cost_ledger import (
     AmbiguousReservationNotResent,
+    ensure_cost_ledger_table,
     record_reservation_before_request,
     settle_reservation,
 )
 from causalops.domain import (
     SCHEMA_VERSION,
+    Budgets,
     FinalAssessment,
+    GatewaySymptom,
     Hypothesis,
+    IncidentScope,
+    InitialAlertPacket,
     ModelUsage,
     ToolProposal,
     utc_now,
 )
-from causalops.models import ModelRequest, ModelResponse, ProposedTurn, parse_response
+from causalops.evidence import digest_text
+from causalops.models import (
+    ModelRequest,
+    ModelResponse,
+    ProposedTurn,
+    Stage,
+    parse_response,
+)
 from causalops.pricing import (
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
@@ -64,6 +76,7 @@ from causalops.pricing import (
     PricingSnapshot,
     estimate_input_tokens,
 )
+from causalops.prompts import STAGE_INSTRUCTIONS, SYSTEM_TEXT, render_context
 from causalops.tool_calls import NativeToolCall, parse_tool_call, summarize_errors
 from causalops.tools import (
     GetTopologyArguments,
@@ -743,6 +756,145 @@ class LiveClaudeModel:
         return ProposedTurn(
             parsed=parsed, errors=errors, tool_call=(native_call,), usage=usage
         )
+
+
+class MinimumReservationProbeTransport:
+    """A `ChatAnthropic`-shaped stand-in used to size `live_setup.py`'s
+    cost-ceiling floor at import time (`minimum_possible_reservation_usd`
+    below), and reused directly by `tests/unit/test_live_setup.py` to prove
+    that floor genuinely authorizes a real reservation, not just that the
+    arithmetic is self-consistent -- the same test-seam contract
+    `LiveClaudeModel.__init__`'s own `client` parameter already documents
+    for `tests/unit/test_live_model.py`'s fakes (`FakeChatAnthropic`). Never
+    sends anything over the network. The response content is irrelevant:
+    `_send` writes the reservation both call sites read back BEFORE it ever
+    calls `.invoke`, so a bare empty response is enough to let `respond()`
+    run to completion."""
+
+    def bind_tools(
+        self, tools: list[dict[str, Any]], **kwargs: Any
+    ) -> "MinimumReservationProbeTransport":
+        return self
+
+    def invoke(self, messages: Any) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[],
+            invalid_tool_calls=[],
+            usage_metadata={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+
+
+# The `run_id` `build_minimum_final_assessment_request` keys its synthetic
+# minimal request on -- `tests/unit/test_live_setup.py`'s authorization test
+# reads the ledger row back by this same `run_id`, so both use one shared
+# constant rather than each hand-typing the same literal string.
+MINIMUM_RESERVATION_PROBE_RUN_ID = "minimum-reservation-probe"
+
+
+def build_minimum_final_assessment_request() -> ModelRequest:
+    """The smallest real FINAL_ASSESSMENT request `graph.py`'s
+    `_render_stage_request` could ever build: the one INITIAL_PLAN turn
+    every run spends before FINAL_ASSESSMENT can be reached, no evidence
+    gathered, and a synthetic single-service incident standing in for
+    whatever real incident triggered the call. This module cannot import
+    `tests/unit/fake_incident.py`'s own checked-in scenario (application
+    code does not depend on the test suite), so it builds an equivalent
+    minimal incident locally instead -- only the *shape* has to match that
+    fixture (one service, no evidence, one model call already spent), not
+    its literal ID strings. `tests/unit/test_live_model.py`'s
+    `test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_
+    assumes` pins the real fixture's own figure separately, for the same
+    prose this function's own synthetic incident renders.
+
+    Used by `minimum_possible_reservation_usd` below, and directly by
+    `tests/unit/test_live_setup.py`'s authorization test -- both need the
+    exact same minimal request, not two hand-typed near-copies of it.
+    """
+    scope = IncidentScope(
+        incident_id=MINIMUM_RESERVATION_PROBE_RUN_ID,
+        services=("service",),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        endpoint="/",
+    )
+    packet = InitialAlertPacket(
+        incident_id=scope.incident_id,
+        window_start=scope.started_at,
+        window_end=scope.ended_at,
+        endpoint=scope.endpoint,
+        symptom=GatewaySymptom.ELEVATED_LATENCY,
+        services=scope.services,
+        alerted_at=scope.started_at,
+        alert_source_version="probe",
+        symptom_evidence_id="probe-symptom",
+        topology_evidence_id="probe-topology",
+    )
+    budgets = Budgets()
+    model_calls_used = 1  # the INITIAL_PLAN turn every run spends first
+    context = render_context(
+        packet,
+        scope,
+        evidence=(),
+        markers=(),
+        model_calls_left=budgets.model_calls - model_calls_used,
+        checks_left=budgets.executed_tools,
+        passages=(),
+    )
+    context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
+    return ModelRequest(
+        stage=Stage.FINAL_ASSESSMENT,
+        system_text=SYSTEM_TEXT,
+        context_text=context_text,
+        run_id=MINIMUM_RESERVATION_PROBE_RUN_ID,
+        graph_phase="FINAL_ASSESSMENT",
+        model_turn=model_calls_used,
+        context_digest=digest_text(SYSTEM_TEXT + context_text),
+    )
+
+
+def minimum_possible_reservation_usd(
+    pricing: PricingSnapshot = CLAUDE_SONNET_5_PRICING,
+) -> float:
+    """The smallest `reserved_usd` `_send` could ever compute for a real
+    FINAL_ASSESSMENT call.
+
+    `live_setup.py`'s `MINIMUM_USABLE_CEILING_USD` cost-ceiling floor needs
+    this figure, and three earlier versions of that floor each
+    hand-reconstructed `_send`'s reservation formula in `live_setup.py`
+    itself and missed one real component of it -- first the tool schema's
+    own token cost, then `SYSTEM_TEXT`'s. Rather than hand-copy the formula
+    a fourth time, this function calls `LiveClaudeModel.respond()` --
+    `_send`'s real, unmodified reservation code -- against a throwaway
+    in-memory ledger and a fake transport that never touches the network,
+    so this number cannot silently drift from `_send`'s real behaviour
+    again even if that formula changes again later.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        ensure_cost_ledger_table(conn)
+        request = build_minimum_final_assessment_request()
+        # A large sentinel ceiling: this probe exists to measure a
+        # reservation, not to test the ceiling gate, so it must never be
+        # the thing that refuses it.
+        probe = LiveClaudeModel(
+            conn,
+            ceiling_usd=1_000_000.0,
+            pricing=pricing,
+            client=MinimumReservationProbeTransport(),  # type: ignore[arg-type]
+        )
+        probe.respond(request)
+        row = conn.execute(
+            "SELECT reserved_usd FROM cost_ledger WHERE run_id = ?",
+            (request.run_id,),
+        ).fetchone()
+        assert row is not None, (
+            "the probe's own reservation was not written back -- "
+            "record_reservation_before_request is broken, not this probe"
+        )
+        return float(row[0])
+    finally:
+        conn.close()
 
 
 def _finish_plan[StageModel: BaseModel](

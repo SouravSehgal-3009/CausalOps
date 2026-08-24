@@ -6,13 +6,25 @@ cost ceiling through this shared module now, so its tests live here rather
 than under a CLI-specific test module.
 """
 
+import sqlite3
+
 import pytest
 
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
-from causalops.cost_ledger import RESERVATION_CEILING_BUFFER_USD
+from causalops.cost_ledger import (
+    RESERVATION_CEILING_BUFFER_USD,
+    ensure_cost_ledger_table,
+)
+from causalops.live_model import (
+    LiveClaudeModel,
+    MinimumReservationProbeTransport,
+    build_minimum_final_assessment_request,
+)
 from causalops.live_setup import (
     DEFAULT_LIVE_EVALUATION_MAX_USD,
     LIVE_EVALUATION_MAX_USD_VARIABLE,
+    MINIMUM_POSSIBLE_RESERVATION_USD,
+    MINIMUM_USABLE_CEILING_USD,
     live_evaluation_ceiling_usd,
 )
 
@@ -90,24 +102,54 @@ def test_live_evaluation_ceiling_rejects_a_non_finite_value() -> None:
         assert excinfo.value.reason_code == CheckpointStoreReasonCode.CEILING_MALFORMED
 
 
-def test_live_evaluation_ceiling_rejects_only_the_structural_buffer_floor() -> None:
-    """Parsing rejects only the structural buffer boundary. A value above
-    it can still be rejected later by the request-time reservation check."""
-    for raw in ("-1", "0", f"{RESERVATION_CEILING_BUFFER_USD:.2f}"):
+def test_live_evaluation_ceiling_rejects_a_value_at_or_below_the_true_floor() -> None:
+    """The true minimum usable ceiling is not just `RESERVATION_CEILING_
+    BUFFER_USD` ($0.10) -- `cost_ledger.record_reservation_before_request`
+    always subtracts that buffer from `ceiling_usd` before checking
+    remaining budget, but the cheapest possible real reservation is not $0
+    either, it is `MINIMUM_POSSIBLE_RESERVATION_USD` -- derived by actually
+    running the smallest real FINAL_ASSESSMENT request through `_send`'s
+    own reservation code (`live_model.minimum_possible_reservation_usd`),
+    not a hand-reconstructed approximation of one. A ceiling like $0.11 --
+    comfortably above the $0.10 buffer alone -- still leaves only $0.01 of
+    headroom once the buffer is subtracted, far less than even the
+    cheapest possible request, so it must be rejected too. Tests the
+    buffer-only boundary ($0.10, $0.11) plus the corrected boundary
+    (`MINIMUM_USABLE_CEILING_USD` itself, which still leaves zero
+    headroom). Also pins two literal figures earlier, narrower versions of
+    this floor used to wrongly accept: $0.116 (a zero-input floor's
+    threshold) and $0.117 (a tool-schema-only floor's threshold, still
+    missing `SYSTEM_TEXT`'s own token cost) -- both must now be rejected
+    under the real, fully-derived floor."""
+    for raw in (
+        f"{RESERVATION_CEILING_BUFFER_USD:.2f}",
+        "0.11",
+        "0.116",
+        "0.117",
+        # `.6f`, not `.4f`: `MINIMUM_USABLE_CEILING_USD` needs six decimal
+        # places to hit the boundary exactly -- `.4f` could round it UP to
+        # a value strictly above the true floor that the gate would
+        # wrongly accept, defeating this exact-boundary check.
+        f"{MINIMUM_USABLE_CEILING_USD:.6f}",
+    ):
         with pytest.raises(CheckpointStoreError) as excinfo:
             live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: raw})
         assert (
             excinfo.value.reason_code
             == CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER
         )
-        assert "$0.10" in str(excinfo.value)
+        assert f"{MINIMUM_USABLE_CEILING_USD:.6f}" in str(excinfo.value)
 
 
-def test_live_evaluation_ceiling_accepts_values_above_the_buffer() -> None:
-    """Values above the structural floor resolve for request-time checking."""
+def test_live_evaluation_ceiling_still_accepts_a_value_above_the_true_floor() -> None:
+    """Regression coverage for the existing behaviour: a ceiling well above
+    `MINIMUM_USABLE_CEILING_USD` still resolves exactly as before this fix
+    -- both right at the boundary that first becomes valid (a cent above the
+    floor) and the project's own real configured default."""
+    just_above_floor = MINIMUM_USABLE_CEILING_USD + 0.01
     assert live_evaluation_ceiling_usd(
-        {LIVE_EVALUATION_MAX_USD_VARIABLE: "0.101"}
-    ) == pytest.approx(0.101)
+        {LIVE_EVALUATION_MAX_USD_VARIABLE: f"{just_above_floor:.6f}"}
+    ) == pytest.approx(just_above_floor)
     assert (
         live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "5.00"}) == 5.00
     )
@@ -122,3 +164,49 @@ def test_live_evaluation_ceiling_honours_a_well_formed_typo() -> None:
     assert live_evaluation_ceiling_usd({LIVE_EVALUATION_MAX_USD_VARIABLE: "500"}) == (
         500.0
     )
+
+
+def test_accepted_ceiling_actually_authorizes_a_minimal_reservation() -> None:
+    """Config-time acceptance alone does not prove the ceiling is genuinely
+    usable -- a ceiling could pass `live_evaluation_ceiling_usd` and still
+    refuse every real request.
+
+    An earlier version of this test only proved internal arithmetic
+    consistency: it hand-fed `reserved_usd=MINIMUM_POSSIBLE_RESERVATION_USD`
+    directly into `cost_ledger.record_reservation_before_request`, which
+    cannot catch `MINIMUM_POSSIBLE_RESERVATION_USD` itself being wrong --
+    exactly the failure mode that let this floor stay too low across three
+    earlier rounds. This version closes that gap for real: it builds the
+    same minimal FINAL_ASSESSMENT request `live_model.
+    minimum_possible_reservation_usd` used to derive the floor
+    (`live_model.build_minimum_final_assessment_request`), and sends it
+    through a REAL `LiveClaudeModel.respond()` call -- `_send`'s actual
+    reservation code, not a copy of it -- against a fake, no-network
+    transport, under a ceiling accepted right at the boundary. If
+    `MINIMUM_POSSIBLE_RESERVATION_USD` were ever wrong again, this is the
+    test that would fail: `respond()` would raise `CostCeilingExceeded`
+    instead of returning."""
+    ceiling = MINIMUM_USABLE_CEILING_USD + 0.001
+    accepted = live_evaluation_ceiling_usd(
+        {LIVE_EVALUATION_MAX_USD_VARIABLE: f"{ceiling:.6f}"}
+    )
+    assert accepted == pytest.approx(ceiling)
+
+    conn = sqlite3.connect(":memory:")
+    ensure_cost_ledger_table(conn)
+    request = build_minimum_final_assessment_request()
+    model = LiveClaudeModel(
+        conn,
+        ceiling_usd=accepted,
+        client=MinimumReservationProbeTransport(),  # type: ignore[arg-type]
+    )
+
+    model.respond(request)  # must not raise CostCeilingExceeded
+
+    row = conn.execute(
+        "SELECT reserved_usd, state FROM cost_ledger WHERE run_id = ?",
+        (request.run_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(MINIMUM_POSSIBLE_RESERVATION_USD)
+    assert row[1] == "SETTLED"

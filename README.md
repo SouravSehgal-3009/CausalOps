@@ -15,11 +15,13 @@ policy, budgets, run records, and scoring. Milestones 1 and 2 are complete:
 end through the LangGraph `StateGraph` orchestrator, including the
 escalation interrupt and owner approval/rejection — see
 `TECHNICAL_OVERVIEW.md` Part III for what it currently supports. Milestone 3
-provides FTS5 runbook retrieval, the live Claude adapter (`--model claude`),
-and paired evaluation (`causalops-evaluate`) under the shared cost cap. Live
-evaluation requires `ANTHROPIC_API_KEY`, persists each completed record, and
-stops further paid requests only after an infrastructure failure;
-model-quality failures remain scored results.
+is in progress: FTS5 runbook retrieval and the live Claude adapter
+(`--model claude`) have landed. Only the paired evaluation remains:
+`causalops-evaluate` requires `ANTHROPIC_API_KEY`, persists each completed
+record, and is designed to stop further paid requests only after an
+infrastructure failure, leaving model-quality failures as scored results.
+It has landed on a branch, not yet merged to `master` or run for real
+against a live model.
 
 ## Check this machine
 
