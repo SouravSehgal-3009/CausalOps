@@ -14,6 +14,7 @@ import pytest
 
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
+    RESERVATION_CEILING_BUFFER_USD,
     AmbiguousReservationNotResent,
     CostCeilingExceeded,
     CostLedgerRow,
@@ -139,8 +140,15 @@ def test_a_different_key_reserves_a_second_row(conn: sqlite3.Connection) -> None
 
 
 def test_a_reservation_over_the_ceiling_is_refused(conn: sqlite3.Connection) -> None:
+    # `ceiling_usd` carries `RESERVATION_CEILING_BUFFER_USD` on top of the
+    # 2.00 this test is actually about, so the buffered remaining this
+    # assertion checks reproduces the pre-buffer arithmetic exactly --
+    # `test_a_reservation_within_the_raw_ceiling_but_inside_the_buffer_is_
+    # refused` below is the test that exercises the buffer itself.
     with pytest.raises(CostCeilingExceeded) as excinfo:
-        _reserve(conn, reserved_usd=3.00, ceiling_usd=2.00)
+        _reserve(
+            conn, reserved_usd=3.00, ceiling_usd=2.00 + RESERVATION_CEILING_BUFFER_USD
+        )
 
     assert excinfo.value.reservation_usd == pytest.approx(3.00)
     assert excinfo.value.remaining_usd == pytest.approx(2.00)
@@ -164,10 +172,13 @@ def test_the_ceiling_accounts_for_earlier_reservations_in_the_same_run(
     """Each individual reservation is well under the ceiling, but their sum
     is not -- the gate must refuse the second one, not just check each
     request in isolation."""
-    _reserve(conn, model_turn=0, reserved_usd=1.50, ceiling_usd=2.00)
+    # `ceiling_usd` carries the buffer on top of the 2.00 this test is
+    # actually about -- see the comment on the boundary test above.
+    ceiling_usd = 2.00 + RESERVATION_CEILING_BUFFER_USD
+    _reserve(conn, model_turn=0, reserved_usd=1.50, ceiling_usd=ceiling_usd)
 
     with pytest.raises(CostCeilingExceeded) as excinfo:
-        _reserve(conn, model_turn=1, reserved_usd=1.50, ceiling_usd=2.00)
+        _reserve(conn, model_turn=1, reserved_usd=1.50, ceiling_usd=ceiling_usd)
 
     assert excinfo.value.remaining_usd == pytest.approx(0.50)
 
@@ -180,11 +191,14 @@ def test_an_unsettled_reservation_still_counts_against_the_ceiling(
     accounting.' A `RESERVED` row that never settles must still spend its
     share of the ceiling on the next request -- otherwise a crash loop could
     spend past the cap one silently-forgotten reservation at a time."""
-    _reserve(conn, model_turn=0, reserved_usd=2.00, ceiling_usd=2.00)
+    # `ceiling_usd` carries the buffer on top of the 2.00 this test is
+    # actually about -- see the comment on the boundary test above.
+    ceiling_usd = 2.00 + RESERVATION_CEILING_BUFFER_USD
+    _reserve(conn, model_turn=0, reserved_usd=2.00, ceiling_usd=ceiling_usd)
     # Never settled -- simulates a crash between reserving and settling.
 
     with pytest.raises(CostCeilingExceeded) as excinfo:
-        _reserve(conn, model_turn=1, reserved_usd=0.01, ceiling_usd=2.00)
+        _reserve(conn, model_turn=1, reserved_usd=0.01, ceiling_usd=ceiling_usd)
 
     assert excinfo.value.remaining_usd == pytest.approx(0.0)
 
@@ -476,8 +490,16 @@ def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(
     wrongly approved, letting real spend reach $0.04 against a stated
     "hard" $0.02 limit. After the fix, the settled row counts at its true
     $0.03, so even a tiny further reservation against the same ceiling is
-    correctly refused."""
-    _reserve(conn, run_id="run-1", reserved_usd=0.01, ceiling_usd=0.02)
+    correctly refused.
+
+    `ceiling_usd` carries `RESERVATION_CEILING_BUFFER_USD` on top of the
+    0.02 this scenario is actually about, reproducing the exact Codex
+    report's own arithmetic unchanged -- `RESERVATION_CEILING_BUFFER_USD`
+    exceeds 0.02 outright, so without this the very first reservation below
+    would be refused for the wrong reason before this test ever reaches the
+    overrun it exists to cover."""
+    ceiling_usd = 0.02 + RESERVATION_CEILING_BUFFER_USD
+    _reserve(conn, run_id="run-1", reserved_usd=0.01, ceiling_usd=ceiling_usd)
     settle_reservation(
         conn,
         run_id="run-1",
@@ -497,10 +519,29 @@ def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(
             model_turn=0,
             context_digest="digest-2",
             reserved_usd=0.001,
-            ceiling_usd=0.02,
+            ceiling_usd=ceiling_usd,
         )
 
     assert excinfo.value.remaining_usd == pytest.approx(0.0)
+
+
+def test_a_reservation_within_the_raw_ceiling_but_inside_the_buffer_is_refused(
+    conn: sqlite3.Connection,
+) -> None:
+    """The margin itself. Ceiling 1.00, 0.85 already spent (itself under the
+    buffered remaining of 0.90, so it is authorized normally), then 0.10
+    more requested: 0.85 + 0.10 = 0.95 fits under the raw `ceiling_usd` of
+    1.00 -- before this fix, `record_reservation_before_request` would have
+    authorized it. It does not fit under `1.00 - RESERVATION_CEILING_
+    BUFFER_USD` (0.90 remaining after the first reservation leaves 0.05), so
+    it must now be refused instead."""
+    ceiling_usd = 1.00
+    _reserve(conn, model_turn=0, reserved_usd=0.85, ceiling_usd=ceiling_usd)
+
+    with pytest.raises(CostCeilingExceeded) as excinfo:
+        _reserve(conn, model_turn=1, reserved_usd=0.10, ceiling_usd=ceiling_usd)
+
+    assert excinfo.value.remaining_usd == pytest.approx(0.05)
 
 
 def test_run_cost_totals_reports_partial_settlement_as_not_fully_settled(

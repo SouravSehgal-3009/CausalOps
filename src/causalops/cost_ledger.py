@@ -45,6 +45,15 @@ a settled row is counted at its true cost from that point forward -- the
 overrun cannot silently repeat -- but nothing can retroactively un-authorize
 the request that already caused it, since refusing a request needs to happen
 before its real cost exists to check against.
+
+**`RESERVATION_CEILING_BUFFER_USD` narrows that gap; it does not close it.**
+`record_reservation_before_request` stops authorizing new reservations a
+fixed dollar amount short of the configured ceiling, not at the ceiling
+itself, so the one request that overruns its own reservation has less room
+to push real spend past the configured figure before the next check catches
+up. This is defense-in-depth on top of the honest limit already described
+above -- it is still not a mathematical guarantee, since a single request's
+overrun is still only knowable after that request has already settled.
 """
 
 import logging
@@ -71,6 +80,36 @@ from causalops.tools import UtcDatetime
 # defaults to at most one "no handlers found" notice on stderr the first
 # time a logger with no handlers is used, never a raised exception.
 _LOGGER = logging.getLogger(__name__)
+
+# A fixed dollar margin `record_reservation_before_request` reserves below
+# `ceiling_usd` before authorizing a new reservation -- see this module's
+# own "RESERVATION_CEILING_BUFFER_USD narrows that gap" paragraph above for
+# what it does and does not guarantee. Lives here, not beside
+# `DEFAULT_LIVE_EVALUATION_MAX_USD` in `live_setup.py`, because it is
+# consumed only inside this module's own ceiling check; `live_setup.py` and
+# `.env.example` still document its existence for an owner reading the
+# ceiling's own configuration story end to end.
+#
+# Sized from this project's own real live-call evidence, not picked to make
+# the arithmetic merely balance:
+#   - The only documented reservation-vs-actual gap on one real settled
+#     request -- $0.024198 actual against a $0.022168 reservation, the
+#     Unit 3b-3 smoke call's INITIAL_PLAN turn recomputed at full output
+#     saturation, under the input ratio since tightened by that same
+#     finding (`TECHNICAL_OVERVIEW.md`, "The smoke call's findings") -- was
+#     about $0.002.
+#   - The largest full live run recorded to date, across every model call
+#     it made, totalled $0.059998 (`LIVE_MODEL_RELIABILITY_FINDINGS.md`,
+#     call 1: `configuration_change`, 4 settled reservations).
+#   - The largest theoretical SINGLE-request reservation under the current
+#     pricing snapshot and token caps -- a proposal turn carrying the full
+#     9,600-token prose budget plus the current 12,011-token tool-schema
+#     payload, at the full 1,600-token output allowance -- prices to about
+#     $0.0592 by `pricing.PricingSnapshot.reservation_usd`'s own formula.
+# $0.10 comfortably clears all three: roughly 50x the one measured overrun,
+# and still leaves headroom over even the largest theoretical single-request
+# reservation this application can currently construct.
+RESERVATION_CEILING_BUFFER_USD = 0.10
 
 
 class CostCeilingExceeded(Exception):
@@ -328,6 +367,11 @@ def record_reservation_before_request(
     ceiling, or refuse before anything is sent. Returns `(row, is_new)`:
     `is_new` is `True` only when this call is the one that inserted `row`.
 
+    Authorizes a new reservation only while `accounted_spend + reserved_usd
+    <= ceiling_usd - RESERVATION_CEILING_BUFFER_USD`, not up to `ceiling_usd`
+    itself -- see this module's own docstring and that constant's for what
+    the reserved margin narrows and why it cannot close the gap outright.
+
     Idempotent on the amended §5 key at the LEDGER level: an identical
     retry (the same stage re-rendered byte-for-byte after a crash between
     reserving and settling) reads the existing row back rather than
@@ -372,7 +416,7 @@ def record_reservation_before_request(
             conn.commit()
             return existing, False
         spent = _reserved_and_settled_total(conn)
-        remaining = ceiling_usd - spent
+        remaining = ceiling_usd - RESERVATION_CEILING_BUFFER_USD - spent
         if reserved_usd > remaining:
             conn.rollback()
             raise CostCeilingExceeded(reserved_usd, max(remaining, 0.0))

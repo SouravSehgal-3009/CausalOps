@@ -430,6 +430,23 @@ dominates every reservation; ~1.54x for the smoke call's own turn shape).
 headroom this ceiling was always meant to leave, re-derived against the
 larger reservation rather than picked to make the new math comfortable.
 
+*Amendment (paired-live-evaluation branch):* the authorization check now
+stops a fixed `RESERVATION_CEILING_BUFFER_USD = 0.10` short of
+`LIVE_EVALUATION_MAX_USD`, not at it (`cost_ledger.py`'s
+`record_reservation_before_request`) -- a reservation is refused once
+`accounted_spend + reserved_usd` would exceed `LIVE_EVALUATION_MAX_USD -
+RESERVATION_CEILING_BUFFER_USD`. This is defense-in-depth on top of the
+transient-overrun gap described above, sized from this project's own
+observed live-call costs (the largest measured single-request
+reservation-vs-actual gap was about $0.002; the largest full live run to
+date totalled $0.059998 across four settled calls; the largest theoretical
+single-request reservation this application can currently construct is
+about $0.0592) -- see `cost_ledger.py`'s own comment on the constant for
+the full derivation. It narrows the window in which one request's overrun
+can push real spend past the configured ceiling; it does not close that
+window, for the same reason given above: a request cannot be refused for a
+cost that does not exist yet at the moment it is authorized.
+
 Mechanical scores remain:
 
 - diagnosis and disposition correctness against evaluator-only labels;
