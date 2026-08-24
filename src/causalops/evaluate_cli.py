@@ -34,6 +34,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from causalops.approvals import CheckpointStoreError
 from causalops.cost_ledger import run_cost_totals
 from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import (
@@ -624,7 +625,19 @@ def main(argv: list[str] | None = None) -> int:
     records_path = target / "records.jsonl"
     try:
         records = run_evaluation(root, target)
-    except (LabError, RunRecordError) as refusal:
+    except (LabError, RunRecordError, CheckpointStoreError) as refusal:
+        # `CheckpointStoreError` reaches here from `live_setup.
+        # live_evaluation_ceiling_usd` (called both directly by
+        # `run_evaluation` and indirectly through `build_model_and_registry`
+        # in `_run_one`) whenever `LIVE_EVALUATION_MAX_USD` is configured but
+        # unusable -- malformed, non-finite, or too small to ever authorize
+        # a reservation. Without this in the typed tuple, that refusal fell
+        # through to the generic `except Exception` below and reported the
+        # opaque `FAIL INTERNAL_ERROR` instead of its own stable reason
+        # code, contradicting `.env.example`'s documented `FAIL
+        # CEILING_BELOW_RESERVATION_BUFFER`/`FAIL CEILING_MALFORMED` output.
+        # `cli.py`'s `main` already catches this type alongside the same two
+        # exceptions for its own `investigate`/`approve`/`reject` commands.
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         print(f"records so far: {records_path}")
         return 1

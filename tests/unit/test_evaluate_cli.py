@@ -1080,6 +1080,37 @@ def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> N
         summarize_paired_evaluation([record])
 
 
+def test_main_reports_the_ceiling_reason_code_not_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 6 review, Item 1: `live_setup.live_evaluation_ceiling_usd`
+    raises `CheckpointStoreError(CEILING_BELOW_RESERVATION_BUFFER, ...)` for
+    a too-small `LIVE_EVALUATION_MAX_USD` -- `.env.example` documents that
+    exact `FAIL CEILING_BELOW_RESERVATION_BUFFER` output. Before this fix,
+    `main()`'s typed refusal handler only caught `(LabError, RunRecordError)`,
+    so `CheckpointStoreError` fell through to the generic `except Exception`
+    and reported the opaque `FAIL INTERNAL_ERROR` instead, contradicting
+    that documented contract. `_git_provenance` is faked, the same seam
+    every other `main()` test in this file uses, so this fails at the
+    ceiling check itself rather than needing a real git repo -- the ceiling
+    is read before `start_scenario` is ever called, so no scenario-controller
+    fake is needed either."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LIVE_EVALUATION_MAX_USD", "0.05")
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    exit_code = main([])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "FAIL CEILING_BELOW_RESERVATION_BUFFER" in out
+    assert "FAIL INTERNAL_ERROR" not in out
+    assert "records so far:" in out
+
+
 def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

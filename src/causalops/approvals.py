@@ -54,12 +54,20 @@ class CheckpointStoreReasonCode(StrEnum):
     `INVALID_REJECTION_NOTE` are reachable only through `causalops
     approve`/`reject`; `RESERVATION_NOT_SETTLEABLE` identifies an invalid
     cost-ledger lifecycle transition; `CEILING_BELOW_RESERVATION_BUFFER`
-    identifies a `LIVE_EVALUATION_MAX_USD` configured at or below
-    `cost_ledger.RESERVATION_CEILING_BUFFER_USD`, refused at config-resolution
-    time (`live_setup.live_evaluation_ceiling_usd`) because such a ceiling
-    can never authorize even a single reservation; `STORE_UNAVAILABLE` is
-    also raised by `cli._sqlite_checkpointer`, reachable from a plain
-    `causalops investigate` too, since both open the same file.
+    identifies a `LIVE_EVALUATION_MAX_USD` that is a well-formed, finite,
+    positive number but still at or below the minimum a live request could
+    ever clear -- `cost_ledger.RESERVATION_CEILING_BUFFER_USD` plus the
+    cheapest possible real reservation, both named in `live_setup.
+    MINIMUM_USABLE_CEILING_USD`'s own comment -- refused at config-resolution
+    time (`live_setup.live_evaluation_ceiling_usd`) because no reservation,
+    however small, could ever be authorized under it; `CEILING_MALFORMED`
+    identifies a `LIVE_EVALUATION_MAX_USD` that is not even a well-formed
+    number in the first place -- unparseable text, or a parseable but
+    non-finite value (`inf`, `-inf`, `nan`) -- a different failure shape
+    from "a real number that is simply too small," raised by the same
+    function; `STORE_UNAVAILABLE` is also raised by `cli._sqlite_
+    checkpointer`, reachable from a plain `causalops investigate` too, since
+    both open the same file.
     """
 
     THREAD_NOT_FOUND = "THREAD_NOT_FOUND"
@@ -68,6 +76,7 @@ class CheckpointStoreReasonCode(StrEnum):
     INVALID_REJECTION_NOTE = "INVALID_REJECTION_NOTE"
     RESERVATION_NOT_SETTLEABLE = "RESERVATION_NOT_SETTLEABLE"
     CEILING_BELOW_RESERVATION_BUFFER = "CEILING_BELOW_RESERVATION_BUFFER"
+    CEILING_MALFORMED = "CEILING_MALFORMED"
     STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
 
 

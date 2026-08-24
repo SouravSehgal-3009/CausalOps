@@ -31,6 +31,7 @@ from causalops.models import (
     ReplayToolCallingModel,
     ToolCallingModel,
 )
+from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
@@ -50,83 +51,133 @@ REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
 # Unit 3b-2. `.env.example`-documented, application-wide, covering standalone
-# and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). This falls
-# back to the default, rather than raising, for exactly three shapes: unset
-# or blank, unparseable (`float()` raises), and non-positive or non-finite
-# (`<= 0`, `inf`, `-inf`, or `nan` -- `math.isfinite` catches the two
-# infinities `> 0` alone would let through, since `inf > 0` is `True` and an
-# infinite ceiling is not a ceiling at all; `nan` already fails every
-# comparison, including `> 0`, so it was already covered, but P3-4's fix
-# pins that explicitly rather than leaving it to a comparison's incidental
-# behaviour a future refactor could change without noticing). Each of those
-# three is the *smallest* plausible ceiling to fall back to, so silently
-# defaulting on them can only make the gate stricter than the value
-# suggested, never more permissive. What this fallback does *not* catch: a
-# well-formed positive number that is simply the wrong one -- `500` typed
-# for `5.00` parses cleanly and is honoured as written, the same as any
-# other config value. Guarding against a fat-fingered magnitude is the
-# owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
-# intent. Unit 3b-3: raised from 2.00 to 5.00, re-derived from the smoke
-# call's measured per-call reservation size after the ratio replan; the
-# calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md` §10
-# carries the same amendment. Unit 3c: extracted here from `cli.py`, still
-# the one ceiling both `causalops` and `causalops-evaluate` read.
+# and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). Only an
+# ABSENT or BLANK `LIVE_EVALUATION_MAX_USD` silently falls back to the
+# default below -- an owner who never set the variable, or set it to
+# whitespace, gets the documented default rather than a startup failure.
+# Unit 3b-3: that default was raised from 2.00 to 5.00, re-derived from the
+# smoke call's measured per-call reservation size after the ratio replan;
+# the calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md`
+# §10 carries the same amendment. Unit 3c: extracted here from `cli.py`,
+# still the one ceiling both `causalops` and `causalops-evaluate` read.
 #
-# One further case is deliberately NOT a silent fallback: a well-formed
-# positive finite value at or below `cost_ledger.RESERVATION_CEILING_
-# BUFFER_USD` ($0.10) parses cleanly, unlike the three shapes above, but
-# defaulting it the same way would silently authorize spend up to
-# `DEFAULT_LIVE_EVALUATION_MAX_USD` when the owner configured a specific,
-# deliberately smaller cap -- a more permissive, more dangerous surprise
-# than the other three cases, not a stricter one. `live_evaluation_ceiling_
-# usd` raises `CheckpointStoreError` for that case instead of returning a
-# float; see that function's own docstring.
+# Round 6 review (Codex, three findings) corrected an earlier posture that
+# had this fallback cover a much wider set of shapes: unparseable text,
+# non-finite values (`inf`/`-inf`/`nan`), and non-positive values (`<= 0`)
+# used to default silently too, alongside unset/blank -- on the reasoning
+# that each was "the smallest plausible ceiling," so defaulting on them
+# could only make the gate stricter, never more permissive. That reasoning
+# does not actually hold: `DEFAULT_LIVE_EVALUATION_MAX_USD` ($5.00) is far
+# LARGER than $0, so silently defaulting a `0`, a negative number, or a
+# typo like `"0.05USD"` actually authorizes far MORE spend than the owner's
+# malformed input suggested they wanted -- exactly the more-permissive,
+# more-dangerous surprise this module's own reasoning about the too-small
+# case (immediately below) already correctly refuses to allow. This module
+# now applies that same "fail loudly rather than silently authorize more"
+# posture consistently: every one of those shapes raises `CheckpointStoreError`
+# now, the same as the too-small case always did. Only unset/blank still
+# defaults, because there both the "value the owner typed" and "value the
+# owner is implicitly asking for" are the same thing -- nothing was typed,
+# so there is no wrong signal to silently override.
+#
+# A well-formed, finite, positive value can still be unusable: `cost_ledger.
+# record_reservation_before_request` always subtracts `cost_ledger.
+# RESERVATION_CEILING_BUFFER_USD` ($0.10) from `ceiling_usd` before checking
+# remaining budget, so any value at or below that buffer leaves `remaining`
+# permanently negative and refuses every single reservation. But the buffer
+# alone is not the true floor either: the cheapest real reservation this
+# project's pricing could ever produce is not $0 -- it is the fixed output
+# allowance alone, with zero input tokens, `pricing.CLAUDE_SONNET_5_PRICING.
+# reservation_usd(input_tokens=0)`, currently $0.016 (`pricing.
+# MAX_OUTPUT_TOKENS` tokens at the output rate; no real request could ever
+# reserve less, since every request reserves at least its full output
+# allowance regardless of how little input it sends). A ceiling of $0.11 --
+# above the $0.10 buffer, so an earlier version of this check accepted it --
+# still leaves only $0.01 of headroom once the buffer is subtracted, less
+# than the $0.016 floor, so even the cheapest possible request would still
+# be refused. `MINIMUM_USABLE_CEILING_USD` below is the buffer plus that
+# floor; a configured value at or below it can never authorize even one
+# reservation and is refused the same way the too-small case always was.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
+# The cheapest real reservation `pricing.py`'s math could ever produce:
+# every request reserves its full output allowance up front regardless of
+# how little input it sends, so `input_tokens=0` is the genuine theoretical
+# floor, not an approximation of one.
+MINIMUM_POSSIBLE_RESERVATION_USD = CLAUDE_SONNET_5_PRICING.reservation_usd(
+    input_tokens=0
+)
+MINIMUM_USABLE_CEILING_USD = (
+    RESERVATION_CEILING_BUFFER_USD + MINIMUM_POSSIBLE_RESERVATION_USD
+)
+
 
 def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
-    """Resolves `LIVE_EVALUATION_MAX_USD`, falling back to the default for
-    every malformed *shape* described in this module's own comment above --
-    but a well-formed positive finite value at or below `cost_ledger.
-    RESERVATION_CEILING_BUFFER_USD` is a different problem, not covered by
-    that fallback: `cost_ledger.record_reservation_before_request` always
-    subtracts the buffer from `ceiling_usd` before checking remaining
-    budget, so a configured ceiling that small leaves `remaining`
-    permanently negative and refuses every single reservation, with nothing
-    in `CostCeilingExceeded`'s own message naming the ceiling as the actual
-    cause. Falling back to the default here would be worse than raising --
-    it would silently authorize spend up to `DEFAULT_LIVE_EVALUATION_MAX_USD`
-    when the owner configured a specific, deliberately smaller cap (a cheap
-    smoke-test budget, for instance), which is a bigger, more dangerous
-    surprise than a config that fails fast and says exactly why. Raised as
-    `CheckpointStoreError` -- the same reusable `FAIL <CODE> <message>`
-    shape `cost_ledger.py` already reuses this type for
-    (`RESERVATION_NOT_SETTLEABLE`) -- so both `causalops.cli`'s `main` and
-    `causalops.evaluate_cli`'s `main` report this cleanly with no code
-    changes needed at either call site: `cli.py` already catches
-    `CheckpointStoreError` explicitly, and `evaluate_cli.py`'s catch-all
-    `except Exception` already turns any other raised exception into a
-    clean `FAIL INTERNAL_ERROR` rather than a raw traceback.
+    """Resolves `LIVE_EVALUATION_MAX_USD`. Only unset or blank falls back to
+    `DEFAULT_LIVE_EVALUATION_MAX_USD` -- see this module's own comment above
+    for why every other malformed or unusable shape now raises instead of
+    silently defaulting to a MORE permissive value than what was configured.
+
+    Three distinct failure shapes, in the order checked:
+
+    1. Unparseable text (`float()` raises), or a parseable but non-finite
+       value (`inf`, `-inf`, `nan`) -- not a well-formed number at all.
+       Raised as `CEILING_MALFORMED`.
+    2. A well-formed, finite, positive number at or below
+       `MINIMUM_USABLE_CEILING_USD` -- no reservation, however small, could
+       ever be authorized under it (`cost_ledger.
+       record_reservation_before_request` always subtracts `cost_ledger.
+       RESERVATION_CEILING_BUFFER_USD` before checking remaining budget, and
+       the cheapest possible real reservation is `MINIMUM_POSSIBLE_
+       RESERVATION_USD`). This also covers zero and negative values, which
+       are trivially below a positive floor. Raised as
+       `CEILING_BELOW_RESERVATION_BUFFER`.
+    3. Anything else is a usable ceiling and is returned as-is -- including
+       a well-formed positive number that is simply the wrong one (`500`
+       typed for `5.00` parses cleanly and is honoured as written). Guarding
+       against a fat-fingered magnitude that is still comfortably above the
+       floor is the owner's job, not a parser's.
+
+    Both raised cases use `CheckpointStoreError` -- the same reusable
+    `FAIL <CODE> <message>` shape `cost_ledger.py` already reuses this type
+    for (`RESERVATION_NOT_SETTLEABLE`) -- so both `causalops.cli`'s `main`
+    and `causalops.evaluate_cli`'s `main` report this cleanly: both catch
+    `CheckpointStoreError` explicitly in their typed refusal handlers.
     """
     raw = environment.get(LIVE_EVALUATION_MAX_USD_VARIABLE, "").strip()
     if not raw:
         return DEFAULT_LIVE_EVALUATION_MAX_USD
     try:
         value = float(raw)
-    except ValueError:
-        return DEFAULT_LIVE_EVALUATION_MAX_USD
-    if not (math.isfinite(value) and value > 0):
-        return DEFAULT_LIVE_EVALUATION_MAX_USD
-    if value <= RESERVATION_CEILING_BUFFER_USD:
+    except ValueError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.CEILING_MALFORMED,
+            f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={raw!r} is not a number "
+            f"({error}). Set it to a plain positive figure such as 5.00, "
+            "or leave it unset to use the default "
+            f"(${DEFAULT_LIVE_EVALUATION_MAX_USD:.2f}, see .env.example).",
+        ) from error
+    if not math.isfinite(value):
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.CEILING_MALFORMED,
+            f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={raw!r} is not a finite "
+            "number -- infinite and NaN ceilings are not a real spending "
+            "limit. Set it to a plain positive figure such as 5.00 (see "
+            ".env.example).",
+        )
+    if value <= MINIMUM_USABLE_CEILING_USD:
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER,
             f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={value:.4f} is at or below "
-            f"the ${RESERVATION_CEILING_BUFFER_USD:.2f} reservation safety "
-            "buffer every live request is checked against -- no reservation "
-            "could ever be authorized at this ceiling. Set "
-            f"{LIVE_EVALUATION_MAX_USD_VARIABLE} comfortably above "
-            f"${RESERVATION_CEILING_BUFFER_USD:.2f} (see .env.example).",
+            f"${MINIMUM_USABLE_CEILING_USD:.4f} -- the "
+            f"${RESERVATION_CEILING_BUFFER_USD:.2f} reservation safety "
+            f"buffer every live request is checked against, plus "
+            f"${MINIMUM_POSSIBLE_RESERVATION_USD:.4f}, the cheapest real "
+            "reservation this project's pricing could ever produce -- so no "
+            "reservation, however small, could ever be authorized at this "
+            f"ceiling. Set {LIVE_EVALUATION_MAX_USD_VARIABLE} comfortably "
+            f"above ${MINIMUM_USABLE_CEILING_USD:.4f} (see .env.example).",
         )
     return value
 

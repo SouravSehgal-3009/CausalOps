@@ -540,9 +540,12 @@ class LiveClaudeModel:
         # `MAX_INPUT_TOKENS`'s cap above deliberately stays prose-only --
         # see `InputTooLarge`'s docstring for why folding tools into the
         # cap is the wrong fix -- but a dollar reservation that omits real,
-        # billed tokens is not conservative, and `TECHNICAL_OVERVIEW.md`
-        # promises the owner `actual_usd <= reserved_usd` on every settled
-        # row.
+        # billed tokens is not conservative: counting the tool schema here
+        # is what keeps `actual_usd <= reserved_usd` the ORDINARY case
+        # (`TECHNICAL_OVERVIEW.md`'s own corrected wording -- not a
+        # code-enforced invariant; `cost_ledger.settle_reservation` still
+        # commits and logs a real overrun rather than refusing it, since the
+        # money is already spent by the time settlement runs).
         tool_definition_tokens = estimate_input_tokens(json.dumps(tools))
         reserved_usd = self._pricing.reservation_usd(
             estimated_input_tokens + tool_definition_tokens
