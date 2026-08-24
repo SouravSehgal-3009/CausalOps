@@ -113,10 +113,11 @@ def test_a_missing_corpus_file_fails_loudly_at_construction() -> None:
 
 
 def test_the_checked_in_corpus_version_is_read_and_stringified() -> None:
-    """Unit 3c. `runbook_corpus.json`'s own `corpus_version` key is `1`, an
-    int -- stringified to match every other "_version" field in this
-    codebase (`SCHEMA_VERSION`, `prompt_version`, ...), all of which are
-    strings regardless of how small the underlying number is."""
+    """Unit 3c. `runbook_corpus.json`'s own `corpus_version` key is `"1"`, a
+    string -- passed through `str()` (a no-op here) to match every other
+    "_version" field in this codebase (`SCHEMA_VERSION`, `prompt_version`,
+    ...), all of which are strings regardless of how small the underlying
+    number is."""
     index = RunbookIndex()
 
     assert index.corpus_version == "1"

@@ -83,9 +83,10 @@ class RunbookIndex:
 
     def __init__(self, corpus_path: Path = CORPUS_PATH) -> None:
         loaded = json.loads(corpus_path.read_text(encoding="utf-8"))
-        # Unit 3c. `corpus_version` is the JSON's own top-level key -- an
-        # int in `runbook_corpus.json` today (`1`), stringified here to
-        # match every other "_version" field in this codebase
+        # Unit 3c. `corpus_version` is the JSON's own top-level key -- a
+        # string in `runbook_corpus.json` today (`"1"`), passed through
+        # `str()` here (a no-op on an already-string value) to match every
+        # other "_version" field in this codebase
         # (`SCHEMA_VERSION`, `SCORER_VERSION`, `prompt_version`, ...), all
         # of which are strings regardless of how small the underlying
         # number is. `TECHNICAL_SPEC.md` §10's reproducibility manifest is

@@ -3164,7 +3164,7 @@ can still see tool schemas but has its proposals denied for budget exhaustion is
 it is "tools that always fail," a different and noisier comparison. `_make_final_assessment`
 already tolerated empty receipts/evidence/passages at `model_turn=0` on every pre-existing call
 path, so no node factory needed to change, only which edges `build_graph` wires. A topology test
-(`test_a_no_tool_baseline_never_offers_a_domain_tool_and_skips_straight_to_assessment`) proves
+(`test_a_no_tool_baseline_never_offers_a_domain_tool`) proves
 this directly by asserting `ReplayToolCallingModel.requests` contains exactly one
 `Stage.FINAL_ASSESSMENT` request and nothing else, reusing `valid_diagnosis.json`'s
 `initial_plan`/`hypothesis_update` entries unmodified specifically so a regression that started

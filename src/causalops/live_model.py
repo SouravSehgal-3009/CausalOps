@@ -3,7 +3,7 @@
 Implements the exact `propose`/`respond` shape `models.py`'s `ToolCallingModel`
 protocol names -- the same shape `ReplayToolCallingModel` implements --
 so `graph.py` cannot tell which one it is bound to. Built once per
-investigation by `cli.py`'s `_build_model_and_registry`, the same way
+investigation by `live_setup.build_model_and_registry`, the same way
 `ReplayToolCallingModel` is today.
 
 Tool schemas for the five registered checks are derived from `tools.py`'s
@@ -461,7 +461,7 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
 
 class LiveClaudeModel:
     """The live Claude adapter. Constructed once per investigation by
-    `cli.py`'s `_build_model_and_registry`, exactly like
+    `live_setup.build_model_and_registry`, exactly like
     `ReplayToolCallingModel` is today -- one instance answers every stage of
     one run.
     """

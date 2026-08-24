@@ -44,10 +44,12 @@ from causalops.evaluate_cli import (
     _fixture_sha256,
     _git_provenance,
     _load_expected_outcome,
+    _new_evaluation_target,
     _run_id_from_events,
     build_parser,
     run_evaluation,
 )
+from causalops.evaluation import EvaluationRecord
 from causalops.evidence import new_opaque_id
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunEvent
@@ -244,7 +246,8 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
     )
 
-    records = run_evaluation(tmp_path)
+    target = _new_evaluation_target(tmp_path)
+    records = run_evaluation(tmp_path, target)
 
     assert [family for family, seed in started] == list(EVALUATION_FAMILIES)
     assert all(seed == "evaluation" for _, seed in started)
@@ -260,3 +263,118 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
             record.expected.root_cause
             is RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION
         )
+
+
+def test_records_already_scored_before_a_crash_survive_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The P1 this fix round exists for: `run_evaluation` must rewrite
+    `records.jsonl` after every completed run, not batch everything to the
+    end. Proves it by making the run that would build the SECOND family's
+    model construction raise -- after the first family's baseline and
+    tool-enabled runs have both already completed and been appended -- and
+    then reading `records.jsonl` back from disk (not the in-memory
+    exception, and not the in-memory `records` list this function never
+    even gets to return) to confirm those two already-scored, already-paid-
+    for records are durable despite the crash. Reading only the in-memory
+    list would not prove anything: the bug this test guards against was
+    exactly that records could be correct in memory yet never reach disk
+    before a crash discarded them."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in EVALUATION_FAMILIES:
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text(
+            json.dumps({"family": family}), encoding="utf-8"
+        )
+
+    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
+        incident_id = new_opaque_id()
+        scope = IncidentScope.model_validate(
+            {**incident_scope().model_dump(), "incident_id": incident_id}
+        )
+        packet = alert_packet().model_copy(update={"incident_id": incident_id})
+        evidence = tuple(
+            record.model_copy(update={"incident_id": incident_id})
+            for record in packet_evidence()
+        )
+        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+        paths = run_paths(root, incident_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+        (paths.root / "evaluator").mkdir(exist_ok=True)
+        (paths.root / "evaluator" / "expected.json").write_text(
+            json.dumps(
+                {
+                    "seed": seed,
+                    "family": family,
+                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                    "disposition": "DIAGNOSED",
+                    "predicates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return incident_id
+
+    def fake_reset_scenario(root: Path, incident_id: str) -> None:
+        pass
+
+    call_count = 0
+
+    def fake_build_model_and_registry(
+        incident: StoredIncident,
+        paths: object,
+        budgets: Budgets,
+        model_choice: str,
+        db_path: Path,
+    ) -> tuple[object, object, str, object]:
+        nonlocal call_count
+        call_count += 1
+        # Calls 1 and 2 are the first family's baseline and tool-enabled
+        # runs -- let both succeed and land on disk. Call 3 is the SECOND
+        # family's baseline run -- raise there, simulating a real mid-batch
+        # failure (a crashed request, a killed process) after real, billed
+        # work has already produced scoreable results.
+        if call_count == 3:
+            raise RuntimeError("simulated mid-batch failure on the third run")
+        model = ReplayToolCallingModel(
+            ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
+        )
+        registry = registry_with(
+            run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+        )
+        ledger_conn = sqlite3.connect(":memory:")
+        return model, registry, "fake-claude-model", ledger_conn
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
+    monkeypatch.setattr(
+        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+    )
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    target = _new_evaluation_target(tmp_path)
+    records_path = target / "records.jsonl"
+
+    with pytest.raises(RuntimeError, match="simulated mid-batch failure"):
+        run_evaluation(tmp_path, target)
+
+    assert call_count == 3
+
+    on_disk = [
+        EvaluationRecord.model_validate_json(line)
+        for line in records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(on_disk) == 2
+    modes = [record.run_key.rsplit("/", 1)[-1] for record in on_disk]
+    assert modes == ["no_tool_baseline", "tool_enabled"]
+    # Both surviving records share one incident_id -- the first family's --
+    # confirming they are the pair from before the crash, not some other mix.
+    incident_ids = {record.run_key.split("/", 1)[0] for record in on_disk}
+    assert len(incident_ids) == 1
+    for record in on_disk:
+        assert record.model_name == "fake-claude-model"
