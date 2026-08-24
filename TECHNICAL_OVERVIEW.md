@@ -3307,21 +3307,28 @@ to allow for the too-small case. Only unset/blank is exempt, because there both 
 owner typed" and "the value the owner is implicitly asking for" are the same thing -- nothing was
 typed, so there is no wrong signal to silently override.
 
-`CEILING_BELOW_RESERVATION_BUFFER`'s own threshold, `MINIMUM_USABLE_CEILING_USD`, went through a
-correction during this unit's review. `cost_ledger.record_reservation_before_request` always
-subtracts the fixed `$0.10` `RESERVATION_CEILING_BUFFER_USD` margin from a configured ceiling
-before checking remaining budget, so the buffer alone is not the true floor -- a ceiling just
-above it can still leave less headroom than the cheapest real request could ever cost. An earlier
-version of this floor computed that cheapest-request figure assuming zero input tokens
-(`reservation_usd(input_tokens=0)`, $0.016), which is not a request any real call can send: every
-live call's own tool schema is itself billed input, so the true floor is the token cost of the
-SMALLEST tool schema any real call ever sends -- `respond()`'s final-assessment-only schema, 2,292
-tokens, $0.020584 at this project's pricing. `MINIMUM_USABLE_CEILING_USD` is therefore
-$0.10 + $0.020584 = $0.120584, computed fresh from that live schema at import time rather than
-hand-typed, so it cannot silently drift if the schema's size ever changes again. A ceiling at or
-below $0.120584 -- including the earlier, now-corrected $0.116 boundary -- is refused outright at
-config-resolution time rather than accepted and then silently unable to authorize a single
-reservation.
+`CEILING_BELOW_RESERVATION_BUFFER` has a structural threshold: values at or below the fixed
+`$0.10` `RESERVATION_CEILING_BUFFER_USD` margin are rejected during configuration parsing. A
+value above the buffer is valid configuration but is not guaranteed to authorize a request: the
+exact reservation is computed before provider invocation and depends on the incident and stage.
+
+### Paired evaluation review fixes
+
+`SCORER_VERSION` is `"2"`: evaluation records include the graph failure reason, so scorer output
+and batch-abort interpretation changed. Paired live evaluation requires `ANTHROPIC_API_KEY` before
+any scenario starts. Each completed run persists its record; the batch then stops only for
+`COST_CEILING_EXCEEDED`, `INPUT_TOKEN_CAP_EXCEEDED`, `AMBIGUOUS_MODEL_REQUEST`,
+`WALL_CLOCK_EXPIRED`, or `INTERNAL_ERROR`. Malformed output, exhausted repair budget, and forged
+citations remain model-quality results and continue scoring.
+
+Scenario ownership uses exclusive marker creation. Empty markers are in-progress claims, and a
+nonempty stale marker is recovered only if its referenced run directory is absent. Failure cleanup
+removes only the incident's own marker. Ledger inputs and rows are validated before accounting;
+corrupt legacy rows fail closed, while ambiguous reservations retain their reserved cost.
+
+The ceiling configuration floor is structural: values at or below the fixed `$0.10` reservation
+buffer are rejected. A value above it may still be refused by the exact request-time reservation,
+whose size depends on the incident and graph stage.
 
 **Verified before freezing**: 579 pre-existing tests plus this unit's additions all pass; `ruff
 check`/`ruff format --check` and `mypy --strict` are clean on every touched file; the confinement

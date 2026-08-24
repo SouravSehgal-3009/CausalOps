@@ -57,10 +57,19 @@ overrun is still only knowable after that request has already settled.
 """
 
 import logging
+import math
 import sqlite3
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    model_validator,
+)
 
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.tools import UtcDatetime
@@ -200,13 +209,27 @@ class CostLedgerRow(BaseModel):
     graph_phase: str
     model_turn: int
     context_digest: str
-    state: str
-    reserved_usd: float = Field(ge=0)
-    actual_usd: float | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
+    state: Literal["RESERVED", "SETTLED"]
+    reserved_usd: float = Field(ge=0, allow_inf_nan=False)
+    actual_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    input_tokens: StrictInt | None = Field(default=None, ge=0)
+    output_tokens: StrictInt | None = Field(default=None, ge=0)
     reserved_at: UtcDatetime
     settled_at: UtcDatetime | None = None
+
+    @model_validator(mode="after")
+    def lifecycle_is_complete(self) -> "CostLedgerRow":
+        metadata = (
+            self.actual_usd,
+            self.input_tokens,
+            self.output_tokens,
+            self.settled_at,
+        )
+        if self.state == "RESERVED" and any(value is not None for value in metadata):
+            raise ValueError("RESERVED rows cannot contain settlement metadata")
+        if self.state == "SETTLED" and any(value is None for value in metadata):
+            raise ValueError("SETTLED rows require complete settlement metadata")
+        return self
 
 
 def ensure_cost_ledger_table(conn: sqlite3.Connection) -> None:
@@ -257,19 +280,40 @@ def _read_row(
     ).fetchone()
     if row is None:
         return None
-    return CostLedgerRow(
-        run_id=row[0],
-        graph_phase=row[1],
-        model_turn=row[2],
-        context_digest=row[3],
-        state=row[4],
-        reserved_usd=row[5],
-        actual_usd=row[6],
-        input_tokens=row[7],
-        output_tokens=row[8],
-        reserved_at=row[9],
-        settled_at=row[10],
-    )
+    try:
+        return CostLedgerRow(
+            run_id=row[0],
+            graph_phase=row[1],
+            model_turn=row[2],
+            context_digest=row[3],
+            state=row[4],
+            reserved_usd=row[5],
+            actual_usd=row[6],
+            input_tokens=row[7],
+            output_tokens=row[8],
+            reserved_at=row[9],
+            settled_at=row[10],
+        )
+    except ValidationError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"cost_ledger contains an invalid row: {error}",
+        ) from error
+
+
+def _valid_money(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite non-negative number")
+    amount = float(value)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return amount
+
+
+def _valid_tokens(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
 
 
 def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float, bool]:
@@ -297,28 +341,45 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
     """
     ensure_cost_ledger_table(conn)
     try:
-        reserved = conn.execute(
-            "SELECT COALESCE(SUM(reserved_usd), 0.0) FROM cost_ledger WHERE run_id = ?",
+        rows = conn.execute(
+            "SELECT run_id, graph_phase, model_turn, context_digest, state, "
+            "reserved_usd, actual_usd, input_tokens, output_tokens, reserved_at, "
+            "settled_at FROM cost_ledger WHERE run_id = ?",
             (run_id,),
-        )
-        (reserved_usd,) = reserved.fetchone()
-        actual = conn.execute(
-            "SELECT COALESCE(SUM(actual_usd), 0.0) FROM cost_ledger "
-            "WHERE run_id = ? AND state = 'SETTLED'",
-            (run_id,),
-        )
-        (actual_usd,) = actual.fetchone()
-        unsettled = conn.execute(
-            "SELECT COUNT(*) FROM cost_ledger WHERE run_id = ? AND state != 'SETTLED'",
-            (run_id,),
-        )
-        (unsettled_count,) = unsettled.fetchone()
+        ).fetchall()
+        parsed = [
+            CostLedgerRow.model_validate(
+                {
+                    "run_id": row[0],
+                    "graph_phase": row[1],
+                    "model_turn": row[2],
+                    "context_digest": row[3],
+                    "state": row[4],
+                    "reserved_usd": row[5],
+                    "actual_usd": row[6],
+                    "input_tokens": row[7],
+                    "output_tokens": row[8],
+                    "reserved_at": row[9],
+                    "settled_at": row[10],
+                }
+            )
+            for row in rows
+        ]
+    except ValidationError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"cost_ledger contains an invalid row: {error}",
+        ) from error
     except sqlite3.Error as error:
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"cost_ledger unreadable for run totals: {error}",
         ) from error
-    return float(reserved_usd), float(actual_usd), unsettled_count == 0
+    return (
+        sum(row.reserved_usd for row in parsed),
+        sum(row.actual_usd or 0.0 for row in parsed if row.state == "SETTLED"),
+        all(row.state == "SETTLED" for row in parsed),
+    )
 
 
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
@@ -353,13 +414,20 @@ def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
     from the one needed here -- each row's own `(reserved_usd, actual_usd)`
     pair has to be compared independently, and only then summed.
     """
-    rows = conn.execute("SELECT state, reserved_usd, actual_usd FROM cost_ledger")
+    rows = conn.execute(
+        "SELECT run_id, graph_phase, model_turn, context_digest, state, reserved_usd, "
+        "actual_usd, input_tokens, output_tokens, reserved_at, settled_at "
+        "FROM cost_ledger"
+    )
     total = 0.0
-    for state, reserved_usd, actual_usd in rows.fetchall():
-        if state == "SETTLED":
-            total += max(reserved_usd, actual_usd)
+    for raw in rows.fetchall():
+        row = _read_row(conn, raw[0], raw[1], raw[2], raw[3])
+        assert row is not None
+        if row.state == "SETTLED":
+            assert row.actual_usd is not None
+            total += max(row.reserved_usd, row.actual_usd)
         else:
-            total += reserved_usd
+            total += row.reserved_usd
     return total
 
 
@@ -415,6 +483,14 @@ def record_reservation_before_request(
     """
     ensure_cost_ledger_table(conn)
     try:
+        reserved_usd = _valid_money(reserved_usd, "reserved_usd")
+        ceiling_usd = _valid_money(ceiling_usd, "ceiling_usd")
+    except ValueError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"invalid cost ledger input: {error}",
+        ) from error
+    try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.Error as error:
         raise CheckpointStoreError(
@@ -451,6 +527,9 @@ def record_reservation_before_request(
             CheckpointStoreReasonCode.STORE_UNAVAILABLE,
             f"cost_ledger unwritable: {error}",
         ) from error
+    except BaseException:
+        conn.rollback()
+        raise
     row = _read_row(conn, run_id, graph_phase, model_turn, context_digest)
     assert row is not None, (
         "just-committed reservation is not readable back -- cost_ledger's "
@@ -498,6 +577,15 @@ def settle_reservation(
     recalibrate it, not a correctness gap in the ceiling itself.
     """
     ensure_cost_ledger_table(conn)
+    try:
+        actual_usd = _valid_money(actual_usd, "actual_usd")
+        input_tokens = _valid_tokens(input_tokens, "input_tokens")
+        output_tokens = _valid_tokens(output_tokens, "output_tokens")
+    except ValueError as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE,
+            f"invalid settlement metadata: {error}",
+        ) from error
     try:
         cursor = conn.execute(
             "UPDATE cost_ledger SET state = 'SETTLED', actual_usd = ?, "

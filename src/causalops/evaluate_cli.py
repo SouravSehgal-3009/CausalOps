@@ -37,10 +37,11 @@ from pydantic import BaseModel, ConfigDict
 
 from causalops.approvals import CheckpointStoreError
 from causalops.cost_ledger import run_cost_totals
-from causalops.doctor import ProjectPaths, find_project_root
+from causalops.doctor import API_KEY_VARIABLE, ProjectPaths, find_project_root
 from causalops.domain import (
     Budgets,
     InvestigationResult,
+    ReasonCode,
     RetrievalMode,
     StoredIncident,
     utc_now,
@@ -94,6 +95,22 @@ EVALUATION_FAMILIES: tuple[str, ...] = (
 # both ends of that same encoding.
 MODE_NO_TOOL_BASELINE = "no_tool_baseline"
 MODE_TOOL_ENABLED = "tool_enabled"
+
+INFRASTRUCTURE_ABORT_REASONS = frozenset(
+    {
+        ReasonCode.COST_CEILING_EXCEEDED,
+        ReasonCode.INPUT_TOKEN_CAP_EXCEEDED,
+        ReasonCode.AMBIGUOUS_MODEL_REQUEST,
+        ReasonCode.WALL_CLOCK_EXPIRED,
+        ReasonCode.INTERNAL_ERROR,
+    }
+)
+
+
+class EvaluationAborted(Exception):
+    def __init__(self, reason: ReasonCode) -> None:
+        self.reason = reason
+        super().__init__(reason.value)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -281,6 +298,7 @@ def _run_one(
             configured_ceiling_usd=configured_ceiling_usd,
             reserved_usd=reserved_usd,
             actual_usd=None if incomplete_settlement else actual_usd,
+            failure_reason=result.report.reason_code,
         )
     finally:
         ledger_conn.close()
@@ -320,24 +338,25 @@ def run_evaluation(root: Path, target: Path) -> list[EvaluationRecord]:
             expected = _load_expected_outcome(paths.root)
             fixture_sha256 = _fixture_sha256(root, family)
             for no_tool_baseline in (True, False):
-                records.append(
-                    _run_one(
-                        root=root,
-                        family=family,
-                        incident=incident,
-                        expected=expected,
-                        fixture_sha256=fixture_sha256,
-                        runbook_corpus_version=runbook_corpus_version,
-                        git_sha=git_sha,
-                        git_dirty=git_dirty,
-                        configured_ceiling_usd=configured_ceiling_usd,
-                        no_tool_baseline=no_tool_baseline,
-                    )
+                record = _run_one(
+                    root=root,
+                    family=family,
+                    incident=incident,
+                    expected=expected,
+                    fixture_sha256=fixture_sha256,
+                    runbook_corpus_version=runbook_corpus_version,
+                    git_sha=git_sha,
+                    git_dirty=git_dirty,
+                    configured_ceiling_usd=configured_ceiling_usd,
+                    no_tool_baseline=no_tool_baseline,
                 )
+                records.append(record)
                 # Durable the moment a real, billed result exists -- see
                 # this function's own docstring for why this cannot wait
                 # until every family has finished.
                 write_jsonl(records_path, records)
+                if record.failure_reason in INFRASTRUCTURE_ABORT_REASONS:
+                    raise EvaluationAborted(record.failure_reason)
         finally:
             # `reset_scenario` still runs unconditionally, on every path out
             # of `try` -- success or failure -- exactly as before this
@@ -639,6 +658,9 @@ def main(argv: list[str] | None = None) -> int:
     if root is None:
         print(f"FAIL PROJECT_ROOT_NOT_FOUND No pyproject.toml at or above {start}.")
         return 1
+    if not os.environ.get(API_KEY_VARIABLE, "").strip():
+        print("FAIL MISSING_API_KEY Set ANTHROPIC_API_KEY before a live evaluation.")
+        return 1
     try:
         target = _new_evaluation_target(root)
     except OSError as error:
@@ -650,6 +672,10 @@ def main(argv: list[str] | None = None) -> int:
     records_path = target / "records.jsonl"
     try:
         records = run_evaluation(root, target)
+    except EvaluationAborted as aborted:
+        print(f"FAIL EVALUATION_ABORTED {aborted.reason.value}")
+        print(f"records so far: {records_path}")
+        return 1
     except (LabError, RunRecordError, CheckpointStoreError) as refusal:
         # `CheckpointStoreError` reaches here from `live_setup.
         # live_evaluation_ceiling_usd` (called both directly by

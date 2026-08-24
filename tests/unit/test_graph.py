@@ -557,15 +557,23 @@ def test_an_oversized_request_refusal_reports_its_own_reason_not_internal_error(
 
 
 def _sample_cost_ledger_row(state: str) -> CostLedgerRow:
-    return CostLedgerRow(
-        run_id="run-1",
-        graph_phase="INVESTIGATE",
-        model_turn=0,
-        context_digest="digest-1",
-        state=state,
-        reserved_usd=0.01,
-        reserved_at=utc_now(),
-    )
+    values: dict[str, object] = {
+        "run_id": "run-1",
+        "graph_phase": "INVESTIGATE",
+        "model_turn": 0,
+        "context_digest": "digest-1",
+        "state": state,
+        "reserved_usd": 0.01,
+        "reserved_at": utc_now(),
+    }
+    if state == "SETTLED":
+        values.update(
+            actual_usd=0.01,
+            input_tokens=1,
+            output_tokens=1,
+            settled_at=utc_now(),
+        )
+    return CostLedgerRow.model_validate(values)
 
 
 def test_an_ambiguous_reservation_refusal_reports_its_own_reason() -> None:

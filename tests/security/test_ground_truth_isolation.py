@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from import_scan import PACKAGE, imported_modules
+from import_scan import PACKAGE, dynamically_imported_modules, imported_modules
 
 from causalops.domain import (
     Evidence,
@@ -110,7 +110,8 @@ def test_no_investigator_module_imports_the_evaluator() -> None:
         source.name
         for source in sorted(SOURCE_DIR.rglob("*.py"))
         if source.name not in {"evaluation.py", "evaluate_cli.py"}
-        and EVALUATOR_MODULE in imported_modules(source)
+        and EVALUATOR_MODULE
+        in (imported_modules(source) | dynamically_imported_modules(source))
     }
 
     assert offenders == set()
@@ -123,13 +124,17 @@ def test_the_import_scan_recognises_every_form_it_has_to_catch(tmp_path: Path) -
         "from causalops.evaluation import ExpectedOutcome",
         "from . import evaluation",
         "from .evaluation import ExpectedOutcome",
+        "import importlib\nimportlib.import_module('causalops.evaluation')",
+        "__import__('causalops.evaluation')",
     )
 
     for index, form in enumerate(forms):
         source = tmp_path / f"sample_{index}.py"
         source.write_text(form, encoding="utf-8")
 
-        assert EVALUATOR_MODULE in imported_modules(source), form
+        assert EVALUATOR_MODULE in (
+            imported_modules(source) | dynamically_imported_modules(source)
+        ), form
 
 
 def test_importing_the_investigator_never_loads_the_evaluator() -> None:

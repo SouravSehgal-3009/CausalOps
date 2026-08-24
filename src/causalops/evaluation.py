@@ -25,7 +25,7 @@ from causalops.domain import (
     Versions,
 )
 
-SCORER_VERSION = "1"
+SCORER_VERSION = "2"
 
 OUT_OF_SCOPE_REASONS = frozenset(
     {
@@ -162,6 +162,10 @@ class EvaluationRecord(BaseModel):
     # provider responded) -- an honest partial-cost case, not hidden as 0.0.
     reserved_usd: float
     actual_usd: float | None = None
+    # A failed-safe graph result is still a scored, durable evaluation record.
+    # The reason lets batch orchestration distinguish infrastructure failures
+    # (which must stop further paid requests) from model-quality outcomes.
+    failure_reason: ReasonCode | None = None
 
 
 def satisfies(predicate: RequiredEvidencePredicate, evidence: Evidence) -> bool:

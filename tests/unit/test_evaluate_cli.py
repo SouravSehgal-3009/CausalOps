@@ -609,6 +609,7 @@ def test_main_writes_a_summary_alongside_records(
             json.dumps({"family": family}), encoding="utf-8"
         )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         pass
@@ -707,6 +708,7 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
             json.dumps({"family": family}), encoding="utf-8"
         )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         pass
@@ -1076,6 +1078,7 @@ def test_main_reports_the_ceiling_reason_code_not_internal_error(
     fake is needed either."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("LIVE_EVALUATION_MAX_USD", "0.05")
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -1090,6 +1093,18 @@ def test_main_reports_the_ceiling_reason_code_not_internal_error(
     assert "records so far:" in out
 
 
+def test_main_refuses_a_live_evaluation_without_a_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    assert main([]) == 1
+
+    assert "FAIL MISSING_API_KEY" in capsys.readouterr().out
+
+
 def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1102,6 +1117,7 @@ def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     'records so far' line."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     def failing_target(root: Path) -> Path:
         raise OSError("simulated read-only filesystem")

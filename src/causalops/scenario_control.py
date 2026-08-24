@@ -6,6 +6,7 @@ directory the investigator side has no accessor for.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -274,6 +275,45 @@ def refuse_second_scenario(root: Path) -> None:
         )
 
 
+def _claim_scenario(root: Path, incident_id: str, paths: RunPaths) -> None:
+    """Atomically claim the sole active-scenario marker for this run.
+
+    The candidate directory exists before claiming so a stale nonempty marker
+    can be recovered only when its referenced directory is absent. An empty
+    marker is an in-progress exclusive claim and is never reclaimed.
+    """
+    marker = active_incident_file(root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    paths.root.mkdir(parents=True, exist_ok=False)
+    while True:
+        try:
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError as error:
+            active = marker.read_text(encoding="utf-8").strip()
+            if not active or (runs_root(root) / active).is_dir():
+                shutil.rmtree(paths.root)
+                raise LabError(
+                    LabReasonCode.SCENARIO_ALREADY_ACTIVE,
+                    "reset "
+                    f"{active or 'the in-progress scenario'} before "
+                    "starting another scenario",
+                ) from error
+            # A nonempty marker referencing no run directory is stale. Remove
+            # it and retry the exclusive creation; another contender still
+            # wins normally if it creates a marker first.
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.write(descriptor, incident_id.encode("utf-8"))
+        except BaseException:
+            marker.unlink(missing_ok=True)
+            shutil.rmtree(paths.root, ignore_errors=True)
+            raise
+        finally:
+            os.close(descriptor)
+        return
+
+
 def write_manifests(
     paths: RunPaths, definition: dict[str, Any], window_end: datetime
 ) -> None:
@@ -346,14 +386,16 @@ def build_incident(
     return StoredIncident(scope=scope, packet=packet, evidence=(symptom, topology))
 
 
-def clear_unstarted_scenario(root: Path, paths: RunPaths) -> None:
+def clear_unstarted_scenario(root: Path, paths: RunPaths, incident_id: str) -> None:
     """Undo the early marker write and half-formed run directory.
 
     Called when a scenario fails before reaching a real fault, so it does not
     permanently block the next `scenario start` with SCENARIO_ALREADY_ACTIVE.
     """
-    active_incident_file(root).unlink(missing_ok=True)
-    shutil.rmtree(paths.root)
+    marker = active_incident_file(root)
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == incident_id:
+        marker.unlink()
+    shutil.rmtree(paths.root, ignore_errors=True)
 
 
 # Kept together so the healthy-then-faulted sequence and its failure points stay
@@ -366,47 +408,44 @@ def start_scenario(
 ) -> str:
     """Create one incident: healthy baseline, then the fault, then the packet."""
     definition = apply_seed_variant(load_definition(root, family), seed)
-    refuse_second_scenario(root)
     incident_id = new_opaque_id()
     paths = run_paths(root, incident_id)
-    paths.logs.mkdir(parents=True, exist_ok=True)
-    write_json(paths.root / "lab" / "config.json", definition["healthy_config"])
-
-    # Written now, and not only once the scenario is confirmed, because `orders`
-    # reads this file live at request time to pick which config to apply to
-    # traffic as it is being driven below.
-    active_incident_file(root).write_text(incident_id, encoding="utf-8")
-
-    window_start = clock() - WINDOW_LEAD_IN
-    extra = 2 if seed == "evaluation" else 0
-    healthy, unhealthy = drive_traffic(int(definition["baseline_requests"]) + extra)
-    if healthy == 0 or unhealthy > 0:
-        clear_unstarted_scenario(root, paths)
-        raise LabError(
-            LabReasonCode.BASELINE_NOT_HEALTHY,
-            f"{incident_id}: the lab was not healthy before the fault: "
-            f"{unhealthy} failed",
+    _claim_scenario(root, incident_id, paths)
+    try:
+        paths.logs.mkdir(parents=True, exist_ok=True)
+        write_json(paths.root / "lab" / "config.json", definition["healthy_config"])
+        window_start = clock() - WINDOW_LEAD_IN
+        extra = 2 if seed == "evaluation" else 0
+        healthy, unhealthy = drive_traffic(int(definition["baseline_requests"]) + extra)
+        if healthy == 0 or unhealthy > 0:
+            raise LabError(
+                LabReasonCode.BASELINE_NOT_HEALTHY,
+                f"{incident_id}: lab was not healthy before the fault: "
+                f"{unhealthy} failed",
+            )
+        write_json(paths.root / "lab" / "config.json", definition["faulted_config"])
+        served, failed = drive_traffic(int(definition["fault_requests"]) + extra)
+        if failed == 0:
+            raise LabError(
+                LabReasonCode.FAULT_NOT_OBSERVED,
+                f"{incident_id}: the fault produced no failing request",
+            )
+        window_end = clock()
+        write_manifests(paths, definition, window_end)
+        incident = build_incident(
+            definition, incident_id, window_start, window_end, failed, served + failed
         )
-    write_json(paths.root / "lab" / "config.json", definition["faulted_config"])
-    served, failed = drive_traffic(int(definition["fault_requests"]) + extra)
-    if failed == 0:
-        clear_unstarted_scenario(root, paths)
-        raise LabError(
-            LabReasonCode.FAULT_NOT_OBSERVED,
-            f"{incident_id}: the fault produced no failing request",
+        paths.incident_file.write_text(
+            incident.model_dump_json(indent=2), encoding="utf-8"
         )
-    window_end = clock()
-
-    write_manifests(paths, definition, window_end)
-    incident = build_incident(
-        definition, incident_id, window_start, window_end, failed, served + failed
-    )
-    paths.incident_file.write_text(incident.model_dump_json(indent=2), encoding="utf-8")
-    write_json(
-        paths.root / "evaluator" / "expected.json",
-        {"seed": seed, "family": family, **definition["expected"]},
-    )
-    return incident_id
+        write_json(
+            paths.root / "evaluator" / "expected.json",
+            {"seed": seed, "family": family, **definition["expected"]},
+        )
+        return incident_id
+    except BaseException:
+        clear_unstarted_scenario(root, paths, incident_id)
+        raise
 
 
 def reset_scenario(root: Path, incident_id: str) -> None:
