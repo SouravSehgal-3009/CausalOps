@@ -195,13 +195,42 @@ def satisfies(predicate: RequiredEvidencePredicate, evidence: Evidence) -> bool:
 def cited_evidence(
     report: InvestigationReport, evidence: Sequence[Evidence]
 ) -> tuple[Evidence, ...]:
+    """Evidence records the report's assessment actually cited, scoped to
+    THIS incident -- the same `record.incident_id == report.incident_id`
+    filter `citations_are_valid`'s own `known` set below already applies.
+
+    Before this filter, an `evidence_id` match alone was enough regardless
+    of which incident a record belonged to, so `citations_sufficient`
+    (which reads only this function's output, in `score_run` below) could
+    be satisfied by a cross-incident record even on a report
+    `citations_are_valid` correctly refused for exactly that citation. The
+    isolation boundary held only because the graph never actually handed
+    this scorer cross-incident evidence in practice, not because the scorer
+    enforced it itself. This filter closes that gap: `citations_sufficient`
+    can no longer be satisfied by a record this function has already
+    excluded.
+
+    Deliberately NOT also gating `citations_sufficient` on `citations_valid`
+    in `score_run`: that would conflate two different questions. A report
+    can cite one genuine, sufficient, same-incident piece of evidence
+    alongside one unrelated bad id (a typo, a stale id from an earlier
+    turn), and `citations_valid` correctly reports `False` for that extra
+    bad reference -- but the predicate really is satisfied by real evidence,
+    which `citations_sufficient=True` says honestly. Requiring
+    `citations_valid` first would hide that real signal behind an unrelated
+    citation's problem instead of reporting both facts plainly.
+    """
     if report.assessment is None:
         return ()
     cited = set(
         report.assessment.supporting_evidence_ids
         + report.assessment.contrary_evidence_ids
     )
-    return tuple(record for record in evidence if record.evidence_id in cited)
+    return tuple(
+        record
+        for record in evidence
+        if record.evidence_id in cited and record.incident_id == report.incident_id
+    )
 
 
 def citations_are_valid(
@@ -269,8 +298,35 @@ def score_run(
     # assessment, but that is this function's own behaviour, not a claim
     # `EscalationRecord`'s docstring makes).
     rejected = report.escalation is not None and report.escalation.decision == "reject"
+    # `diagnosis_correct` requires a genuine model assessment, not just a
+    # matching `root_cause` value. `FAILED_SAFE`'s own `root_cause` defaults
+    # to `UNDETERMINED` (`InvestigationReport.check_terminal_invariants`
+    # forbids anything else), and `ambiguous_telemetry`'s own expected root
+    # cause is ALSO `UNDETERMINED` -- it is the one family in this corpus
+    # designed to be genuinely inconclusive. A bare `report.root_cause is
+    # expected.root_cause` comparison would let a run that crashed before
+    # producing any real diagnosis at all collide with that expectation and
+    # score a total failure as a correct answer. `report.assessment is not
+    # None` is the exact condition: it is `True` for both `DIAGNOSED` and a
+    # genuine `INSUFFICIENT_EVIDENCE` abstention (both require a real
+    # `FinalAssessment`) and `False` only for `FAILED_SAFE` (which requires
+    # `assessment is None`), so gating on it changes nothing for either kind
+    # of real model output and excludes only the crash case.
+    #
+    # `False`, not `None`: unlike `EvaluationRecord.actual_usd`'s `None`
+    # (a real number that is honestly unmeasured because the run kept going
+    # and only its final settlement is unknown), a `FAILED_SAFE` run never
+    # produced a diagnosis to evaluate in the first place -- "did this run's
+    # output count as a correct diagnosis" has a definite answer here, and
+    # that answer is no. Keeping `MechanicalScores.diagnosis_correct` a
+    # plain `bool` also means `EvaluationSummary`'s existing
+    # `diagnosis_correct_count = sum(...)` needs no change to keep meaning
+    # what it already says.
+    diagnosis_correct = (
+        report.assessment is not None and report.root_cause is expected.root_cause
+    )
     return MechanicalScores(
-        diagnosis_correct=report.root_cause is expected.root_cause,
+        diagnosis_correct=diagnosis_correct,
         disposition_correct=report.disposition is expected.disposition and not rejected,
         citations_valid=citations_are_valid(report, evidence),
         citations_sufficient=all(

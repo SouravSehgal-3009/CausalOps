@@ -34,6 +34,7 @@ refusal must never be mistaken for.
 """
 
 import sqlite3
+import warnings
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -241,19 +242,45 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
 
 
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
-    """Every dollar this application has ever reserved, across every run --
-    `TECHNICAL_SPEC.md` §10's ceiling is application-wide, not
-    per-investigation, so this sums the whole table, not one `run_id`.
-    Reading `reserved_usd` for *every* row (settled or still outstanding)
-    rather than `actual_usd` for settled ones is deliberate: a `RESERVED`
-    row that never settles (crash, timeout, missing usage) must keep
-    counting against the ceiling at its reserved amount -- §10's own
-    "ambiguous requests retain [the reservation]" rule -- or a crash loop
-    could spend past the cap one silently-forgotten reservation at a time.
+    """Every dollar this application has ever spent or committed to spend,
+    across every run -- `TECHNICAL_SPEC.md` §10's ceiling is
+    application-wide, not per-investigation, so this sums the whole table,
+    not one `run_id`.
+
+    A still-`RESERVED` row (never settled -- a crash, a timeout, missing
+    provider usage) counts at its `reserved_usd` amount, unchanged from this
+    function's original behaviour: §10's own "ambiguous requests retain [the
+    reservation]" rule -- or a crash loop could spend past the cap one
+    silently-forgotten reservation at a time.
+
+    A `SETTLED` row counts at `max(reserved_usd, actual_usd)`, not
+    `reserved_usd` alone. The reservation is meant to be a conservative
+    upper bound on the real bill, but that is an assumption about the
+    pricing snapshot and token estimate it was computed from, not a
+    guarantee -- `settle_reservation` below warns, rather than silently
+    accepting it, whenever a real bill comes in above its own reservation.
+    If that ever happens and this function kept summing `reserved_usd`
+    regardless, the ceiling's running total would understate real spend by
+    exactly the overrun, forever: every later reservation would be approved
+    against a total that no longer reflects what was actually billed. Taking
+    the greater of the two closes that gap without changing anything about
+    the ordinary case, where `actual_usd <= reserved_usd` and `max` is a
+    no-op.
+
+    Computed in Python over one fetch of every row, not a single SQL
+    aggregate `MAX()` expression: SQL's aggregate `MAX()` collapses to one
+    value across every row it matches, which answers a different question
+    from the one needed here -- each row's own `(reserved_usd, actual_usd)`
+    pair has to be compared independently, and only then summed.
     """
-    total = conn.execute("SELECT COALESCE(SUM(reserved_usd), 0.0) FROM cost_ledger")
-    (value,) = total.fetchone()
-    return float(value)
+    rows = conn.execute("SELECT state, reserved_usd, actual_usd FROM cost_ledger")
+    total = 0.0
+    for state, reserved_usd, actual_usd in rows.fetchall():
+        if state == "SETTLED":
+            total += max(reserved_usd, actual_usd)
+        else:
+            total += reserved_usd
+    return total
 
 
 def record_reservation_before_request(
@@ -366,6 +393,20 @@ def settle_reservation(
     goes through `record_reservation_before_request` first) and is refused
     loudly rather than silently inserting a row that never went through the
     ceiling check.
+
+    If `actual_usd` comes in ABOVE the row's own `reserved_usd` -- the
+    reservation's pessimistic estimate turned out to be wrong -- this still
+    commits the true `actual_usd` (the row has to record what was really
+    billed, not a number massaged to look conservative) and raises a
+    `RuntimeWarning` naming both figures, so the overrun is visible rather
+    than silently absorbed. It is a warning, not a raised error that could
+    abort the settlement: the money is already spent by the time this
+    function runs, there is nothing left to refuse, and the caller still
+    needs the real `CostLedgerRow` back. `_reserved_and_settled_total`
+    above already accounts correctly for a row in this state once it lands
+    (counting it at its true, higher cost) -- this warning is the
+    diagnostic signal for whoever configured the pricing snapshot or token
+    estimate to recalibrate it, not a correctness gap in the ceiling itself.
     """
     ensure_cost_ledger_table(conn)
     try:
@@ -402,4 +443,14 @@ def settle_reservation(
         ) from error
     row = _read_row(conn, run_id, graph_phase, model_turn, context_digest)
     assert row is not None, "just-settled row vanished before it could be read back"
+    if row.actual_usd is not None and row.actual_usd > row.reserved_usd:
+        warnings.warn(
+            f"cost_ledger settlement for run {run_id!r}, phase {graph_phase!r}, "
+            f"turn {model_turn} billed ${row.actual_usd:.4f}, above its "
+            f"${row.reserved_usd:.4f} reservation -- the pessimistic estimate "
+            "under-reserved this request; recalibrate the pricing snapshot or "
+            "token estimate this reservation was computed from",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return row

@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
@@ -318,7 +319,30 @@ def run_evaluation(root: Path, target: Path) -> list[EvaluationRecord]:
                 # until every family has finished.
                 write_jsonl(records_path, records)
         finally:
-            reset_scenario(root, incident_id)
+            # `reset_scenario` still runs unconditionally, on every path out
+            # of `try` -- success or failure -- exactly as before this
+            # comment. What changed: if the `try` block is already
+            # propagating a real, billed run failure AND `reset_scenario`
+            # itself also raises, Python's ordinary exception chaining would
+            # otherwise replace the original exception with this cleanup
+            # failure, burying the actual reason a billed run failed behind
+            # an unrelated lab-reset problem. `sys.exc_info()[0]` inside a
+            # `finally` reports the exception currently unwinding through
+            # it, if any -- when one is present, the cleanup failure is
+            # printed (visible, not silently discarded) and suppressed
+            # rather than raised, so the original exception keeps
+            # propagating unchanged. When nothing is unwinding (the run
+            # itself succeeded), a `reset_scenario` failure still raises
+            # normally, unchanged from before this fix.
+            try:
+                reset_scenario(root, incident_id)
+            except Exception as reset_error:
+                if sys.exc_info()[0] is None:
+                    raise
+                print(
+                    f"FAIL RESET_SCENARIO_FAILED_DURING_CLEANUP {family}/"
+                    f"{incident_id}: {reset_error}"
+                )
     return records
 
 

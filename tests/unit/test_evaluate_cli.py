@@ -386,6 +386,86 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
         assert record.model_name == "fake-claude-model"
 
 
+def test_the_original_run_failure_survives_cleanup_also_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The P2 this fix exists for: `run_evaluation`'s `finally:
+    reset_scenario(...)` used to be unconditional -- if the scored run
+    inside `try` failed (a real, billed run failure) AND `reset_scenario` in
+    `finally` ALSO raised, Python's ordinary exception chaining would
+    replace the original exception with the cleanup failure, burying the
+    actual reason a billed run failed behind an unrelated lab-reset
+    problem. Simulates both failing on the very first family and confirms
+    the ORIGINAL run failure is what actually propagates and gets reported
+    -- the cleanup failure is only printed, never silently discarded."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in EVALUATION_FAMILIES:
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text(
+            json.dumps({"family": family}), encoding="utf-8"
+        )
+
+    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
+        incident_id = new_opaque_id()
+        scope = IncidentScope.model_validate(
+            {**incident_scope().model_dump(), "incident_id": incident_id}
+        )
+        packet = alert_packet().model_copy(update={"incident_id": incident_id})
+        evidence = tuple(
+            record.model_copy(update={"incident_id": incident_id})
+            for record in packet_evidence()
+        )
+        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+        paths = run_paths(root, incident_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+        (paths.root / "evaluator").mkdir(exist_ok=True)
+        (paths.root / "evaluator" / "expected.json").write_text(
+            json.dumps(
+                {
+                    "seed": seed,
+                    "family": family,
+                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                    "disposition": "DIAGNOSED",
+                    "predicates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return incident_id
+
+    def fake_reset_scenario(root: Path, incident_id: str) -> None:
+        raise RuntimeError("simulated reset_scenario cleanup failure")
+
+    def fake_build_model_and_registry(
+        incident: StoredIncident,
+        paths: object,
+        budgets: Budgets,
+        model_choice: str,
+        db_path: Path,
+    ) -> tuple[object, object, str, object]:
+        raise RuntimeError("simulated billed-run failure")
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
+    monkeypatch.setattr(
+        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+    )
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    target = _new_evaluation_target(tmp_path)
+
+    with pytest.raises(RuntimeError, match="simulated billed-run failure"):
+        run_evaluation(tmp_path, target)
+
+    out = capsys.readouterr().out
+    assert "RESET_SCENARIO_FAILED_DURING_CLEANUP" in out
+    assert "simulated reset_scenario cleanup failure" in out
+
+
 def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
     """The P2 this fix exists for: `main()` used to print one line per
     record and never a batch-level aggregate at all. `TECHNICAL_SPEC.md`

@@ -230,6 +230,15 @@ def test_a_citation_from_another_incident_is_invalid() -> None:
     scores = score_run(report, [stranger], [receipt()], expected_diagnosis())
 
     assert not scores.citations_valid
+    # The P2 this assertion exists for: `cited_evidence` used to match
+    # purely on `evidence_id`, with no filter on `record.incident_id` --
+    # unlike `citations_are_valid`'s own `known` set, which already
+    # filtered this way. The stranger's payload does satisfy
+    # `expected_diagnosis()`'s predicate content-wise, so before the fix
+    # this scored `citations_sufficient=True` off a citation the line above
+    # already proves is invalid -- a cross-incident record must not be able
+    # to satisfy sufficiency just because `citations_valid` alone caught it.
+    assert not scores.citations_sufficient
 
 
 def test_a_wrong_cause_or_disposition_scores_false() -> None:
@@ -479,6 +488,65 @@ def test_an_evaluation_record_rejects_an_unknown_field() -> None:
 
     with pytest.raises(ValidationError):
         EvaluationRecord.model_validate(payload)
+
+
+def test_a_failed_safe_run_does_not_score_as_a_correct_diagnosis() -> None:
+    """The P1 this fix exists for: `FAILED_SAFE`'s own `root_cause` defaults
+    to `UNDETERMINED` (`InvestigationReport.check_terminal_invariants`
+    forbids anything else), and `ambiguous_telemetry`'s own expected root
+    cause is ALSO `UNDETERMINED` -- it is the one family in the corpus
+    designed to be genuinely inconclusive. A bare `report.root_cause is
+    expected.root_cause` comparison would let a run that crashed before
+    producing any real diagnosis at all (`assessment=None`, zero real
+    diagnosis) collide with that expectation and score a total failure as a
+    correct answer."""
+    evidence = timeout_evidence()
+    failed = diagnosed_report((evidence.evidence_id,)).model_copy(
+        update={
+            "disposition": Disposition.FAILED_SAFE,
+            "root_cause": RootCauseCode.UNDETERMINED,
+            "assessment": None,
+            "reason_code": ReasonCode.MODEL_OUTPUT_INVALID,
+        }
+    )
+    expected = ExpectedOutcome(
+        root_cause=RootCauseCode.UNDETERMINED,
+        disposition=Disposition.INSUFFICIENT_EVIDENCE,
+    )
+
+    scores = score_run(failed, [evidence], [receipt()], expected)
+
+    assert not scores.diagnosis_correct
+
+
+def test_a_genuine_abstention_with_a_real_assessment_still_scores_correctly() -> None:
+    """Regression coverage alongside the fix above: gating `diagnosis_correct`
+    on `report.assessment is not None` must not accidentally exclude a real
+    `INSUFFICIENT_EVIDENCE` abstention -- it has a genuine `FinalAssessment`,
+    unlike `FAILED_SAFE`, so it must still score as correct against a
+    matching `UNDETERMINED` expected outcome."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,)).model_copy(
+        update={
+            "disposition": Disposition.INSUFFICIENT_EVIDENCE,
+            "root_cause": RootCauseCode.UNDETERMINED,
+            "assessment": FinalAssessment(
+                disposition=ModelDisposition.INSUFFICIENT_EVIDENCE,
+                root_cause=RootCauseCode.UNDETERMINED,
+                uncertainty="not enough signal to pick a cause",
+                next_step="gather more evidence before diagnosing",
+            ),
+        }
+    )
+    expected = ExpectedOutcome(
+        root_cause=RootCauseCode.UNDETERMINED,
+        disposition=Disposition.INSUFFICIENT_EVIDENCE,
+    )
+
+    scores = score_run(report, [evidence], [receipt()], expected)
+
+    assert scores.diagnosis_correct
+    assert scores.disposition_correct
 
 
 def test_a_run_with_no_assessment_cites_nothing() -> None:

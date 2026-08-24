@@ -1497,6 +1497,19 @@ def build_graph(
     new state this graph has never produced), so no node factory changes are
     needed for this topology, only which edges are wired.
 
+    `prompts.py`'s `SYSTEM_TEXT` is unchanged for this smaller graph, on
+    purpose -- it still tells the model it "may ask for registered
+    read-only checks by name and typed arguments" even though
+    `no_tool_baseline=True` never binds a single one. This was reviewed and
+    deliberately kept identical, not overlooked: `TECHNICAL_SPEC.md`'s
+    paired-comparison rule requires identical model, initial packet,
+    budgets, taxonomy, and safe prompt constraints wherever applicable, and
+    the prompt itself is one of those constraints -- diverging it between
+    the two conditions, even just to drop a sentence that no longer
+    applies, would itself become the confound this comparison exists to
+    avoid. See `TECHNICAL_OVERVIEW.md`'s "Unit 3c" section for the full
+    reasoning.
+
     `suppress_escalation=True` is unrelated to topology -- see
     `_make_route_after_final_assessment`'s own docstring for the mechanism.
     Both flags are set together for the baseline run (a model working from

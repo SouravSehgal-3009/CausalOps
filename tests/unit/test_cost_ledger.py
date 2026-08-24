@@ -6,6 +6,7 @@ file, no network, no live model. This is the durable half of the cost gate;
 """
 
 import sqlite3
+import warnings
 from datetime import UTC, datetime
 
 import pytest
@@ -357,6 +358,98 @@ def test_run_cost_totals_for_an_unknown_run_id_is_zero(
     assert reserved_usd == 0.0
     assert actual_usd == 0.0
     assert fully_settled is True
+
+
+def test_settle_reservation_warns_when_the_real_bill_exceeds_the_reservation(
+    conn: sqlite3.Connection,
+) -> None:
+    """The invariant-breach half of the P1 fix: a settlement is never
+    refused for coming in above its own reservation (the money is already
+    spent, and the row must record what was really billed), but it must not
+    be silent about it either -- a `RuntimeWarning` naming both figures is
+    the signal that the pessimistic estimate this reservation was computed
+    from needs recalibrating."""
+    _reserve(conn, reserved_usd=0.01)
+
+    with pytest.warns(RuntimeWarning) as caught:
+        row = settle_reservation(
+            conn,
+            run_id="run-1",
+            graph_phase="INVESTIGATE",
+            model_turn=0,
+            context_digest="digest-1",
+            actual_usd=0.03,
+            input_tokens=1000,
+            output_tokens=500,
+            settled_at=NOW,
+        )
+
+    assert row.actual_usd == pytest.approx(0.03)
+    assert row.reserved_usd == pytest.approx(0.01)
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert "0.0300" in message
+    assert "0.0100" in message
+
+
+def test_settle_reservation_does_not_warn_when_the_bill_stays_under_the_reservation(
+    conn: sqlite3.Connection,
+) -> None:
+    """The ordinary case -- `actual_usd <= reserved_usd` -- must stay
+    silent, or every normal settlement would spuriously warn."""
+    _reserve(conn, reserved_usd=0.05)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        settle_reservation(
+            conn,
+            run_id="run-1",
+            graph_phase="INVESTIGATE",
+            model_turn=0,
+            context_digest="digest-1",
+            actual_usd=0.012,
+            input_tokens=1000,
+            output_tokens=200,
+            settled_at=NOW,
+        )
+
+
+def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(
+    conn: sqlite3.Connection,
+) -> None:
+    """Reproduces the exact Codex-reported scenario: a $0.01 reservation
+    that settles at $0.03 under a $0.02 application-wide ceiling. Before
+    this fix, `_reserved_and_settled_total` summed `reserved_usd`
+    unconditionally, so the ceiling's running total still believed only
+    $0.01 had ever been spent -- a further $0.01 request would have been
+    wrongly approved, letting real spend reach $0.04 against a stated
+    "hard" $0.02 limit. After the fix, the settled row counts at its true
+    $0.03, so even a tiny further reservation against the same ceiling is
+    correctly refused."""
+    _reserve(conn, run_id="run-1", reserved_usd=0.01, ceiling_usd=0.02)
+    settle_reservation(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        actual_usd=0.03,
+        input_tokens=1000,
+        output_tokens=500,
+        settled_at=NOW,
+    )
+
+    with pytest.raises(CostCeilingExceeded) as excinfo:
+        _reserve(
+            conn,
+            run_id="run-2",
+            model_turn=0,
+            context_digest="digest-2",
+            reserved_usd=0.001,
+            ceiling_usd=0.02,
+        )
+
+    assert excinfo.value.remaining_usd == pytest.approx(0.0)
 
 
 def test_run_cost_totals_reports_partial_settlement_as_not_fully_settled(

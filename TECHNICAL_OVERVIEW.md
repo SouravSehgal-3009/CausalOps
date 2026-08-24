@@ -3250,6 +3250,28 @@ never run against a live model or the Docker lab during this unit's own developm
 `start_scenario`/`reset_scenario`, the same seam-testing approach `test_live_model.py` already
 uses for `LiveClaudeModel` itself, so the whole fast suite stays network-free.
 
+**The no-tool baseline shares the same prompt as the tool-enabled run, deliberately -- a Codex
+review finding, adjudicated by the owner, not left open.** `prompts.py`'s `SYSTEM_TEXT`
+unconditionally tells the model it "may ask for registered read-only checks by name and typed
+arguments," and the rendered context reports a "checks left: N" count, regardless of whether
+`no_tool_baseline=True` ever binds a single domain tool. An external review flagged this as a
+possible confound: the no-tool baseline is told about a capability it structurally cannot use,
+which could bias or confuse its behaviour relative to a baseline that was never told about tools
+at all.
+
+The owner's ruling: keep `SYSTEM_TEXT` identical between the two conditions, unchanged.
+`TECHNICAL_SPEC.md` §10 requires the paired comparison to "preserve identical model, initial
+packet, budgets, taxonomy, and safe prompt constraints wherever applicable" -- the prompt itself
+is one of the constraints that rule names, not something outside its scope. Diverging the
+baseline's prompt from the tool-enabled run's -- even narrowly, even just to drop a sentence that
+no longer applies once no tools are bound -- would itself introduce a second variable into a
+comparison whose entire point is holding everything but tool access fixed. A baseline told about
+check tools it cannot use is therefore a known, accepted property of what this comparison
+measures: a model given the same instructions as its tool-enabled counterpart, minus the tools,
+not a model given a specially-tailored no-tools prompt. `prompts.py` was not touched for this
+finding; `graph.py`'s `build_graph` carries a short pointer comment back to this paragraph next
+to its own `no_tool_baseline` documentation.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"
