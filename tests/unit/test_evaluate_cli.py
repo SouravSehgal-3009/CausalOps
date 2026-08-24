@@ -38,6 +38,7 @@ from causalops.domain import (
     Budgets,
     Disposition,
     IncidentScope,
+    ReasonCode,
     RetrievalMode,
     RootCauseCode,
     StoredIncident,
@@ -419,6 +420,75 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     assert len(incident_ids) == 1
     for record in on_disk:
         assert record.model_name == "fake-claude-model"
+
+
+def _prepare_stubbed_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in ("first", "second"):
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(evaluate_cli, "EVALUATION_FAMILIES", ("first", "second"))
+    monkeypatch.setattr(evaluate_cli, "start_scenario", _fake_start_scenario)
+    monkeypatch.setattr(evaluate_cli, "reset_scenario", lambda root, incident_id: None)
+    monkeypatch.setattr(evaluate_cli, "_git_provenance", lambda root: ("f" * 40, False))
+    return _new_evaluation_target(tmp_path)
+
+
+def test_infrastructure_failure_is_persisted_before_evaluation_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _prepare_stubbed_evaluation(tmp_path, monkeypatch)
+    calls: list[bool] = []
+
+    def fake_run_one(**kwargs: object) -> EvaluationRecord:
+        calls.append(kwargs["no_tool_baseline"] is True)
+        return _paired_record(
+            run_key=f"incident-{len(calls)}/model/no_tool_baseline",
+            diagnosis_correct=False,
+        ).model_copy(update={"failure_reason": ReasonCode.COST_CEILING_EXCEEDED})
+
+    monkeypatch.setattr(evaluate_cli, "_run_one", fake_run_one)
+
+    with pytest.raises(evaluate_cli.EvaluationAborted) as aborted:
+        run_evaluation(tmp_path, target)
+
+    assert aborted.value.reason is ReasonCode.COST_CEILING_EXCEEDED
+    assert calls == [True]
+    records = [
+        EvaluationRecord.model_validate_json(line)
+        for line in (target / "records.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 1
+    assert records[0].failure_reason is ReasonCode.COST_CEILING_EXCEEDED
+
+
+def test_model_quality_failure_does_not_abort_later_evaluation_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _prepare_stubbed_evaluation(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run_one(**kwargs: object) -> EvaluationRecord:
+        nonlocal calls
+        calls += 1
+        failure = ReasonCode.MODEL_OUTPUT_INVALID if calls == 1 else None
+        return _paired_record(
+            run_key=f"incident-{calls}/model/no_tool_baseline",
+            diagnosis_correct=False,
+        ).model_copy(update={"failure_reason": failure})
+
+    monkeypatch.setattr(evaluate_cli, "_run_one", fake_run_one)
+
+    records = run_evaluation(tmp_path, target)
+
+    assert calls == 4
+    assert len(records) == 4
+    assert records[0].failure_reason is ReasonCode.MODEL_OUTPUT_INVALID
+    on_disk = (target / "records.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(on_disk) == 4
 
 
 def test_the_original_run_failure_survives_cleanup_also_failing(
