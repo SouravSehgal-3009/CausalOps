@@ -4,10 +4,12 @@ from pathlib import Path
 import pytest
 from fake_incident import FIXTURE_DIR
 
+from causalops.domain import InitialPlan
 from causalops.models import (
     ModelRequest,
     ReplayFixtureError,
     ReplayReasoningModel,
+    ReplayToolCallingModel,
     Stage,
 )
 
@@ -77,6 +79,42 @@ def test_a_malformed_fixture_never_becomes_valid() -> None:
 
     assert ask(model, Stage.INITIAL_PLAN) == {"hypotheses": []}
     assert ask(model, Stage.INITIAL_PLAN) == {"hypotheses": []}
+
+
+def test_replay_refuses_an_empty_stop_reason(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "responses": {
+                    "initial_plan": [
+                        {
+                            "hypotheses": [
+                                {
+                                    "root_cause": "CONFIG_CHANGE",
+                                    "rank": 1,
+                                    "missing_evidence": "a deploy correlation",
+                                },
+                                {
+                                    "root_cause": "RESOURCE_POOL_SATURATION",
+                                    "rank": 2,
+                                    "missing_evidence": "pool utilization",
+                                },
+                            ],
+                            "stop_reason": "",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = ReplayToolCallingModel(ReplayReasoningModel(fixture))
+
+    turn = model.propose(make_request(Stage.INITIAL_PLAN), InitialPlan)
+
+    assert turn.parsed is None
+    assert "at least 1 character" in turn.errors
 
 
 def test_running_past_the_script_is_an_error_rather_than_a_guess() -> None:

@@ -1,6 +1,12 @@
 from fake_incident import alert_packet, incident_scope, packet_evidence
 
-from causalops.prompts import FENCE_CLOSE, FENCE_OPEN, fence_safe, render_context
+from causalops.prompts import (
+    FENCE_CLOSE,
+    FENCE_OPEN,
+    SYSTEM_TEXT,
+    fence_safe,
+    render_context,
+)
 
 
 def context_with(summary: str) -> str:
@@ -39,6 +45,23 @@ def test_the_context_reports_the_real_budget_status() -> None:
 
     assert "model calls left: 3" in context
     assert "checks left: 1" in context
+
+
+def test_system_text_forbids_narrative_alongside_a_tool_call() -> None:
+    """`live_model.py`'s `_has_visible_content` refuses a live turn that
+    carries any visible-text block alongside a tool call -- and, since
+    `Budgets.repairs = 1` is run-wide (`graph.py`), one occurrence of a
+    model narrating a sentence next to a real tool call can burn the
+    investigation's only repair slot and fail the whole run safe. This
+    pins the system prompt's own explicit instruction against that
+    behaviour, so a future edit cannot silently drop the sentence that
+    exists to prevent it. The wording was reworded post-review from "the
+    tool call alone" (ambiguous between "no narrative text" and "exactly
+    one tool call", the latter reading being wrong -- this architecture
+    now requires exactly one native call on every
+    INITIAL_PLAN/HYPOTHESIS_UPDATE turn) to a phrasing that does not blur
+    the no-narrative rule with the cardinality rule."""
+    assert "do not add narrative text" in SYSTEM_TEXT
 
 
 def test_evidence_appears_with_its_opaque_id_inside_the_fence() -> None:

@@ -61,6 +61,57 @@ class CostCeilingExceeded(Exception):
         self.remaining_usd = remaining_usd
 
 
+class AmbiguousReservationNotResent(Exception):
+    """A reservation already existed for this exact request key before this
+    call -- `record_reservation_before_request` returned it with
+    `is_new=False` -- so the caller (`live_model.py`'s `_send`) refuses to
+    invoke the provider under it, rather than assume a second send is safe.
+
+    Unit 3b-4 addendum, Group B. `record_reservation_before_request` used to
+    return an existing row indistinguishably from a freshly-inserted one,
+    and `_send` invoked the provider unconditionally either way. A crash
+    between reserving and settling, followed by a LangGraph resume that
+    re-renders the identical stage (same `context_digest`), correctly read
+    the SAME ledger row back (no double-counted dollar in this table) but
+    still sent a SECOND real paid request under it -- the exact "reissue an
+    ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids, in the one
+    scenario the idempotency key exists to prevent.
+
+    Both states the pre-existing row could be in are refused the same way,
+    not two different judgment calls:
+
+    - `RESERVED`: an earlier attempt at this exact request may already be
+      in flight, or may have crashed after an earlier send started but
+      before this process observed the result -- this module cannot tell
+      those apart, so it refuses rather than guess a second send is safe.
+    - `SETTLED`: an earlier attempt already completed. There is no stored
+      response to return instead of resending -- `CostLedgerRow` records
+      only cost and token counts, never the model's actual output -- and
+      resending would definitely pay a second time for a request that
+      already succeeded once. Reconstructing or caching the historical
+      response is future work if ever needed; refusing is the only choice
+      available today that cannot silently cost money either way.
+
+    Defined here, not in `live_model.py`: `graph.py` catches this alongside
+    `CostCeilingExceeded` without importing `live_model.py` at all (it
+    depends only on the `ToolCallingModel` protocol, never the concrete
+    live adapter -- `causalops.live_model` does not appear anywhere in
+    `graph.py`, confirmed by grep) -- the same reason `CostCeilingExceeded`
+    itself lives here rather than in the module that raises `InputTooLarge`.
+    """
+
+    def __init__(self, row: "CostLedgerRow") -> None:
+        super().__init__(
+            f"a {row.state} reservation already exists for run "
+            f"{row.run_id!r}, phase {row.graph_phase!r}, turn "
+            f"{row.model_turn} -- refusing to send a second request under "
+            "the same key. Start a fresh investigation instead of resuming "
+            "this thread: resuming re-renders the identical request and "
+            "hits this same refusal again, every time."
+        )
+        self.row = row
+
+
 class CostLedgerRow(BaseModel):
     """One model request's reservation, and its settlement once the request
     has actually returned. `state == "RESERVED"` until `settle_reservation`
@@ -172,16 +223,31 @@ def record_reservation_before_request(
     reserved_usd: float,
     requested_at: datetime,
     ceiling_usd: float,
-) -> CostLedgerRow:
+) -> tuple[CostLedgerRow, bool]:
     """Reserve one request's worst-case cost against the application-wide
-    ceiling, or refuse before anything is sent.
+    ceiling, or refuse before anything is sent. Returns `(row, is_new)`:
+    `is_new` is `True` only when this call is the one that inserted `row`.
 
-    Idempotent on the amended §5 key: an identical retry (the same stage
-    re-rendered byte-for-byte after a crash between reserving and settling)
-    reads the existing row back rather than reserving twice -- the same
-    "record before the risky operation, retry reads back" rule
-    `approvals.py`'s `record_decision_before_resume` establishes for owner
-    decisions, applied here to money instead of a decision.
+    Idempotent on the amended §5 key at the LEDGER level: an identical
+    retry (the same stage re-rendered byte-for-byte after a crash between
+    reserving and settling) reads the existing row back rather than
+    reserving a second dollar amount -- the same "record before the risky
+    operation, retry reads back" rule `approvals.py`'s
+    `record_decision_before_resume` establishes for owner decisions,
+    applied here to money instead of a decision.
+
+    Unit 3b-4 addendum, Group B. Idempotent bookkeeping is NOT the same
+    claim as "safe to send again": this function used to return the
+    existing row indistinguishably from a freshly-inserted one, and
+    `live_model.py`'s `_send` sent the request unconditionally either way
+    -- a crash-then-resume with the same `context_digest` reserved against
+    the same row correctly (no double-counted dollar in this table) but
+    still invoked the provider a second time for real money, the exact
+    "reissue an ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids.
+    This function still owns only the ledger's bookkeeping -- whether to
+    actually send is `_send`'s decision, informed by the `is_new` flag this
+    now returns, the same division of responsibility `CostCeilingExceeded`
+    already has (raised here, decided how to route by `graph.py`).
 
     The read-check-insert sequence runs inside one `BEGIN IMMEDIATE`
     transaction so a second connection cannot insert a competing
@@ -204,7 +270,7 @@ def record_reservation_before_request(
         existing = _read_row(conn, run_id, graph_phase, model_turn, context_digest)
         if existing is not None:
             conn.commit()
-            return existing
+            return existing, False
         spent = _reserved_and_settled_total(conn)
         remaining = ceiling_usd - spent
         if reserved_usd > remaining:
@@ -235,7 +301,7 @@ def record_reservation_before_request(
         "just-committed reservation is not readable back -- cost_ledger's "
         "own write path is broken, not a caller error"
     )
-    return row
+    return row, True
 
 
 def settle_reservation(
@@ -279,9 +345,10 @@ def settle_reservation(
         if cursor.rowcount == 0:
             conn.rollback()
             raise CheckpointStoreError(
-                CheckpointStoreReasonCode.STORE_UNAVAILABLE,
-                f"no RESERVED cost_ledger row for {(run_id, graph_phase, model_turn)} "
-                "to settle -- settle called without a prior reservation",
+                CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE,
+                "no RESERVED cost_ledger row for request key "
+                f"{(run_id, graph_phase, model_turn, context_digest)} to settle "
+                "-- the row is absent or not RESERVED",
             )
         conn.commit()
     except sqlite3.Error as error:

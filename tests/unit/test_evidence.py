@@ -8,11 +8,14 @@ from pydantic import JsonValue
 from causalops.domain import Evidence, EvidenceKind
 from causalops.evidence import (
     CONTEXT_QUOTAS,
+    MAX_RESULT_BYTES,
     EvidenceStore,
     build_evidence,
     content_hash,
     digest_text,
+    fits,
     new_opaque_id,
+    trim_to_bytes,
 )
 
 
@@ -119,3 +122,49 @@ def test_context_evidence_adds_no_marker_when_nothing_is_dropped() -> None:
 
     assert len(kept) == 2
     assert markers == ()
+
+
+def test_trim_to_bytes_pops_rows_and_keeps_the_count_field_in_sync() -> None:
+    rows: list[JsonValue] = [{"text": "x" * 2000} for _ in range(20)]
+    payload: dict[str, JsonValue] = {"row_count": len(rows), "truncated": False}
+
+    result = trim_to_bytes(payload, "rows", rows, "row_count")
+
+    assert fits(result)
+    assert result["truncated"] is True
+    assert result["row_count"] == len(result["rows"])  # type: ignore[arg-type]
+    assert result["row_count"] < 20
+
+
+def test_trim_to_bytes_falls_back_to_shrinking_a_scalar_field() -> None:
+    """Unit 3b-4 addendum, C3. Before this fix, once `rows` reached zero the
+    trimming loop stopped even if `fits(payload)` was still `False` --
+    reproducing `run_changes_check`'s bug directly against `trim_to_bytes`
+    itself, with no `RunPaths`/telemetry scaffolding needed: a single
+    oversized scalar field (`"summary"`, standing in for `run_changes_
+    check`'s real `summaries`) is bigger than `MAX_RESULT_BYTES` all by
+    itself, so no amount of row-popping can ever make `fits(payload)` true
+    on its own -- rows are still popped first (unconditionally, the same
+    as before this fix; see `trim_to_bytes`'s own docstring for why an
+    earlier version of this fix that tried to skip that step broke on
+    `run_changes_check`'s real shape), and the scalar fallback then
+    finishes the job."""
+    oversized_summary = "y" * (MAX_RESULT_BYTES + 2000)
+    payload: dict[str, JsonValue] = {
+        "row_count": 3,
+        "summary": oversized_summary,
+        "truncated": False,
+    }
+    rows: list[JsonValue] = [{"text": "a"}, {"text": "b"}, {"text": "c"}]
+
+    result = trim_to_bytes(payload, "rows", rows, "row_count")
+
+    assert fits(result)
+    assert result["truncated"] is True
+    assert result["row_count"] == len(result["rows"])  # type: ignore[arg-type]
+    # Shrunk, not silently dropped -- `"summary"` still exists and is a
+    # (much smaller) prefix of the original, not a lie about what the
+    # oversized field contained.
+    assert isinstance(result["summary"], str)
+    assert 0 < len(result["summary"]) < len(oversized_summary)
+    assert oversized_summary.startswith(result["summary"])

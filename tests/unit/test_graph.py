@@ -35,7 +35,11 @@ from langgraph.types import Command
 
 import causalops.graph as graph_module
 import causalops.tool_wrappers as tool_wrappers_module
-from causalops.cost_ledger import CostCeilingExceeded
+from causalops.cost_ledger import (
+    AmbiguousReservationNotResent,
+    CostCeilingExceeded,
+    CostLedgerRow,
+)
 from causalops.domain import (
     Budgets,
     CheckOutcome,
@@ -58,6 +62,7 @@ from causalops.domain import (
     RunbookCheckOutcome,
     ToolOutcome,
     ToolProposal,
+    utc_now,
 )
 from causalops.evaluation import count_control
 from causalops.evidence import build_evidence
@@ -545,13 +550,48 @@ def test_an_oversized_request_refusal_reports_its_own_reason_not_internal_error(
     assert "internal_error" not in names
 
 
+def _sample_cost_ledger_row(state: str) -> CostLedgerRow:
+    return CostLedgerRow(
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        state=state,
+        reserved_usd=0.01,
+        reserved_at=utc_now(),
+    )
+
+
+def test_an_ambiguous_reservation_refusal_reports_its_own_reason() -> None:
+    """Post-freeze review, P2-2. `AmbiguousReservationNotResent`
+    (`cost_ledger.py`, Unit 3b-4 addendum's Group B) is the third
+    refuse-before/instead-of-sending exception `live_model.py`'s `_send`
+    can raise, alongside `CostCeilingExceeded`/`InputTooLarge` above --
+    same shape, same `graph.py` except-tuple, previously with zero test
+    coverage anywhere in this suite (`grep -rn AMBIGUOUS_MODEL_REQUEST
+    tests/` returned nothing before this test existed)."""
+    model = _RaisingModel(
+        AmbiguousReservationNotResent(_sample_cost_ledger_row("RESERVED"))
+    )
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.AMBIGUOUS_MODEL_REQUEST
+    assert result.report.repairs_used == 0
+    names = [event.name for event in recorder.events]
+    assert "internal_error" not in names
+    assert "stage_stopped" in names
+
+
 class _RaisesOnlyOnFinalAssessment:
     """Wraps a real `ReplayToolCallingModel`, forwarding every `propose`
     call unchanged (so INVESTIGATE proceeds normally, and completes, all
     the way to FINAL_ASSESSMENT) but raising on `respond` -- the only way
     to reach P2-2's FINAL_ASSESSMENT-specific exception-tuple catch
     (`graph.py`'s `final_assessment` node, `except (CostCeilingExceeded,
-    InputTooLarge)`). `_RaisingModel` above cannot reach that code path: it
+    InputTooLarge, AmbiguousReservationNotResent)` as of the Unit 3b-4
+    addendum). `_RaisingModel` above cannot reach that code path: it
     raises on `propose` too, so the run never gets past INVESTIGATE's own
     turn 0 to reach FINAL_ASSESSMENT at all."""
 
@@ -585,6 +625,60 @@ def test_a_cost_ceiling_refusal_at_final_assessment_reports_its_own_reason() -> 
     names = [event.name for event in recorder.events]
     assert "internal_error" not in names
     assert "stage_stopped" in names
+
+
+def test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason() -> (
+    None
+):
+    """Post-freeze review, P2-2, the FINAL_ASSESSMENT-side sibling of
+    `test_an_ambiguous_reservation_refusal_reports_its_own_reason` above --
+    same reasoning as the cost-ceiling pair: the INVESTIGATE-side test
+    alone cannot exercise `final_assessment`'s own
+    `except (CostCeilingExceeded, InputTooLarge, AmbiguousReservationNot
+    Resent)` tuple, since a raise on turn 0's `propose` never lets the run
+    reach that handler."""
+    model = _RaisesOnlyOnFinalAssessment(
+        graph_replay_model(),
+        AmbiguousReservationNotResent(_sample_cost_ledger_row("SETTLED")),
+    )
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code is ReasonCode.AMBIGUOUS_MODEL_REQUEST
+    names = [event.name for event in recorder.events]
+    assert "internal_error" not in names
+    assert "stage_stopped" in names
+
+
+def test_money_refusal_reason_code_maps_all_three_and_raises_on_a_fourth() -> None:
+    """Post-freeze review, P3-5. Direct unit coverage of
+    `_money_refusal_reason_code` itself, not just the graph-level behaviour
+    the tests above already prove -- the two tests above only ever pass one
+    of the three known refusal types, so neither could catch the bare
+    fall-through the third branch used to be. A `ValueError` stands in for
+    a hypothetical fourth refusal type nothing in this codebase raises
+    today; the point is that `_money_refusal_reason_code` itself refuses to
+    guess for a type it was not told how to map, rather than silently
+    reporting `AMBIGUOUS_MODEL_REQUEST` for anything unrecognised."""
+    assert (
+        graph_module._money_refusal_reason_code(
+            CostCeilingExceeded(reservation_usd=1.0, remaining_usd=0.1)
+        )
+        is ReasonCode.COST_CEILING_EXCEEDED
+    )
+    assert (
+        graph_module._money_refusal_reason_code(InputTooLarge(estimated_tokens=9999))
+        is ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
+    )
+    assert (
+        graph_module._money_refusal_reason_code(
+            AmbiguousReservationNotResent(_sample_cost_ledger_row("RESERVED"))
+        )
+        is ReasonCode.AMBIGUOUS_MODEL_REQUEST
+    )
+    with pytest.raises(AssertionError, match="unhandled refusal: ValueError"):
+        graph_module._money_refusal_reason_code(ValueError("not a real refusal"))  # type: ignore[arg-type]
 
 
 class _TwoToolCallsModel:

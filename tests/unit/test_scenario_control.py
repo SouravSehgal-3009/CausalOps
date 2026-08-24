@@ -16,6 +16,7 @@ from causalops.scenario_control import (
     reset_scenario,
     runs_root,
     start_scenario,
+    validated_run_paths,
 )
 
 FAMILY = "configuration_change"
@@ -75,6 +76,18 @@ def read_active_config(root: Path) -> dict[str, object]:
         (runs_root(root) / incident / "lab" / "config.json").read_text(encoding="utf-8")
     )
     return config
+
+
+def test_validated_run_paths_refuses_a_symlink_loop(tmp_path: Path) -> None:
+    incident_id = "loop"
+    target = runs_root(tmp_path) / incident_id
+    target.parent.mkdir(parents=True)
+    target.symlink_to(target)
+
+    with pytest.raises(LabError) as excinfo:
+        validated_run_paths(tmp_path, incident_id)
+
+    assert excinfo.value.reason_code is LabReasonCode.INCIDENT_NOT_FOUND
 
 
 def gateway_reading_config(root: Path) -> Callable[[], int]:

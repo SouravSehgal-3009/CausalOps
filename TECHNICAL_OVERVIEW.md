@@ -2187,13 +2187,17 @@ it is written.
   call that never reaches `.connect()` could still leak a hostname to a
   resolver. Harmless while nothing in the suite resolves a real hostname;
   becomes live the moment `api.anthropic.com` appears.
-- **A live model can contradict itself across channels** — a native tool
-  call alongside structured content that also carries `stop_reason`, a
-  combination replay cannot produce by construction. Unit 3b-1 treats
-  `turn.tool_call`'s non-emptiness as authoritative for "was a check
-  proposed," identical to today's behaviour (the node never reads
-  `parsed.proposal` directly) — not a new gap, but 3b-2's adapter design
-  must resolve it for a live provider.
+- **Current live proposal protocol — single native call.** Each
+  INITIAL_PLAN/HYPOTHESIS_UPDATE turn binds the five registered check tools
+  plus adapter-internal `record_stop`, with `parallel_tool_calls=False`.
+  Exactly one native call is accepted: a check includes 2–3 hypotheses and
+  its rationale; `record_stop` includes 2–3 hypotheses and a required,
+  non-empty stop reason. The provider-facing check schemas omit the duplicate
+  `tool` field; `tool_calls.parse_tool_call` validates the registered native
+  name and restores the internal discriminator so policy and fingerprints are
+  unchanged. Zero, multiple, unknown, malformed, or visible mixed output is
+  repaired through the normal model-output path. This supersedes the historic
+  two-call `record_plan` reconciliation described below.
 
 ### Unit 3b-2 — running the live smoke call
 
@@ -2301,8 +2305,8 @@ anything new this unit built:
   "The smoke call's findings" below for the measured numbers and what
   changed as a result. If a row ever does show `actual_usd >
   reserved_usd`, suspect the two unmodelled contributions
-  (`estimate_input_tokens`'s own docstring names them: the provider's
-  tool-use system prompt and ordinary message-envelope overhead) first,
+  (provider-side tool-use and message-envelope overhead, which
+  `estimate_input_tokens` deliberately does not receive) first,
   and treat it as **a signal to re-derive `PESSIMISTIC_CHARS_PER_TOKEN`,
   not an incident**: the violation is bounded to a fraction of a cent per
   row, and the application-wide ceiling still counts the *reserved*
@@ -2451,8 +2455,8 @@ during Unit 3b-2, now measured rather than argued.
 cap actually exists to bound at 9,600 (3,200 × 3.0 = 9,600 = 9,600 × 1.0):
 the cap's job was never really "N tokens," it was always "N characters of
 prose," and a ratio change without a matching cap change would have
-silently re-tightened it — `pricing.py`'s own comments on both constants
-now say so, and `test_pricing.py`'s `test_the_input_cap_preserves_the_
+silently re-tightened it. `pricing.py` records the current conservative
+estimate; `test_pricing.py`'s `test_the_input_cap_preserves_the_
 intended_9600_character_prose_budget` pins the 9,600-character figure
 directly rather than deriving it from the two constants it is meant to
 guard.
@@ -2460,21 +2464,673 @@ guard.
 **Why the tool schema stays out of `MAX_INPUT_TOKENS` — corrected.** An
 earlier version of this argument (both in this document and, before it, in
 Unit 3b-2's own unpinned "512 tokens" claim) used a FINAL_ASSESSMENT turn
-with zero evidence as its example and concluded folding the ~7,595-token
-tool schema into the cap "would refuse ordinary runs." That conclusion did
-not follow from its own numbers: at 1,280 tokens of prose against a
-9,600 − 7,595 = 2,005-token folded headroom, that specific turn is
-*admitted* (1,280 < 2,005), not refused — the same defect (512 < 620) was
-present in the original figure and survived the rewrite to the new one.
-The claim is still true, on the right example: `Budgets.runbook_passages`
-(5) retrieved passages at `RunbookPassage.content`'s own `max_length`
-(800) are still present in a FINAL_ASSESSMENT turn's context — `graph.py`'s
-`_make_final_assessment` rebuilds and re-renders passages from state on
-every stage, not just the one that retrieved them — and measure to 5,465
-characters/tokens, well over the 2,005-token folded headroom. Measured
-directly and pinned by `test_live_model.py`'s
-`test_a_final_assessment_with_a_full_runbook_page_would_exceed_a_folded_cap`,
-not asserted from the zero-evidence case that cannot support it.
+with zero evidence as its example and concluded folding the tool schema
+into the cap "would refuse ordinary runs." That conclusion did not follow
+from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
+7,595 = 2,005-token folded headroom, that specific turn was *admitted*
+(1,280 < 2,005), not refused — the same defect (512 < 620) was present in
+the original figure and survived the rewrite to the new one. The valid
+example is a HYPOTHESIS_UPDATE after runbook retrieval: one check remains,
+it can retain all five `Budgets.runbook_passages`, and its proposal-tool
+binding is 12,011 characters/tokens. By
+contrast, FINAL_ASSESSMENT binds its 2,292-token schema, and its
+5,577-character full-runbook context fits the resulting 7,308-token folded
+headroom. `test_live_model.py`'s
+`test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap`
+renders that real proposal-stage shape, proves its prose fits the cap while
+prose plus tools does not, and proves the fake transport is still sent. Unit
+3b-4's item 6 (below) shrank the tool payload from 7,595 to 6,727
+characters; the addendum round's A1/A2 (also below) then grew it back to
+**7,020** at that historical point, since both were additive prose fixes in
+the opposite direction from item 6's strip. The current strict-schema payload
+is 12,011, which is already larger than the 9,600-token prose cap. Folding
+proposal schemas into that cap would therefore refuse even an empty proposal
+request; final-assessment schemas do not have that problem. The test derives
+the proposal-stage folded headroom from emitted definitions instead of
+carrying it by hand.
+
+### The second live run and its root-cause investigation — Unit 3b-4
+
+**The owner ran a second live call after Unit 3b-3's discriminator fix
+landed.** Cost $0.05560. It confirmed the fix: Claude sent the `tool`
+discriminator, a check executed, evidence was collected, and the run
+reached `FINAL_ASSESSMENT` for the first time. It still ended
+`FAILED_SAFE`/`REPAIR_EXHAUSTED`, on two new failures neither of which was
+the discriminator regressing.
+
+**The root-cause investigation that followed found three tiers this
+project had been conflating as one contract:** in-schema-and-enforced
+(`required`/`enum`/`const`, but only under `strict: true`, which this
+codebase does not set), in-schema-but-never-enforced (`maxLength`, numeric
+bounds), and not expressible in schema at all (conditional requirement,
+cross-field rules — a `model_validator(mode="after")` cannot appear in
+`model_json_schema()`'s output). Both new failures fell in the second and
+third tiers. **The reviewing error that let this ship:** Unit 3b-3's review
+tested the schema against itself ("is `default` consistent with
+`required`?"), which cannot detect a mismatch between the schema and the
+*application code that refuses the run* — and it read a field's absence
+from `required` as evidence the field was optional, which is not true for
+a conditionally-required one.
+
+**Historical protocol note.** The following Unit 3b-4 details describe the
+then-current two-call `record_plan` protocol. They preserve the live-run and
+review evidence, but its implementation and test names are superseded by the
+single-call `record_stop` protocol documented above.
+
+**Six items landed, all prose/schema-shaping only except item 1:**
+
+1. **`PlanRecord.stop_reason` (`live_model.py`) is now required-and-nullable
+   -- the only behavioural change.** The second run's first new failure was
+   `record_plan` omitting `stop_reason` on a turn that proposed no check,
+   legal under the old `= None` default. Reproducing Unit 3b-3's successful
+   `tool`-field fix meant reproducing its *shape* (`required` membership
+   plus no `default`), not its edit (dropping `= None`) — `tool` was
+   already in `required`; `stop_reason` was not, so dropping only its
+   default would have left it exactly as omittable as before. The field's
+   `= None` assignment is gone instead, which pydantic marks required; the
+   emitted schema was asserted directly by that unit's then-current
+   live-model test.
+2. **`record_final_assessment`'s three terminal-disposition invariants**
+   (`domain.check_terminal_invariants`: a diagnosis needs a root cause and
+   supporting evidence; an abstention needs `UNDETERMINED`) are now stated
+   in prose, on `FinalAssessment.disposition`/`root_cause`/
+   `supporting_evidence_ids`'s own `Field(description=...)` in `domain.py`
+   and in the tool's top-level description in `live_model.py` — the
+   validator itself is unchanged.
+3. **The 300-character bound is now stated in words** on
+   `FinalAssessment.uncertainty`/`next_step`, `Hypothesis.missing_evidence`
+   (`domain.py`), and `PlanRecord.stop_reason` (`live_model.py`) — the
+   second run's second new failure exceeded `uncertainty`'s bound on an
+   *uncorrected* first attempt (an earlier stage had already spent the
+   run's one repair), so whether a correction would have fixed it is
+   untested; Anthropic's structured outputs do not enforce `maxLength`
+   server-side, so prose is the only mechanism that can actually hold a
+   model under it. The bound itself was not raised or relaxed.
+4. **`FinalAssessment.supporting_evidence_ids` AND `contrary_evidence_ids`
+   now tell the model to copy evidence ids exactly.** `graph.py:1069`'s
+   `cited = parsed.supporting_evidence_ids + parsed.contrary_evidence_ids`
+   feeds both fields into `store.unknown_ids(cited)`, which runs after
+   parsing, so a forged or mistyped id in either one is terminal with no
+   repair (`ReasonCode.FORGED_EVIDENCE_REFERENCE`). `contrary_evidence_ids`
+   was missed in this item's first pass and documented in a follow-up
+   round, once item 5's own cross-check (below) surfaced it as a live,
+   undocumented instance of the identical gap it was built to find —
+   repeating this document's own naming instance-not-class error a third
+   time, caught before it cost a run rather than after.
+5. **A schema-vs-application cross-check landed as a real test**
+   (`tests/unit/test_live_model.py`: `assert_documented_prose_only_contract`
+   plus `test_each_known_final_assessment_contract_is_schema_accepted_and_
+   app_refused`, its then-current stop-record gap regression, and
+   `test_an_undocumented_prose_only_contract_fails_
+   the_check`, which demonstrates the guard against a real, currently
+   unlisted gap on `search_runbooks.limit` exceeding `Budgets.
+   runbook_passages` — `contrary_evidence_ids` was this demonstration's
+   original example until item 4's follow-up fixed it, at which point it
+   correctly stopped being a gap the demonstration could show): for every
+   payload the emitted schema accepts and the application refuses, the
+   contract must be named in `KNOWN_PROSE_ONLY_CONTRACTS` with a pointer to
+   the prose that carries it, or the assertion fails. This closes the
+   *class* of gap the investigation found, not just the five instances it
+   found first — and, mid-unit, found a sixth.
+6. **Maintainer-only class docstrings no longer ship to Claude.**
+   `model_json_schema()` promotes a class docstring to `description` at the
+   schema root and at every `$defs` entry; `_strip_maintainer_prose`
+   (`live_model.py`) strips both sites, with a whitelist
+   (`Hypothesis.__doc__`, "Rank is not a probability," is genuine model
+   guidance and stays) — Unit 3b-3's P2-5 fix stripped two leaks by naming
+   the two classes it was looking at, and this investigation found three
+   more the same defect had reached (`SearchRunbooksArguments.__doc__`,
+   `RunbookTopic.__doc__`, `ModelDisposition.__doc__`) because the fix was
+   scoped to instances, not the class of the problem. The tool payload
+   shrank from 7,595 to 6,727 characters as a result of this item alone --
+   the addendum round's A1/A2 (below) later grew it back to 7,020, so
+   6,727 is this item's OWN historical effect, not the figure
+   `test_the_tool_payload_size_matches_what_pricingpy_assumes` currently
+   pins; see "The addendum round," below, for the current number.
+
+**Not approved, explicitly ruled out:** `strict: true` (the installed
+`langchain-anthropic==1.6.1`'s `convert_to_anthropic_tool` silently drops a
+`strict=` argument for a dict tool definition already carrying
+`name`/`description`/`input_schema` — confirmed against the installed
+package — so whether the API would even accept the result cannot be proven
+offline); raising or truncating the 300-character bound to make a run pass.
+
+**Recorded, not in this unit:** schema bounds exceeding policy budgets
+(`query_logs.row_limit` 1–200 vs `Budgets.log_rows` 40;
+`search_runbooks.limit` 1–20 vs `runbook_passages` 5 — this one is now
+exercised directly by `test_an_undocumented_prose_only_contract_fails_
+the_check`, as a real, deliberately-still-open gap, not a fixed one) cost
+a model call on denial and are invisible to the model; `Budgets.repairs =
+1` is run-wide, not per stage, so the second run's first failure consumed
+the only repair before the second failure was ever offered one;
+`events.jsonl` does not distinguish "this stage burned its own repair"
+from "no budget remained when the stage began."
+
+### The addendum round — correctness's own P1 and a second reviewer's findings
+
+**On top of the Unit 3b-4 freeze above, a second review pass landed one more fold-in
+(Group A) plus six independently-verified findings from an independent static review
+tool ("codex") run against `master`, split by what they touch: Group B (money-safety,
+same trust domain as the live-model work above) and Group C (pre-existing hardening
+gaps unrelated to the live-model prose investigation).** Every finding was verified
+against the actual code before being approved — one codex claim (an append-only
+`CLAUDE.md` convention) was a misreading and is not included below.
+
+**Group A — folded into the 3b-4 prose fixes.**
+
+- **A1.** `evidence_gap`/`expected_observation` (`live_model.py`'s
+  `_RATIONALE_PROPERTIES`) carried `maxLength: 300` without ever stating the bound in
+  words — the same gap item 3 closed on four other fields, missed here because these
+  two are synthetic properties this module injects, outside that sweep's scope. More
+  exposed than any field item 3 already fixed: both are REQUIRED on every domain-tool
+  call, not once per run.
+- **A2.** In the then-current `record_plan` protocol, the tool description said
+  "every turn" but never "once per turn"; its duplicate-call refusal already
+  said "call it exactly once," and the description was updated to match.
+- **A3, record only.** `DUPLICATE_PROPOSAL` (`policy.py`) has no prose anywhere —
+  not fixed this round; it has no live-run precedent yet, and the fact is not
+  expressible in schema (repetition across turns, not a payload shape).
+- **A4, record only.** `KNOWN_PROSE_ONLY_CONTRACTS`'s pointers (`test_live_model.py`)
+  are unverified — confirmed real by both reviewers (an equal-length placeholder
+  swap leaves all tests green), ruled future-drift risk rather than next-run risk.
+  A uniform verification mechanism needs real design (two entries point at
+  wire-visible prose, two at `domain.py` validator messages) and is not attempted
+  this round.
+- **A5, no code change.** `disposition`/`root_cause`'s per-field descriptions
+  duplicate the tool-level description in `live_model.py`. Verified deliberate: it is
+  unconfirmed whether Anthropic's parser honours a `description` sibling to a
+  property's own `$ref`, so collapsing to one copy risks losing the guidance
+  entirely if the sibling form is silently ignored. A comment in `domain.py` records
+  this so it is not "simplified away" later.
+
+The propose-turn tool payload moved to **7,020 characters/tokens** at that
+historical point (up from 6,727, since A1/A2 are additive) — re-derived and re-pinned by
+`test_the_tool_payload_size_matches_what_pricingpy_assumes`, with every citation in
+the then-current implementation and this document updated to match.
+
+**Group B — the double-spend fix, the most important item in this round.**
+`cost_ledger.record_reservation_before_request` returned an existing reservation row
+indistinguishably whether it was `RESERVED` (unsettled) or freshly inserted, and
+`live_model.py`'s `_send` invoked the provider unconditionally either way. A crash
+between reserving and settling, followed by a LangGraph resume that re-renders the
+identical stage (same `context_digest`), read back the same ledger row (correct
+bookkeeping, no double-counted dollar) but still sent a second real paid request under
+it — the exact "reissue an ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids, in
+the one scenario the amended idempotency key exists to prevent. No existing test caught
+this: `test_an_identical_retry_reads_back_the_same_row_not_a_second_one`
+(`test_cost_ledger.py`) only ever asserted the ledger stayed correct, never that the
+transport was invoked twice.
+
+`record_reservation_before_request` now returns `(row, is_new)`; `_send` refuses to
+invoke the provider when `is_new` is `False`, raising the new
+`AmbiguousReservationNotResent` (`cost_ledger.py`, not `live_model.py` — `graph.py`
+catches it alongside `CostCeilingExceeded` without ever importing the concrete live
+adapter) and reporting the new `ReasonCode.AMBIGUOUS_MODEL_REQUEST`. Both possible
+states of a pre-existing row (`RESERVED` or `SETTLED`) are refused the same way, not
+two different judgment calls — see the exception's own docstring for why a `SETTLED`
+row cannot simply be replayed back (`CostLedgerRow` never stored the model's actual
+response, only its cost and token counts). `test_live_model.py`'s
+`test_a_pending_reservation_refuses_to_resend_without_touching_the_transport` is the
+test codex specifically asked for: it asserts on the fake client's own call count
+(`fake.sent == []`), not just ledger state, and is mutation-verified to fail if the
+new `is_new` check is removed — with the removed check, the mutation run showed the
+fake transport genuinely receiving the second call, the double-spend made visible in
+a test for the first time.
+
+**Open gap, recorded not fixed (post-freeze review, P3-4):** a crash after
+`settle_reservation` commits but before the LangGraph checkpoint saves leaves that
+thread's next resume attempt permanently refusing. The ledger row is genuinely
+`SETTLED` (the request really did complete and really was billed), but the
+checkpoint never advanced past the node that made it, so every resume re-renders
+the identical stage, finds `is_new=False`, and raises `AmbiguousReservationNotResent`
+again -- forever, for that specific thread. There is no code path that detects this
+narrow window and resumes some other way; the fix that exists is procedural, not
+automatic: `AmbiguousReservationNotResent`'s own message now tells the owner directly
+("start a fresh investigation instead of resuming this thread"), so the dead end is
+visible and actionable rather than a silent, repeating refusal an owner might retry
+against forever. Closing it properly would mean either storing enough of the
+model's actual response to replay it, or persisting settlement and the checkpoint
+in one atomic step -- both are real design changes, not this round's scope.
+
+**Group C — six pre-existing hardening gaps, verified real and independent of the
+two observed live-run failures.**
+
+- **C1 (P2, downgraded from codex's P1).** `run_investigate_command`
+  (`cli.py`) built `root / "runs" / incident_id` from an unvalidated positional CLI
+  argument, with no check that the loaded `StoredIncident.scope.incident_id` matched
+  the requested directory. `reset_scenario` (`scenario_control.py`) already had the
+  right check; the new `validated_run_paths` extracts it so both callers share one
+  implementation instead of a second hand-copy. A single-operator local CLI has no
+  separate attacker from victim for the path-traversal framing, but the
+  identity-mismatch check is worth having regardless — it is what catches
+  `runs/<id>/incident.json` ever diverging from its own directory name, a correctness
+  bug a security framing alone would not motivate fixing. Both checks are
+  mutation-verified independently: a decoy artifact planted exactly where an
+  unvalidated `../decoy` argument would resolve to proves the `isalnum()` check fires
+  first, and reverting the identity check alone lets a real (if degenerate)
+  investigation attempt through.
+- **C2 (P2).** `telemetry.py`'s `within_window` could raise `TypeError` comparing a
+  naive `datetime.fromisoformat` result against the aware window bounds it is always
+  called with — only `ValueError` (the parse failure) was caught, turning one
+  malformed log or change record into a `FAILED_SAFE` for the entire check instead of
+  excluding just that record. A naive timestamp is now explicitly rejected (never
+  silently coerced to UTC — this project cannot know what offset was intended), the
+  same way an unparseable one already was.
+- **C3 (P2).** `evidence.py`'s `trim_to_bytes` only shrinks the list it is handed;
+  `run_changes_check` builds a SCALAR `summaries` field (joined from every matched
+  change's summary text) before calling it, so once the byte-trimming loop emptied
+  the list it had nothing left to drop, and the function returned an over-budget
+  payload silently if the scalar alone still exceeded `MAX_RESULT_BYTES`. It now
+  falls back to shrinking the largest remaining string field once the row list is
+  exhausted, and every caller's `row_count`/`change_count`/`edge_count`/
+  `sample_count` is now kept equal to `len(kept)` throughout rather than set once
+  before trimming and left stale. One real implementation bug was caught and fixed
+  during this item's OWN mutation testing: an initial "skip popping rows if it looks
+  like it wouldn't help" optimization broke on `run_changes_check`'s actual shape,
+  where a kept row's raw dict still carries its own full-size `summary` field — a
+  second, undetected copy of the same oversized text the top-level scalar holds, only
+  reachable by removing the row itself. `trim_to_bytes`'s own docstring tells this
+  story so it is not rediscovered.
+- **C4 (P2).** `live_model.py`'s `respond()` used `next(...)` to silently take the
+  first of two or more `record_final_assessment` calls in one message, discarding a
+  conflicting second one instead of refusing — analogous to the then-current
+  proposal-side duplicate-call refusal. Two-or-more matches now refuse the same way zero matches already
+  did (empty `content`, routed through the existing repair path).
+- **C5 (P2).** `cli.py`'s `main()` catches only `(LabError, RunRecordError,
+  CheckpointStoreError)`; three call sites read and validated a stored JSON artifact
+  (`incident.json` twice, `report.json` once) with nothing wrapping
+  `Path.read_text()`/`model_validate_json()` — a missing file, invalid UTF-8, or a
+  malformed JSON body all escaped as raw tracebacks. The new `_load_stored_artifact`
+  helper centralizes this, catching `OSError`, `UnicodeDecodeError`, and pydantic's
+  `ValidationError`, and reports the new `LabReasonCode.CORRUPT_ARTIFACT` — distinct
+  from `INCIDENT_NOT_FOUND` ("there is no such artifact") and from the `report.json`
+  site's previous `CheckpointStoreReasonCode.STORE_UNAVAILABLE` (a corrupt artifact
+  is not the same fact as an unavailable store; `test_approvals.py`'s existing
+  regression test for that site was updated to the more accurate code).
+- **C6 (P3, low priority, owner-approved to fix this round).**
+  `telemetry.py`'s `registered_check_runner` — superseded by
+  `tool_wrappers.dispatch_registry` before `search_runbooks` existed, unused by
+  `cli.py` — is now `_registered_check_runner`, a private name rather than a
+  public-looking incomplete dispatch seam. Kept, not deleted: `test_telemetry.py`
+  still exercises it directly as documented history of why the seam cannot route a
+  `search_runbooks` proposal.
+
+**Not approved, unchanged from the base 3b-4 scope:** `strict: true`, the item 2
+`anyOf` schema encoding, raising or truncating the 300-character bound, and the
+GitHub Actions Node 20 deprecation.
+
+### Second dual review on `a44bf57` — P1, a live_model.py batch, and cleanup
+
+**Both reviewers re-verified the pushed WIP export (`a44bf57`) independently.** Correctness
+confirmed all four of codex's own findings from that pass (one worse than reported, one
+disputed to a better fix) plus found four more of its own; simplicity found the readability
+root cause underneath two of them. The owner disposed of every finding; this section records
+what landed.
+
+**P1 — `StoredIncident` identity validation, the serious one.** Correctness traced this past
+"a mismatched artifact produces a raw traceback" to something worse: it defeats the
+safe-failure guarantee entirely. `graph.py`'s `_rebuild_store` raises `ValueError` on a
+mismatched `evidence[i].incident_id`, and that function is called from BOTH the normal
+`_build_report` path and the outer crash-containment path meant to catch exactly this kind of
+failure — a mismatched artifact that got past loading raises the identical error a SECOND
+time, from inside the handler built to catch the first one, and escapes `main()`'s
+`(LabError, RunRecordError, CheckpointStoreError)` catch entirely. `StoredIncident.
+check_identity_agrees` (`domain.py`, a `model_validator(mode="after")`) now confirms
+`scope.incident_id`, `packet.incident_id`, and every `evidence[i].incident_id` agree at LOAD
+time, before either graph path ever sees the artifact — composes for free with
+`_load_stored_artifact`'s existing `ValidationError` → `LabError(CORRUPT_ARTIFACT)`
+translation, no new error handling needed. `EvidenceStore.add`'s own `ValueError` stays
+exactly as it is, an internal invariant guard for a run already in progress, not the thing
+this fix targets — correctness was explicit that converting it would fix the symptom, not
+the cause, since the new validator makes it unreachable from the load path anyway.
+`StoredIncident`'s own class docstring now lists all three identity-bearing fields and where
+each is checked, the same auditable-list discipline `_RATIONALE_PROPERTIES` and
+`KNOWN_PROSE_ONLY_CONTRACTS` already use elsewhere; `cli.py`'s own identity-check comment
+(which overclaimed a whole-artifact guarantee while checking only `scope.incident_id`
+against the directory name) is now precise about what it checks directly versus what the new
+validator already guarantees transitively. Tests: `test_domain.py` pins a packet-mismatch
+refusal, an evidence-mismatch refusal, and the positive self-consistent case; `test_
+approvals.py`'s existing directory-drift test was rebuilt to construct a SELF-consistent
+drifted artifact (the old version could no longer even construct its fixture once the new
+validator landed — a good sign, not a broken test).
+
+**Open gap, recorded not fixed (post-freeze review):** `graph.py`'s `_rebuild_receipts` does
+not check `ToolReceipt.incident_id` against `state["incident_id"]` the way `_rebuild_store`
+now indirectly benefits from checking evidence identity. Checkpoint-sourced, not loaded from
+a potentially-tampered file the way `StoredIncident` is, so lower stakes — not fixed this
+round.
+
+**The `live_model.py` batch — Finding 3, N1, N2, taken together.**
+
+- **Finding 3.** `respond()` checked "exactly one call is named `record_final_assessment`"
+  but never checked the TOTAL call count — a turn with exactly one matching call plus some
+  OTHER, unbound tool name would have passed through, silently dropping the extra call the
+  same way C4 (the previous round) was built to stop happening for a second MATCHING call.
+  Correctness read the installed `langchain-anthropic==1.6.1` source directly
+  (`output_parsers.py:80-92`) and confirmed the client copies tool names verbatim with zero
+  validation against the bound list — not provably reachable offline, but nothing rules it
+  out. Fixed with the exact shape codex proposed:
+  `if len(message.tool_calls) != 1 or len(matching_calls) != 1 or message.invalid_tool_calls`.
+- **N1.** `test_the_tool_payload_size_matches_what_pricingpy_assumes` pins only `propose()`'s
+  payload (`_stop_tool_definition()` plus the five `_domain_tool_definitions()`) —
+  `_final_assessment_tool_definition()` was never in that binding, so `respond()`'s own
+  payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
+  unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
+  assumes`, pinned the final schema at **2,261 characters/tokens** at that
+  historical point. The current single-call proposal measurement is 12,011 for
+  proposals and 2,292 for final assessments; `_send` names them separately.
+- **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
+  mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
+  prose actually EXISTS. Correctness proved the gap with a mutation: deleting
+  `FinalAssessment.disposition`'s `Field(description=...)` in `domain.py` — the exact prose
+  one registry entry names — left all 529 tests green. N1 is the mechanism that let this
+  hide: the only test that could have noticed was measuring the wrong payload. A new
+  `_WIRE_VISIBLE_PROSE_PROOF` mapping in `test_live_model.py` pairs each contract with the
+  exact tool, the exact property path in its REAL emitted schema, and a literal substring of
+  that property's CURRENT description; `test_the_registrys_pointed_at_descriptions_are_
+  actually_present` checks it directly against the schema, not the free-text pointer.
+  Mutation-verified against correctness's own exact demonstration (deleting `disposition`'s
+  description now fails this test, naming the missing substring) and independently against a
+  second field (`stop_reason`).
+- **Readability fold-in.** `respond()`'s own comment made the same shape of overclaim as the
+  `StoredIncident` one above — "Zero matches and two-or-more matches are refused the same
+  way ... rather than the codebase silently picking a winner either time" read as exhaustive
+  when it covered only the matching-name count. Narrowed to say plainly what C4's fix checks
+  (matching-name count) versus what Finding 3 adds (total call count), each in its own
+  paragraph.
+
+**The two pre-trim summary counts.** `run_metric_check` (`prometheus.py`) and
+`run_topology_check` (`telemetry.py`) both had the identical bug already fixed twice in the
+base round for `run_logs_check`/`run_changes_check`: the summary string read a PRE-trim local
+variable (`len(kept)`, `len(edge_list)`) instead of the payload's own post-trim count field.
+`prometheus.py`'s case was a same-round regression — `count_key="sample_count"` was added in
+the very diff that also left the summary string unfixed four lines below. Both now read
+`payload['sample_count']`/`payload['edge_count']`. The topology case was reproducible with
+real data (many long edge strings genuinely exceed the byte budget); the metric case is not
+reachable through this suite's real data shape (`MetricSample.at`/`.value` are both floats,
+always small) and is tested instead by monkeypatching `trim_to_bytes` to simulate what a
+larger future row shape would trigger.
+
+**The services-list 12KiB fix.** Correctness disputed codex's severity and fix shape: an
+oversized `services` list in `run_topology_check` really does produce an over-budget payload
+(34,863 bytes measured against the 12,288-byte cap) but is not reachable through any of the
+four shipped lab topologies (all under 100 bytes total) — **P3, not P2** — and correctness
+enumerated every `trim_to_bytes` caller and every non-row payload field in the codebase to
+confirm `services` is the ONLY non-string, non-row field anywhere that needs its own bounding
+pass. A general recursive "bound every list/dict field" mechanism was explicitly rejected as
+solving a class of problem with exactly one member; the actual fix is a second `trim_to_bytes`
+call treating `services` as its own row list with its own `service_count`. **A real
+composition bug was found and fixed during this fix's OWN mutation testing**, not shipped:
+seeding `services`/`service_count` into the payload while leaving `edges` to be added later
+by its own `trim_to_bytes` call meant a payload that had already converged to fit (services
+trimmed against a payload with no `"edges"` key yet) could go back over budget the instant
+`"edges": []` was added afterward, with nothing left to pop and no string field for the
+scalar fallback to reach (a list is invisible to it). Both `"services"` and `"edges"` are now
+seeded into the payload BEFORE either `trim_to_bytes` call runs, so each call's own `fits()`
+checks see the true combined size from their first iteration.
+
+**Record only, this round:**
+
+- **N3.** `cli.py`'s `run_decision_command` builds `investigations_dir = root / "results" /
+  "investigations" / thread_id` from an unvalidated positional `thread_id` argument — the
+  same class of gap C1 fixed for `incident_id`, on a third call site C1 never covered.
+  Correctness tested `approve ../../decoy` and `approve ..` directly: both refuse cleanly
+  with `THREAD_NOT_FOUND`, since reaching `investigations_dir` in any dangerous way requires
+  a PRE-EXISTING `owner_decisions` row keyed by a real, internally-minted thread id — a
+  traversal string cannot forge one. Not exploitable today; recorded, not fixed.
+- **N4.** `schema_accepts`/item 5's cross-check (`test_live_model.py`) structurally cannot
+  detect any rule spanning more than one tool schema or more than one call in a turn —
+  the then-current `record_plan` plus check shape, multiple domain calls in one
+  turn, and the forged-citation refusal (which needs a live evidence store, not any one
+  schema) are all real prose-only contracts this mechanism can never express, let alone list
+  in the registry. The module-level comment above `schema_accepts` now names this explicitly
+  as a boundary on what the mechanism CAN see, not an incomplete audit of what it has looked
+  at. Docstring-only; no code change.
+
+### Round 4 and round 6 review — trim-order regression, aggregate rebuilds, registry closure, truncation signal
+
+**Two more review rounds on top of `37fcfdc`, landed as `751387d` (round 4) and this round
+(round 6).** Round 5 was a confirmation pass that found nothing new. This section documents
+both landed rounds together since round 4 shipped without a `TECHNICAL_OVERVIEW.md` update of
+its own.
+
+**F1 — the services-list fix (previous round) was tested only for the case it was built for,
+and shipped a regression.** `run_topology_check`'s comment used to claim "order between the two
+[`trim_to_bytes`] calls does not matter for the final result" — true for WHETHER the combined
+payload fits (both `"services"` and `"edges"` are seeded into the payload before either call
+runs, so each call's own `fits()` check always sees the true combined size), false for WHICH
+list absorbs the trimming. `trim_to_bytes` pops rows from its own list unconditionally until
+`fits(payload)`, so whichever call runs first keeps popping against the OTHER list's still
+full weight. Reproduced directly: a realistic incident shape (4 real service names, 400
+oversized edges) under the previously-shipped services-first order reported `service_count: 0`
+— every real service name silently wiped — while `edges`, the field actually responsible for
+the overage, came away barely trimmed. **Fix: `edges` trims first**, because it is the field
+this codebase's real data grows without bound (topology connections); `services` is a short,
+bounded list that should almost never need trimming. Trimming `edges` first protects `services`
+at `edges`'s expense — the right tradeoff for that shape, though it does not eliminate the
+underlying asymmetry, only points it at the field where losing rows is safe to read.
+`test_a_small_services_list_survives_an_oversized_edges_list` pins the asymmetric case; round 6
+additionally rewrote the ORIGINAL services-fix test
+(`test_an_oversized_services_list_still_fits_the_byte_bound`), which had paired an oversized
+`services` list with a degenerate EMPTY `edges` list — exactly the shape of gap that let the
+regression itself ship undetected — to use a small but non-empty `edges` list instead, and
+pins what the shipped edges-first order actually does to it (`edge_count` goes to zero,
+sacrificed so `services` survives trimmed rather than wiped).
+
+**F2 — the registry-closure test only proved one direction.** `test_wire_visible_prose_proof_
+only_names_registered_contracts` used to assert `set(_WIRE_VISIBLE_PROSE_PROOF) <=
+set(KNOWN_PROSE_ONLY_CONTRACTS)` — every PROOF entry is registered, but not the reverse. A
+fifth prose-only contract added to `KNOWN_PROSE_ONLY_CONTRACTS` without a matching proof entry
+would pass silently, with no wire-proof requirement on it at all — the exact shape of gap N2
+(previous round) closed for the first four. Tightened to an exact-set check across
+`_WIRE_VISIBLE_PROSE_PROOF` plus a new, explicitly reasoned exemption registry,
+`_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF`, for the rare contract whose prose is a Python error
+string rather than schema text (empty today). Round 6 changed that exemption registry's type
+from a bare `frozenset[str]` to `dict[str, str]` (label -> reason), matching its two siblings —
+a frozenset had no room to carry the "stated reason" the surrounding comment already demanded
+of every entry.
+
+**F3 — the pre-trim-aggregate bug, two more instances closed, a third found this round.**
+`event_codes` (`run_logs_check`) and `max_value` (`run_metric_check`) were built from local
+loop state entirely before `trim_to_bytes` ran, the same shape already fixed once for
+`row_count`/`change_count`/`edge_count` (Unit 3b-4 addendum, C3) — a row popped by BYTE
+trimming (not just a count cap) could still be reported in the aggregate even though it no
+longer appears in the trimmed row list. Both rebuilt from the POST-trim row list. `event_codes`
+is reachable with real lab-shaped data; `max_value` is not reachable with this suite's current
+data shape (`MetricSample.at`/`.value` are always small floats) but was fixed anyway per the
+owner's ruling to close the class, not just the reachable instance.
+
+Round 6 found a third instance: `summaries` (`run_changes_check`) has the identical shape,
+joined from every matched change before `trim_to_bytes` ran and never rebuilt — worst case,
+`change_count: 0` with `summaries` still listing changes for an empty list. Rebuilt from the
+post-trim `changes` list. Unlike the first two instances, this rebuild is not simply safe by
+inspection without checking: `trim_to_bytes` pops from the END of the row list, so the rebuilt
+string is always a PREFIX of the original (if `changes` still holds rows, `summaries` was never
+touched by trimming, so the payload already fit with the full string present; if `changes` was
+fully emptied, the scalar-shrinking fallback had already reduced `summaries`, and the rebuild
+from an empty list can only be shorter still) — safe by construction, but that is exactly the
+shape of claim F1's own comment made and shipped wrong, so an explicit `fits(payload)` assertion
+checks it at runtime rather than resting on the argument alone.
+`test_changes_summaries_only_name_changes_still_present_after_trimming` reproduces the ordinary
+partial-trim case (30 changes reduce to `change_count == 7`) and confirms `summaries` only names
+the survivors.
+
+**The P1 — the model never saw the truncation signal for two of four check types.**
+`prompts.py`'s `render_context` puts only `CheckOutcome.summary` in front of the model — the
+full JSON payload, which correctly carries `payload["truncated"]`, never reaches it.
+`run_logs_check`/`run_changes_check` already appended `" (truncated)"` to their summary strings
+when cut; `run_metric_check` and `run_topology_check` did not, so a truncated metric window or
+topology read as complete with no signal the true peak (or the full edge/service set) might lie
+outside what survived. Both now append the same `" (truncated)"` note, reading
+`payload["truncated"]` directly.
+
+**Cleanup.** `run_metric_check`'s `max_value`-rebuild comment claimed rebuilding "can only
+shrink or hold `max_value`... never grow the payload back over budget" — true of the NUMERIC
+value, not of JSON byte length (`900.0` serializes to 5 bytes, `0.30000000000000004` to 19), so
+the false general claim was dropped in favor of the comment's own already-stated unreachability
+argument. `test_stored_incident_refuses_an_evidence_incident_id_mismatch`'s docstring, which the
+sibling packet-mismatch test's docstring points readers to for the `_rebuild_store` double-fault
+explanation, did not actually contain it — fixed by stating the explanation there directly
+(see "Second dual review on `a44bf57`" above for the full trace).
+
+### Round 7 and round 8 review — non-finite values, topology comment overclaim, JSON token rejection
+
+**Round 7 landed as `7008534` with no `TECHNICAL_OVERVIEW.md` update of its own — the same gap
+round 4 shipped with, backfilled here together with round 8's own fixes on top of it.** Round 8
+was a whole-branch review (20 mutations against load-bearing code from every prior round, 19
+caught, no P0/P1 anywhere) that found two real P2s, both in round 7's own newest code, plus four
+smaller items.
+
+**Round 7 — `read_sample` rejects non-finite metric readings.** `float()` parses `"NaN"`,
+`"Infinity"`, and an overflow literal like `"1e400"` without raising, and `histogram_quantile`
+(`GATEWAY_LATENCY_P95`) is documented to return NaN over an all-zero-rate bucket — a realistic
+quiet-minute case, not an exotic one. A NaN sample made `max()` in `run_metric_check`
+order-dependent (a genuine peak could be silently replaced depending only on where the NaN
+sample sat in the fetched list), and both non-finite kinds serialize outside the JSON spec.
+`read_sample` now checks `math.isfinite` on both the timestamp and the value after parsing and
+returns `None` — the same "unreadable field, skip this row" contract it already applies to
+unparsable rows — instead of threading a Python `nan`/`inf` into a typed `MetricSample`.
+
+**Round 7 — `run_topology_check` gained an `assert fits(payload)` after both `trim_to_bytes`
+calls.** Unlike every other `trim_to_bytes` caller, this payload has no string-valued field
+(`services`/`edges` are lists; `service_count`/`edge_count`/`truncated` are int/bool), so
+`trim_to_bytes`'s own scalar-shrinking fallback is a true no-op here. A reviewer measured that
+the fallback's `widest_key is None` escape IS reached in normal operation (a realistic
+small-services/large-edges shape hits it), so this assert is real defense-in-depth, not
+decoration — see round 8's finding below for the more precise claim about whether it is
+*currently reachable*.
+
+**Round 7 — the wire-proof exemption registry's values were unchecked.**
+`_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` became a `dict[str, str]` in round 6 so an exemption
+could not be added without a stated reason, matching its two sibling registries — but the
+existing test only ever read `set(_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF)`, the dict's KEYS,
+never the values it exists to force. `test_every_wire_proof_exemption_carries_a_real_reason` now
+asserts every value is a non-empty stated reason. The registry is empty today, so this closes the
+enforcement gap for whenever an entry is first added, not a live gap today.
+
+**Round 8, P2 — `read_sample` didn't catch `OverflowError`.** `json.loads` produces a genuine
+Python `int` for a large integer literal in a JSON response (no decimal point or exponent, so
+`float()`'s string-parsing path — which rounds an oversized literal to `inf` rather than raising
+— is never involved). Converting a Python int that large to `float` raises `OverflowError`, which
+is *not* a subclass of `ValueError` — round 7's `except ValueError` alone missed it, so a single
+oversized integer sample escaped `read_sample`'s own "unreadable field, skip this row" contract
+entirely, propagated through `graph.py`'s blanket exception handler, and turned one bad sample
+into `FAILED_SAFE` for the whole investigation. Fixed by widening the except clause to
+`(ValueError, OverflowError)`. `test_read_sample_rejects_non_finite_readings` extended with an
+oversized-integer case on both the timestamp and the value position; mutation-verified (reverting
+to `except ValueError` alone reproduces the exact `OverflowError` traceback the finding describes).
+
+**Round 8, P2 — an all-NaN metric window read as confirmed zero, not as "nothing measured."**
+Once round 7's fix correctly drops non-finite samples, an all-NaN window (the same documented
+`histogram_quantile` quiet-minute case round 7's own fix cites) produces `sample_count: 0,
+max_value: 0.0` — bit-for-bit identical to a genuinely empty, valid Prometheus response. The
+model had no way to distinguish "measured zero" from "nothing measured," reopening the same
+problem class round 6's own P1 fix addressed (the summary not reflecting a data reduction) in a
+new shape. Fixed with a new `ParsedSamples` type (`prometheus.py`) carrying `raw_count` — how
+many rows Prometheus actually sent — alongside the surviving samples; `run_metric_check` computes
+`readings_discarded = raw_count - len(samples)` and appends a distinct `" (N unreadable,
+discarded)"` note to the summary, deliberately separate from `" (truncated)"` (truncation means
+"more data than fit the budget"; this means "some of what was sent could not be read at all" —
+conflating the two would tell the model the wrong story). Two new tests: an all-NaN window
+(`readings_discarded == 3`, summary names it, distinct from a genuinely empty response) and the
+partially-NaN case folded into the existing end-to-end NaN test (`readings_discarded == 1`).
+Mutation-verified (blanking the discard note makes both tests fail for the right reason).
+
+**Round 8, P3 — the topology assert's own comment overclaimed which of two siblings was "load-
+bearing."** `run_changes_check`'s assert comment called `run_topology_check`'s sibling "the
+genuinely load-bearing one." A reviewer measured directly (120 randomized trials, 5 adversarial
+shapes, and a mutation test disabling the topology assert entirely — all tests still passed) that
+it is currently unreachable too, for the same reason as its sibling: both lists can always be
+popped to empty, and the remaining fixed structure (85 bytes) is far under the 12,288-byte cap.
+Both comments reworded to state both asserts are currently unreachable defense-in-depth — the
+topology one is still worth keeping because it is the one function with no string field left
+standing if the byte math or the lab data shape ever changed, which is a real reason to keep it,
+not evidence it is load-bearing today.
+
+**Round 8, P3 — `schema_accepts`'s coverage check tracked keywords but not `type` values.**
+`test_schema_accepts_implements_every_keyword_the_real_schemas_use` (`test_live_model.py`)
+collects every JSON Schema *keyword* the real emitted schemas use and asserts each is handled or
+allowlisted — but never collected the *values* of the `type` keyword itself. Today's schemas only
+use `["array", "integer", "null", "object", "string"]`, all handled, so there was no live gap —
+but a future field emitting `"type": "number"` would fall through `schema_accepts`'s `kind ==`
+branches to a default `return True, ""`, silently accepting any value, while the coverage test
+would still pass (`"type"` the keyword is recognized regardless of which value it holds).
+`_collect_schema_keywords` now returns `(keywords, type_values)` from the same traversal; the
+coverage test asserts both. A new direct test,
+`test_the_type_coverage_check_catches_an_unhandled_type_value`, proves the mechanism against a
+synthetic `{"type": "number"}` schema. Mutation-verified (dropping `"integer"` from
+`_SCHEMA_ACCEPTS_HANDLED_TYPES` fails the coverage test, naming the real schemas' actual `type`
+value).
+
+**Round 8, P2 (found by a second, independent static reviewer — codex — reproduced directly
+before folding in) — `read_json_file`/`read_json_line` accepted the same non-standard JSON
+tokens `read_sample` was hardened against.** `json.loads` accepts `NaN`/`Infinity`/`-Infinity` by
+default — an extension beyond RFC-8259 most other JSON readers reject — and neither of
+`telemetry.py`'s two general-purpose parsers (the entry point for every log line, the changes
+manifest, and the topology manifest) passed a `parse_constant` callback to refuse them. A
+poisoned token would parse into an ordinary-looking Python `nan`/`inf` float instead of the
+record/manifest being refused the same way any other malformed input already is. Fixed with
+`_reject_non_finite_json_token`, a `parse_constant` callback raising `ValueError`, passed to both
+`json.loads` calls; both except clauses widened to `ValueError` (which `json.JSONDecodeError`
+already subclasses, so this is a simplification, not an addition). For a log line, one poisoned
+row is skipped like any other malformed line (`run_logs_check`'s existing `continue`); for a
+changes/topology manifest, the token can sit anywhere in the file, so the whole manifest becomes
+unreadable (`ToolOutcome.UNAVAILABLE`) rather than one field being silently poisoned — a stronger
+consequence than the line-level case, and tested as such. Five new tests cover both parsers
+directly and all three call sites end-to-end (`run_logs_check`, `run_changes_check`,
+`run_topology_check`); each mutation-verified by reverting to the bare `json.loads` call and
+confirming the corresponding new test fails for the right reason. `incident.json`/`report.json`
+are loaded through a separate path (`cli.py`'s `_load_stored_artifact`), not through either
+function here, and were out of this round's scope.
+
+**Round 10 — complete telemetry JSON and decoding hardening.** The round 8
+`parse_constant` guard covered only literal `NaN`/`Infinity` tokens. A syntactically valid JSON
+number such as raw `1e400` instead reaches Python's default `parse_float`, silently becoming
+`inf`; `_parse_finite_float` now rejects it in both telemetry readers. This is exercised directly
+and through logs, changes, and topology paths. A malformed UTF-8 changes/topology manifest is
+intentionally unavailable (matching `cli.py`'s stored-artifact boundary); a malformed UTF-8 JSONL
+line is intentionally skipped individually so valid log rows still produce evidence. Finally,
+`settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
+caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
+
+**Post-review single-call schema update.** Current proposal tool schemas are 12,011 serialized
+characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
+schema is 2,292. The cap intentionally excludes tool schemas while reservations include them.
+Strict schemas reject unknown tool, stop, hypothesis, and final-assessment fields.
+Native Anthropic tool-use responses may include `tool_use`, `thinking`, and `redacted_thinking`
+blocks, but visible text and unsupported blocks remain refused.
+
+This landed after two real problems were caught and fixed during review, before the commit
+above. First, the earliest version of `live_model.py`'s visible-content guard
+(`_has_visible_content`) rejected every list-typed response content outright rather than
+allow-listing specific block types — which would have refused a genuine Anthropic turn carrying
+only `tool_use`/`thinking` blocks, the ordinary shape once extended thinking is on
+(`_build_chat_anthropic` sets `thinking={"type": "adaptive"}` unconditionally), burning the run's
+one run-wide repair slot on a wholly valid turn. Fixed by allow-listing `tool_use`/`thinking`/
+`redacted_thinking` explicitly instead of rejecting every list; `test_propose_accepts_provider_
+tool_and_thinking_blocks` and `test_respond_accepts_provider_tool_and_redacted_thinking_blocks`
+pin the corrected behaviour, and `test_propose_refuses_a_text_block_alongside_tool_use`/
+`test_respond_refuses_an_unsupported_block_alongside_tool_use` confirm a genuine text or
+unsupported block is still refused alongside a real tool call. Second, an early pass applied
+`extra="forbid"` to only some of the eight schema classes it now covers (`tools.py`'s five
+argument classes, `domain.py`'s `Hypothesis`/`FinalAssessment`, `live_model.py`'s
+then-current `PlanRecord`) —
+the same "fix scoped to the instance touched, not every instance of the class" shape this
+document has recorded before (see "Round 4 and round 6 review" above). A model call reaching one
+of the missed classes could still smuggle an unrecognized field in and have it silently dropped
+under pydantic's default `extra="ignore"`, instead of surfacing as a named repair. Closed by
+applying `extra="forbid"` uniformly across all eight, each now carrying (or cross-referencing) a
+comment stating why: a dropped field is invisible to the model and to this application, while a
+refused one is a repair attempt the model can see and correct.
+
+**Round 8, P3 — a docstring cited a sibling test by a name that never existed.**
+`test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason` (`test_graph.py`)
+called itself the sibling of
+`test_an_ambiguous_reservation_refusal_reports_its_own_reason_not_internal_error` — a name that
+does not exist; the real sibling, a few hundred lines above, is
+`test_an_ambiguous_reservation_refusal_reports_its_own_reason`, with no `_not_internal_error`
+suffix (that suffix is real on the analogous cost-ceiling pair, which this docstring appears to
+have been copied from). Citation corrected.
 
 ## Superseded v1 evaluation design
 

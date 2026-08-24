@@ -10,9 +10,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from causalops.approvals import CheckpointStoreError
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
+    AmbiguousReservationNotResent,
     CostCeilingExceeded,
+    CostLedgerRow,
     ensure_cost_ledger_table,
     record_reservation_before_request,
     settle_reservation,
@@ -37,7 +39,7 @@ def _reserve(
     context_digest: str = "digest-1",
     reserved_usd: float = 0.01,
     ceiling_usd: float = 2.00,
-) -> object:
+) -> tuple[CostLedgerRow, bool]:
     return record_reservation_before_request(
         conn,
         run_id=run_id,
@@ -56,12 +58,13 @@ def test_ensure_cost_ledger_table_is_idempotent(conn: sqlite3.Connection) -> Non
 
 
 def test_a_reservation_is_recorded_reserved(conn: sqlite3.Connection) -> None:
-    row = _reserve(conn, reserved_usd=0.05)
+    row, is_new = _reserve(conn, reserved_usd=0.05)
 
     assert row.state == "RESERVED"
     assert row.reserved_usd == pytest.approx(0.05)
     assert row.actual_usd is None
     assert row.settled_at is None
+    assert is_new is True
 
 
 def test_an_identical_retry_reads_back_the_same_row_not_a_second_one(
@@ -72,15 +75,56 @@ def test_an_identical_retry_reads_back_the_same_row_not_a_second_one(
     pass by coincidence. It asserts both that the *count* of rows for one
     key stays one, and that a second reservation attempt does not add a
     second dollar amount to the running total -- either alone could pass
-    against a subtly wrong fix; both together cannot."""
-    first = _reserve(conn, reserved_usd=0.05)
-    second = _reserve(conn, reserved_usd=0.05)
+    against a subtly wrong fix; both together cannot.
 
-    assert first == second
+    Unit 3b-4 addendum, Group B: the ledger-level bookkeeping this test
+    covers (one row, one dollar amount) is correct and unaffected by that
+    fix -- what changed is that `is_new` now tells the caller which of the
+    two identical-looking calls actually inserted the row, which is what
+    `test_live_model.py`'s new transport-invocation test uses to refuse the
+    second one before it reaches the provider."""
+    first_row, first_is_new = _reserve(conn, reserved_usd=0.05)
+    second_row, second_is_new = _reserve(conn, reserved_usd=0.05)
+
+    assert first_row == second_row
+    assert first_is_new is True
+    assert second_is_new is False
     rows = conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()[0]
     assert rows == 1
     total = conn.execute("SELECT SUM(reserved_usd) FROM cost_ledger").fetchone()[0]
     assert total == pytest.approx(0.05)
+
+
+def test_ambiguous_reservation_message_names_the_state_key_and_next_action() -> None:
+    """Direct unit coverage of the exception `_send` (`live_model.py`)
+    raises when `record_reservation_before_request` reports `is_new=False`
+    -- constructed here without a live model or a real send, since the
+    class itself lives in this module.
+
+    Post-freeze review, P3-4: the message used to name only the state and
+    key, leaving an owner reading `FAIL AMBIGUOUS_MODEL_REQUEST ...` with
+    no indication of what to do next -- a real, narrow dead end for a
+    `SETTLED` row specifically (a crash after `settle_reservation` commits
+    but before the LangGraph checkpoint saves leaves that thread refusing
+    forever). It now says so explicitly: start a fresh investigation
+    rather than resuming."""
+    row = CostLedgerRow(
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        state="RESERVED",
+        reserved_usd=0.05,
+        reserved_at=NOW,
+    )
+
+    error = AmbiguousReservationNotResent(row)
+
+    assert error.row is row
+    assert "RESERVED" in str(error)
+    assert "run-1" in str(error)
+    assert "fresh investigation" in str(error)
+    assert "resuming" in str(error)
 
 
 def test_a_different_key_reserves_a_second_row(conn: sqlite3.Connection) -> None:
@@ -165,7 +209,7 @@ def test_settle_reservation_records_the_real_cost(conn: sqlite3.Connection) -> N
 
 
 def test_settling_a_never_reserved_key_is_refused(conn: sqlite3.Connection) -> None:
-    with pytest.raises(CheckpointStoreError):
+    with pytest.raises(CheckpointStoreError) as excinfo:
         settle_reservation(
             conn,
             run_id="ghost",
@@ -177,6 +221,12 @@ def test_settling_a_never_reserved_key_is_refused(conn: sqlite3.Connection) -> N
             output_tokens=1,
             settled_at=NOW,
         )
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE
+    )
+    assert "('ghost', 'INVESTIGATE', 0, 'digest-1')" in str(excinfo.value)
+    assert "absent or not RESERVED" in str(excinfo.value)
 
 
 def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) -> None:
@@ -197,7 +247,7 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
         settled_at=NOW,
     )
 
-    with pytest.raises(CheckpointStoreError):
+    with pytest.raises(CheckpointStoreError) as excinfo:
         settle_reservation(
             conn,
             run_id="run-1",
@@ -209,3 +259,13 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
             output_tokens=1,
             settled_at=NOW,
         )
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.RESERVATION_NOT_SETTLEABLE
+    )
+    assert "('run-1', 'INVESTIGATE', 0, 'digest-1')" in str(excinfo.value)
+    assert "absent or not RESERVED" in str(excinfo.value)
+    row = conn.execute(
+        "SELECT state, actual_usd, input_tokens, output_tokens FROM cost_ledger"
+    ).fetchone()
+    assert row == ("SETTLED", 0.01, 100, 50)

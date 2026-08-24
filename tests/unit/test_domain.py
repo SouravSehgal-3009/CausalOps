@@ -7,6 +7,7 @@ from fake_incident import (
     hypotheses,
     incident_scope,
     metric_proposal,
+    packet_evidence,
 )
 from pydantic import ValidationError
 
@@ -20,6 +21,7 @@ from causalops.domain import (
     Evidence,
     FinalAssessment,
     GraphPhase,
+    HypothesisUpdate,
     IncidentScope,
     InitialPlan,
     InvestigationReport,
@@ -28,6 +30,7 @@ from causalops.domain import (
     ReasonCode,
     ReceiptState,
     RootCauseCode,
+    StoredIncident,
     ToolOutcome,
     ToolReceipt,
     Versions,
@@ -157,6 +160,14 @@ def test_a_stage_proposes_a_check_or_stops_but_not_both() -> None:
         )
 
 
+@pytest.mark.parametrize("stage", [InitialPlan, HypothesisUpdate])
+def test_a_stage_stop_reason_cannot_be_empty(
+    stage: type[InitialPlan] | type[HypothesisUpdate],
+) -> None:
+    with pytest.raises(ValidationError):
+        stage(hypotheses=hypotheses(), stop_reason="")
+
+
 def test_a_plan_keeps_two_or_three_hypotheses() -> None:
     with pytest.raises(ValidationError):
         InitialPlan(hypotheses=hypotheses()[:1], stop_reason="only one cause")
@@ -171,6 +182,75 @@ def test_an_incident_window_must_end_after_it_starts() -> None:
             ended_at=WINDOW_START,
             endpoint="/api/orders",
         )
+
+
+def test_stored_incident_refuses_a_packet_incident_id_mismatch() -> None:
+    """Post-freeze review, P1. `packet.incident_id` is rendered straight
+    into the model's own prompt (`prompts.py`'s `render_context`:
+    `f"incident: {packet.incident_id}"`) -- a mismatch against `scope.
+    incident_id` would show the model a different incident than the one
+    the run's directory, thread, and evidence are actually keyed on,
+    with nothing else in the pipeline positioned to catch it before the
+    prompt is built. `StoredIncident.check_identity_agrees` now refuses
+    this at load time instead. (The `_rebuild_store` double-fault
+    correctness traced -- a mismatched `evidence[i].incident_id` raising
+    `ValueError` from both the normal report path and the crash-
+    containment path meant to catch it, escaping `main()`'s catch tuple
+    entirely -- is the sibling evidence-mismatch test's own reason, not
+    this one's; a bad `packet.incident_id` never reaches `_rebuild_store`
+    at all.)"""
+    scope = incident_scope()
+    mismatched_packet = alert_packet().model_copy(
+        update={"incident_id": "not-the-scope-incident"}
+    )
+
+    with pytest.raises(ValidationError, match="packet.incident_id"):
+        StoredIncident(
+            scope=scope, packet=mismatched_packet, evidence=packet_evidence()
+        )
+
+
+def test_stored_incident_refuses_an_evidence_incident_id_mismatch() -> None:
+    """Sibling of the packet-mismatch test above, for the third
+    identity-bearing field `StoredIncident.check_identity_agrees` checks --
+    a single mismatched evidence record among several is still refused,
+    not just a wholesale-wrong tuple. This is the field the packet-
+    mismatch test's own docstring points here for: a mismatched
+    `evidence[i].incident_id` is what used to reach `graph.py`'s
+    `_rebuild_store`, which raises `ValueError` on it from BOTH the
+    normal `_build_report` path and the outer crash-containment path
+    meant to catch exactly that failure -- escaping `main()`'s
+    `(LabError, RunRecordError, CheckpointStoreError)` catch tuple
+    entirely (see `TECHNICAL_OVERVIEW.md`'s "Second dual review on
+    a44bf57" section for the full trace). `check_identity_agrees` refuses
+    this at load time instead, before either graph path ever sees the
+    artifact."""
+    scope = incident_scope()
+    packet = alert_packet()
+    one_evidence, other_evidence = packet_evidence()
+    mismatched_evidence = (
+        one_evidence.model_copy(update={"incident_id": "not-the-scope-incident"}),
+        other_evidence,
+    )
+
+    with pytest.raises(ValidationError, match="evidence"):
+        StoredIncident(scope=scope, packet=packet, evidence=mismatched_evidence)
+
+
+def test_stored_incident_accepts_a_fully_self_consistent_artifact() -> None:
+    """The positive case, deliberately pinned alongside the two refusals
+    above -- every fixture this suite already relies on (`_write_incident`
+    in `test_approvals.py`/`test_cli.py`, `packet_evidence()` here) must
+    keep passing `check_identity_agrees` unchanged, since none of them
+    were built with this validator in mind."""
+    scope = incident_scope()
+    packet = alert_packet()
+    evidence = packet_evidence()
+
+    incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+
+    assert incident.scope.incident_id == packet.incident_id
+    assert all(item.incident_id == scope.incident_id for item in evidence)
 
 
 def test_contracts_are_frozen() -> None:

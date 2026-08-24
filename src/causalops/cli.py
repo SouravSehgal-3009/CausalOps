@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from causalops.approvals import (
     CheckpointStoreError,
@@ -66,6 +66,7 @@ from causalops.scenario_control import (
     lab_up,
     reset_scenario,
     start_scenario,
+    validated_run_paths,
 )
 from causalops.system_probe import SystemProbe
 from causalops.telemetry import (
@@ -285,9 +286,9 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
 # other config value. Guarding against a fat-fingered magnitude is the
 # owner's job, not a parser's; `math.isfinite`/`> 0` bound *shape*, not
 # intent. Unit 3b-3: raised from 2.00 to 5.00, re-derived from the smoke
-# call's measured per-call reservation size after `pricing.py`'s ratio
-# replan (see that module's `PESSIMISTIC_CHARS_PER_TOKEN` comment) --
-# `TECHNICAL_SPEC.md` §10 carries the same amendment.
+# call's measured per-call reservation size after the ratio replan; the
+# calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md` §10
+# carries the same amendment.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
@@ -442,22 +443,112 @@ def _report_exit(report: InvestigationReport, artifact_path: Path) -> int:
     return 1 if report.disposition is Disposition.FAILED_SAFE else 0
 
 
+def _load_stored_artifact[Artifact: BaseModel](
+    model: type[Artifact], path: Path
+) -> Artifact:
+    """Reads and validates one stored JSON artifact (`incident.json`,
+    `report.json`), translating every way the read or parse can fail into
+    this project's `FAIL <REASON_CODE> <message>` contract instead of a
+    raw traceback.
+
+    Unit 3b-4 addendum, C5. Three call sites used to call `read_text()`
+    and `model_validate_json()` back to back with nothing catching what
+    either could raise: a missing or permission-denied file (`OSError`,
+    `FileNotFoundError` included), invalid UTF-8 (`UnicodeDecodeError`),
+    or JSON that does not satisfy the model's own schema
+    (pydantic's `ValidationError`) all escaped as unhandled tracebacks. A
+    file on disk going missing, unreadable, or malformed is not a
+    programmer error this codebase should ever let reach `main()`'s own
+    blanket exception boundary uncaught -- a crashed write, a hand
+    edit, or disk corruption are all real, expected ways a stored
+    artifact can be broken. `LabReasonCode.INCIDENT_NOT_FOUND` already
+    covers the normal incident-loading callers' explicit `is_file()` check.
+    The finalized-report retry deliberately delegates a missing report here
+    as `CORRUPT_ARTIFACT`, because a finalized directory without its report
+    is damaged state rather than a wrong incident id."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise LabError(
+            LabReasonCode.CORRUPT_ARTIFACT, f"{path} is unreadable: {error}"
+        ) from error
+    except UnicodeDecodeError as error:
+        raise LabError(
+            LabReasonCode.CORRUPT_ARTIFACT, f"{path} is not valid UTF-8: {error}"
+        ) from error
+    try:
+        return model.model_validate_json(raw)
+    except ValidationError as error:
+        raise LabError(
+            LabReasonCode.CORRUPT_ARTIFACT,
+            f"{path} is not a valid {model.__name__}: {error}",
+        ) from error
+
+
 # Loads the incident and writes the investigation's result -- the CLI's one
 # job for `investigate`. `model_choice` is `arguments.model` verbatim
 # (`"replay"` or `"claude"`, `build_parser`'s own choices) -- the CLI-facing
 # dispatch keyword, not the display name that ends up in the artifact; see
 # `_build_model_and_registry`'s docstring for that distinction.
-def run_investigate_command(
-    root: Path, incident_id: str, model_choice: Literal["replay", "claude"]
-) -> int:
-    paths = RunPaths(root=root / "runs" / incident_id)
+def _load_verified_incident(
+    root: Path, incident_id: str
+) -> tuple[RunPaths, StoredIncident]:
+    """Turns a bare `incident_id` into a validated path and a loaded,
+    identity-checked `StoredIncident` -- the one sequence both
+    `run_investigate_command` and `run_decision_command` need before they
+    can touch `runs/<incident_id>/incident.json` at all.
+
+    Post-freeze review, P2-3. `run_decision_command` (the resume path)
+    used to build `RunPaths` directly from `incident_id`, with neither
+    `validated_run_paths`'s path-escape check (C1, above) nor the
+    identity check below -- both landed on `run_investigate_command` only
+    in the round that fixed C1, the exact instance-not-class scoping error
+    this whole investigation exists to close, found again in the round
+    specifically meant to close that class. Resuming is arguably
+    higher-stakes than starting fresh: its `incident.scope`/`evidence` feed
+    straight into `build_graph(...)` to continue an investigation the
+    owner already approved, where a fresh `investigate` call only starts
+    a new one.
+    """
+    # Unit 3b-4 addendum, C1. `validated_run_paths` refuses a `../`-style
+    # or otherwise non-`isalnum()` argument before any file read -- this
+    # used to build the path directly from an unvalidated positional CLI
+    # argument, unlike `reset_scenario`, which already had this check.
+    paths = validated_run_paths(root, incident_id)
     if not paths.incident_file.is_file():
         raise LabError(
             LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
         )
-    incident = StoredIncident.model_validate_json(
-        paths.incident_file.read_text(encoding="utf-8")
-    )
+    incident = _load_stored_artifact(StoredIncident, paths.incident_file)
+    # Post-freeze review, P1: this check alone compares only
+    # `scope.incident_id` against the directory name -- but
+    # `StoredIncident.check_identity_agrees` (`domain.py`) already ran
+    # inside `_load_stored_artifact` just above, and guarantees
+    # `packet.incident_id` and every `evidence[i].incident_id` equal
+    # `scope.incident_id`. Together, that transitively confirms the WHOLE
+    # loaded artifact -- scope, packet, and every evidence record --
+    # describes the incident its own directory name claims, not just the
+    # one field compared directly here. A manual copy or a future code
+    # path could still let the directory name itself drift from a
+    # perfectly self-consistent artifact; that is what this comparison
+    # catches. Refused with the same reason code the directory-not-found
+    # case above uses: from an owner's point of view, "there is no valid
+    # incident under this id" is one outcome, whether the cause is a
+    # missing directory or a directory whose contents belong to a
+    # different incident.
+    if incident.scope.incident_id != incident_id:
+        raise LabError(
+            LabReasonCode.INCIDENT_NOT_FOUND,
+            f"runs/{incident_id}/incident.json describes incident "
+            f"{incident.scope.incident_id!r}, not {incident_id!r}",
+        )
+    return paths, incident
+
+
+def run_investigate_command(
+    root: Path, incident_id: str, model_choice: Literal["replay", "claude"]
+) -> int:
+    paths, incident = _load_verified_incident(root, incident_id)
     budgets = Budgets()
     recorder = RunRecorder(utc_now)
     db_path = ProjectPaths(root=root).checkpoints_db
@@ -602,31 +693,26 @@ def run_decision_command(
             # store's own prior output, but it is still a file on disk a
             # corrupted write or a hand-edited byte could make unreadable
             # -- refused the same way a corrupt `owner_decisions` row is
-            # above, not surfaced as an uncaught traceback.
-            try:
-                report = InvestigationReport.model_validate_json(
-                    (investigations_dir / "report.json").read_text(encoding="utf-8")
-                )
-            except ValidationError as error:
-                raise CheckpointStoreError(
-                    CheckpointStoreReasonCode.STORE_UNAVAILABLE,
-                    f"{investigations_dir / 'report.json'} is unreadable: {error}",
-                ) from error
+            # above, not surfaced as an uncaught traceback. Unit 3b-4
+            # addendum, C5: this used to catch only `ValidationError`,
+            # missing an unreadable file or invalid UTF-8 --
+            # `_load_stored_artifact` closes both, and reports
+            # `CORRUPT_ARTIFACT` rather than `STORE_UNAVAILABLE` (this
+            # file's contents are corrupt, not the checkpoint store).
+            report = _load_stored_artifact(
+                InvestigationReport, investigations_dir / "report.json"
+            )
             return _report_exit(report, investigations_dir)
 
         with _sqlite_checkpointer(db_path) as checkpointer:
             incident_id, model_choice = _resolve_thread_incident_and_model(
                 checkpointer, thread_id
             )
-            paths = RunPaths(root=root / "runs" / incident_id)
-            if not paths.incident_file.is_file():
-                raise LabError(
-                    LabReasonCode.INCIDENT_NOT_FOUND,
-                    f"no run directory for {incident_id}",
-                )
-            incident = StoredIncident.model_validate_json(
-                paths.incident_file.read_text(encoding="utf-8")
-            )
+            # Post-freeze review, P2-3: this resume path used to build
+            # `RunPaths` directly from `incident_id`, without either C1's
+            # path-escape check or the identity check -- see
+            # `_load_verified_incident`'s own docstring.
+            paths, incident = _load_verified_incident(root, incident_id)
             budgets = Budgets()
             model, registry, model_name, ledger_conn = _build_model_and_registry(
                 incident, paths, budgets, model_choice, db_path

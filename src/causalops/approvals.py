@@ -52,7 +52,8 @@ class CheckpointStoreReasonCode(StrEnum):
     different category from either. `THREAD_NOT_FOUND`,
     `NO_PENDING_INTERRUPT`, `CONFLICTING_DECISION`, and
     `INVALID_REJECTION_NOTE` are reachable only through `causalops
-    approve`/`reject`; `STORE_UNAVAILABLE` is also raised by
+    approve`/`reject`; `RESERVATION_NOT_SETTLEABLE` identifies an invalid
+    cost-ledger lifecycle transition; `STORE_UNAVAILABLE` is also raised by
     `cli._sqlite_checkpointer`, reachable from a plain `causalops
     investigate` too, since both open the same file.
     """
@@ -61,6 +62,7 @@ class CheckpointStoreReasonCode(StrEnum):
     NO_PENDING_INTERRUPT = "NO_PENDING_INTERRUPT"
     CONFLICTING_DECISION = "CONFLICTING_DECISION"
     INVALID_REJECTION_NOTE = "INVALID_REJECTION_NOTE"
+    RESERVATION_NOT_SETTLEABLE = "RESERVATION_NOT_SETTLEABLE"
     STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
 
 

@@ -78,6 +78,35 @@ this file -- a real, named reason, not drift. None of the five scenarios
 below ever proposes `search_runbooks` (confirmed: no fixture script
 references it), so ids, disposition, receipt shapes, evidence kinds, event
 vocabulary and `duration_ms` are all unaffected -- only the digest moved.
+
+**Post-review strict-schema round moves every `final_context_digest`
+literal below a second time, and nothing else** -- the same mechanism as
+Unit 3a's own note above. `SYSTEM_TEXT` (`prompts.py`) gained one sentence
+telling the model to answer a tool call with no accompanying narrative
+text, closing a real risk `live_model.py`'s `_has_visible_content` guard
+otherwise leaves open (a stray sentence beside a genuine tool call would
+burn the run's one repair slot). `system_text` is identical across every
+stage in every scenario here and feeds directly into
+`_render_stage_request`'s digest, so that one sentence shifts every digest
+in this file again, confirmed by running the suite before and after and
+updating only the six `final_context_digest` literals to match -- no other
+field in this file changed.
+
+**A later round moves every `final_context_digest` literal below a third
+time, and nothing else** -- the same mechanism as the two notes above.
+The sentence the previous round added was ambiguous: "respond with the
+tool call alone" reads naturally either as "no narrative text alongside
+the tool call" (the intended meaning) or as "make only one tool call"
+(wrong -- `live_model.py` requires exactly one native call on every
+  INITIAL_PLAN/HYPOTHESIS_UPDATE turn). Reworded to "do not add
+narrative text, explanation, or commentary outside the tool call's own
+fields," which keeps the original intent and removes the cardinality
+reading. `system_text` is identical across every stage in every scenario
+here and feeds directly into `_render_stage_request`'s digest, so the
+reworded sentence shifts every digest in this file again, confirmed by
+running the suite before and after and updating only the six
+`final_context_digest` literals to match -- no other field in this file
+changed.
 """
 
 from pathlib import Path
@@ -460,7 +489,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "777f37685e316dbff088c3b44f6ff755ddae9fe7356151b45c5ce6839ea90229"
+            "22b26c0e134a42d239391bf3d3bade7a077a6bcaf69b0165f02e5f2fb122c6e3"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -516,7 +545,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
+            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -573,7 +602,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4022262170e5b48b7dce21017fe05737ff018e5b7fc0cdbd527ccb0d95eed72d"
+            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -634,7 +663,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "515e37e7e18020d6ec35bf6c41621ab3ae04b21f48021049bbc5be38e7ea4120"
+            "b244c408007a5e5c90880fc64ea3e322619f7cdb481cec12bcba8d25767c44fa"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -684,7 +713,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
+            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -771,7 +800,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "ce096c9704d75d82de1268d66c0df7cb70309ddb9a80d5b7340415932da133d6"
+            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

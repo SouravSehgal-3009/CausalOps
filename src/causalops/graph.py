@@ -64,7 +64,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 from pydantic import JsonValue
 
-from causalops.cost_ledger import CostCeilingExceeded
+from causalops.cost_ledger import AmbiguousReservationNotResent, CostCeilingExceeded
 from causalops.domain import (
     DEFAULT_BUDGETS,
     REPLAY_MODEL_NAME,
@@ -263,6 +263,34 @@ def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
 
 def _model_calls_left(model_calls_used: int, budgets: Budgets) -> int:
     return budgets.model_calls - model_calls_used
+
+
+def _money_refusal_reason_code(
+    refusal: CostCeilingExceeded | InputTooLarge | AmbiguousReservationNotResent,
+) -> ReasonCode:
+    """The three ways `_send` (`live_model.py`) can refuse a request
+    *before* sending it, mapped to the specific `ReasonCode` an owner reads
+    in a report -- shared by `investigate`'s and `final_assessment`'s
+    identical except-blocks below, rather than repeating a three-way
+    `isinstance` chain in both (the exact "same fix, two places, one
+    missed" shape this unit's own investigation kept finding elsewhere).
+
+    Post-freeze review, P3-5: the third branch used to be a bare
+    fall-through (`return ReasonCode.AMBIGUOUS_MODEL_REQUEST` with no
+    check at all) -- correct today, since the parameter type is a
+    three-member union and every member is covered above, but a future
+    FOURTH refusal type added to that union without also updating this
+    function would silently misreport as `AMBIGUOUS_MODEL_REQUEST`,
+    with no error telling anyone the mapping is now wrong. The explicit
+    `isinstance` below plus the `raise` after it turns that into a loud
+    failure instead of a silent misreport."""
+    if isinstance(refusal, CostCeilingExceeded):
+        return ReasonCode.COST_CEILING_EXCEEDED
+    if isinstance(refusal, InputTooLarge):
+        return ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
+    if isinstance(refusal, AmbiguousReservationNotResent):
+        return ReasonCode.AMBIGUOUS_MODEL_REQUEST
+    raise AssertionError(f"unhandled refusal: {type(refusal).__name__}")
 
 
 def _expired(started_at: str, budgets: Budgets, clock: Clock) -> bool:
@@ -745,27 +773,29 @@ def _make_investigate(
             }
         except GraphBubbleUp:
             raise
-        except (CostCeilingExceeded, InputTooLarge) as refusal:
-            # Unit 3b-2. `LiveClaudeModel` raises one of these *before
-            # sending* -- the cost gate or the input-token cap refused the
-            # request, so no request was made and no money was spent.
-            # Caught ahead of the blanket `except Exception` below on
-            # purpose: that handler exists for a crash mid-attempt, and this
-            # is not one -- it is a policy refusal with a specific,
-            # actionable reason, the same "name the actual outcome"
-            # reasoning `_ask_with_repair`'s other stop reasons already get.
-            # Neither is retried as a repair: appending a correction message
-            # to an over-large request only makes it larger, and a refused
-            # reservation is not something rephrasing the request fixes.
+        except (
+            CostCeilingExceeded,
+            InputTooLarge,
+            AmbiguousReservationNotResent,
+        ) as refusal:
+            # Unit 3b-2, extended by the Unit 3b-4 addendum's Group B.
+            # `LiveClaudeModel` raises one of these *before sending* (or, for
+            # `AmbiguousReservationNotResent`, *instead of* sending) -- the
+            # cost gate, the input-token cap, or a pre-existing reservation
+            # for this exact key refused the request, so no NEW money was
+            # spent by this attempt. Caught ahead of the blanket `except
+            # Exception` below on purpose: that handler exists for a crash
+            # mid-attempt, and this is not one -- it is a policy refusal
+            # with a specific, actionable reason, the same "name the actual
+            # outcome" reasoning `_ask_with_repair`'s other stop reasons
+            # already get. None of the three is retried as a repair:
+            # appending a correction message to an over-large or
+            # already-ambiguous request cannot fix any of them.
             # `stopped_state` reused as-is, including its turn-0-vs-turn>=1
             # rule: a refusal on the second INVESTIGATE turn still lets the
             # run reach FINAL_ASSESSMENT with whatever evidence it has,
             # exactly like `MODEL_CALL_BUDGET_EXHAUSTED` does today.
-            reason_code = (
-                ReasonCode.COST_CEILING_EXCEEDED
-                if isinstance(refusal, CostCeilingExceeded)
-                else ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
-            )
+            reason_code = _money_refusal_reason_code(refusal)
             log_stop(reason_code)
             return stopped_state(reason_code)
         except Exception as error:
@@ -1089,16 +1119,18 @@ def _make_final_assessment(
             }
         except GraphBubbleUp:
             raise
-        except (CostCeilingExceeded, InputTooLarge) as refusal:
-            # Unit 3b-2. Same reasoning as `investigate`'s handler: a
-            # refused-before-sending request is not a crash, so it is caught
-            # ahead of the blanket handler below and reported with its own
-            # actionable reason code rather than `INTERNAL_ERROR`.
-            reason_code = (
-                ReasonCode.COST_CEILING_EXCEEDED
-                if isinstance(refusal, CostCeilingExceeded)
-                else ReasonCode.INPUT_TOKEN_CAP_EXCEEDED
-            )
+        except (
+            CostCeilingExceeded,
+            InputTooLarge,
+            AmbiguousReservationNotResent,
+        ) as refusal:
+            # Unit 3b-2, extended by the Unit 3b-4 addendum's Group B. Same
+            # reasoning as `investigate`'s handler: a refused-before-sending
+            # (or refused-instead-of-resending) request is not a crash, so
+            # it is caught ahead of the blanket handler below and reported
+            # with its own actionable reason code rather than
+            # `INTERNAL_ERROR`.
+            reason_code = _money_refusal_reason_code(refusal)
             log_stop(reason_code)
             return failed_state(reason_code)
         except Exception as error:

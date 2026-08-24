@@ -24,6 +24,7 @@ from causalops.cli import (
     LIVE_EVALUATION_MAX_USD_VARIABLE,
     MODEL_CHECK_NOTE,
     _live_evaluation_ceiling_usd,
+    _load_stored_artifact,
     build_parser,
     exit_code,
     render_report,
@@ -256,6 +257,125 @@ def test_investigating_an_unknown_incident_is_refused(
 
     assert cli.main(["investigate", "deadbeef", "--model", "replay"]) == 1
     assert "FAIL INCIDENT_NOT_FOUND" in capsys.readouterr().out
+
+
+def test_investigating_a_path_traversal_argument_is_refused_before_any_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unit 3b-4 addendum, C1. `../`-shaped, and otherwise non-`isalnum()`,
+    positional CLI arguments used to build `root / "runs" / incident_id`
+    directly, with no validation -- `validated_run_paths`
+    (`scenario_control.py`) now refuses (`isalnum()` fails on `/` and `.`
+    outright, with zero filesystem access) before `paths.incident_file` is
+    ever read.
+
+    A decoy `incident.json` is planted exactly where `root / "runs" /
+    "../decoy"` would resolve to, so this test cannot pass merely because
+    the traversal target happens not to exist: without the `isalnum()`
+    check, `paths.incident_file.is_file()` would find this decoy and the
+    run would proceed past it (mutation-verified). Asserting the specific
+    "that is not an incident ID" message, not just the shared
+    `INCIDENT_NOT_FOUND` code, is what proves the `isalnum()` check fired
+    rather than some other refusal reached later."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    # `tmp_path / "runs"` must exist and be a real, traversable directory --
+    # the OS resolves the literal `../` component by walking through it, not
+    # by lexically simplifying the path string, so a decoy planted only one
+    # level up is unreachable (and this test would pass for the wrong
+    # reason) if this directory is missing.
+    (tmp_path / "runs").mkdir()
+    decoy_root = tmp_path / "decoy"
+    decoy_root.mkdir()
+    scope = incident_scope()
+    packet = alert_packet()
+    incident = StoredIncident(scope=scope, packet=packet, evidence=packet_evidence())
+    (decoy_root / "incident.json").write_text(
+        incident.model_dump_json(), encoding="utf-8"
+    )
+
+    exit_status = cli.main(["investigate", "../decoy", "--model", "replay"])
+
+    assert exit_status == 1
+    assert "that is not an incident ID" in capsys.readouterr().out
+
+
+def test_investigating_an_incident_id_mismatched_with_its_stored_scope_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unit 3b-4 addendum, C1. Simulates `runs/<id>/incident.json` diverging
+    from its own directory name (a manual copy, a future code path, or a
+    bug) -- `run_investigate_command` now asserts the loaded `StoredIncident
+    .scope.incident_id` matches the requested directory name and refuses
+    with a clear reason code rather than silently investigating the wrong
+    incident's scope and evidence."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    scope = incident_scope()
+    packet = alert_packet()
+    incident = StoredIncident(scope=scope, packet=packet, evidence=packet_evidence())
+    directory_name = "mismatcheddirectoryname00"
+    paths = RunPaths(root=tmp_path / "runs" / directory_name)
+    paths.root.mkdir(parents=True)
+    paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+
+    exit_status = cli.main(["investigate", directory_name, "--model", "replay"])
+
+    assert exit_status == 1
+    printed = capsys.readouterr().out
+    assert "FAIL INCIDENT_NOT_FOUND" in printed
+    assert scope.incident_id in printed
+    assert directory_name in printed
+
+
+# --- Unit 3b-4 addendum, C5: corrupt stored artifacts refuse cleanly -----
+
+
+def test_a_malformed_incident_json_is_refused_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`StoredIncident.model_validate_json` raising `ValidationError` used
+    to escape `run_investigate_command` uncaught -- `_load_stored_artifact`
+    now turns it into the project's own `FAIL CORRUPT_ARTIFACT ...`
+    contract."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    incident_id = "malformedincidentjson00"
+    paths = RunPaths(root=tmp_path / "runs" / incident_id)
+    paths.root.mkdir(parents=True)
+    paths.incident_file.write_text("{}", encoding="utf-8")
+
+    exit_status = cli.main(["investigate", incident_id, "--model", "replay"])
+
+    assert exit_status == 1
+    assert "FAIL CORRUPT_ARTIFACT" in capsys.readouterr().out
+
+
+def test_load_stored_artifact_refuses_a_missing_file_cleanly(tmp_path: Path) -> None:
+    """Direct unit coverage of `_load_stored_artifact`'s `OSError` branch --
+    a nonexistent path raises `FileNotFoundError` (an `OSError` subclass)
+    from `Path.read_text` with zero platform-specific setup (no `chmod`,
+    which this test file's own `test_investigate_reports_a_locked_
+    checkpoint_store_instead_of_a_traceback` already found is not portable
+    to Windows)."""
+    with pytest.raises(LabError) as excinfo:
+        _load_stored_artifact(StoredIncident, tmp_path / "does-not-exist.json")
+
+    assert excinfo.value.reason_code is LabReasonCode.CORRUPT_ARTIFACT
+
+
+def test_load_stored_artifact_refuses_invalid_utf8_cleanly(tmp_path: Path) -> None:
+    """Direct unit coverage of `_load_stored_artifact`'s `UnicodeDecodeError`
+    branch -- a byte sequence that is not valid UTF-8 at all, not just
+    invalid JSON."""
+    bad_path = tmp_path / "not-utf8.json"
+    bad_path.write_bytes(b"\xff\xfe\x00\x01")
+
+    with pytest.raises(LabError) as excinfo:
+        _load_stored_artifact(StoredIncident, bad_path)
+
+    assert excinfo.value.reason_code is LabReasonCode.CORRUPT_ARTIFACT
 
 
 def test_main_returns_zero_for_a_healthy_machine(

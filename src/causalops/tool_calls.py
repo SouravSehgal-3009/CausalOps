@@ -18,7 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from causalops.domain import ToolProposal
-from causalops.tools import ToolArguments
+from causalops.tools import ToolArguments, ToolName
 
 
 class NativeToolCall(BaseModel):
@@ -43,12 +43,12 @@ def select_single_tool_call(calls: Sequence[NativeToolCall]) -> NativeToolCall |
 
 
 # `call.args` for a registered tool is flat: the tool's own typed fields plus
-# `evidence_gap`/`expected_observation` as siblings, with `tool` included so
-# the discriminated union below can resolve it independently of `call.name`.
-# Pydantic's discriminator lookup needs that field present in the raw dict, and
-# both variants ignore the two rationale keys they don't declare (the default
-# `extra="ignore"` on every `*Arguments` model), so this adapter cleanly pulls
-# out just the typed arguments. Same pattern as `tests/unit/test_tools.py:19`.
+# hypotheses and rationale siblings. Native provider calls already identify the
+# selected registered tool by `call.name`, so the provider-facing schema omits
+# the duplicate `tool` discriminator. It is restored only for the internal
+# discriminated union after the name has been checked against `ToolName`.
+# The non-argument siblings are removed before strict validation, so every
+# other unknown key remains a refusal.
 arguments_adapter: TypeAdapter[ToolArguments] = TypeAdapter(ToolArguments)
 
 
@@ -76,22 +76,35 @@ def parse_tool_call(call: NativeToolCall) -> tuple[ToolProposal | None, str]:
     Input should be 'gateway_errors', ..." is fixable where "your arguments
     were invalid" would waste it.
 
-    The confused-deputy rule: `call.name` (the provider-controlled tool
-    selection) and `arguments.tool` (the discriminator inside the
-    provider-controlled args) are validated independently and must agree.
-    `name="query_logs"` with `query_metric`-shaped arguments is well-formed to
-    each side and ambiguous to a dispatcher, so it is refused here rather than
-    left for the wrapper to guess about.
+    The native name must be one of the registered tools. If a caller includes
+    the legacy internal `tool` field, it must be a string matching that name;
+    otherwise the name is canonicalized into the internal model. This preserves
+    policy fingerprints and wrapper contracts without asking the provider to
+    emit a redundant discriminator.
     """
     try:
-        arguments = arguments_adapter.validate_python(call.args)
+        declared_name = ToolName(call.name)
+    except ValueError:
+        return None, f"unknown registered tool name {call.name!r}"
+    if "tool" in call.args:
+        declared_tool = call.args["tool"]
+        if not isinstance(declared_tool, str):
+            return None, "tool must be a string when present"
+        if declared_tool != declared_name.value:
+            return None, (
+                f"the tool call's name {call.name!r} does not match its "
+                f"arguments' declared tool {declared_tool!r}"
+            )
+    argument_values = {
+        key: value
+        for key, value in call.args.items()
+        if key not in {"evidence_gap", "expected_observation", "hypotheses"}
+    }
+    argument_values["tool"] = declared_name.value
+    try:
+        arguments = arguments_adapter.validate_python(argument_values)
     except ValidationError as error:
         return None, summarize_errors(error)
-    if call.name != arguments.tool.value:
-        return None, (
-            f"the tool call's name {call.name!r} does not match its "
-            f"arguments' declared tool {arguments.tool.value!r}"
-        )
     gap = call.args.get("evidence_gap")
     observation = call.args.get("expected_observation")
     if not isinstance(gap, str) or not isinstance(observation, str):
