@@ -31,12 +31,16 @@ from causalops.domain import (
 )
 from causalops.evaluation import (
     SCORER_VERSION,
+    ControlCounts,
+    Efficiency,
     EvaluationRecord,
     ExpectedOutcome,
+    MechanicalScores,
     PredicateOperator,
     RequiredEvidencePredicate,
     satisfies,
     score_run,
+    summarize_evaluation,
 )
 from causalops.evidence import build_evidence
 from causalops.tools import ToolName
@@ -492,3 +496,126 @@ def test_a_run_with_no_assessment_cites_nothing() -> None:
 
     assert not scores.citations_valid
     assert not scores.citations_sufficient
+
+
+def _summary_record(
+    *,
+    diagnosis_correct: bool,
+    disposition_correct: bool,
+    latency_ms: int,
+    model_calls: int,
+    tools_executed: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    reserved_usd: float,
+    actual_usd: float | None,
+) -> EvaluationRecord:
+    """A minimal `EvaluationRecord` for `summarize_evaluation` tests --
+    `summarize_evaluation` only ever reads `scores.diagnosis_correct`,
+    `scores.disposition_correct`, `scores.efficiency`, `reserved_usd`, and
+    `actual_usd`, so this builds `MechanicalScores`/`Efficiency` directly
+    rather than driving a full report through `score_run`."""
+    kwargs = reproducibility_manifest_kwargs()
+    kwargs["actual_usd"] = actual_usd
+    kwargs["reserved_usd"] = reserved_usd
+    return EvaluationRecord(
+        run_key="incident-1/causalops/1",
+        investigation_id="inv-1",
+        incident_id="incident-1",
+        expected=expected_diagnosis(),
+        scores=MechanicalScores(
+            diagnosis_correct=diagnosis_correct,
+            disposition_correct=disposition_correct,
+            citations_valid=True,
+            citations_sufficient=True,
+            control=ControlCounts(),
+            efficiency=Efficiency(
+                latency_ms=latency_ms,
+                model_calls=model_calls,
+                tools_executed=tools_executed,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
+        ),
+        **kwargs,
+    )
+
+
+def test_summarize_evaluation_reports_counts_and_ranges() -> None:
+    """`TECHNICAL_SPEC.md` §10: "Report counts and ranges for small
+    samples." A mix of correct/incorrect diagnoses and dispositions, with
+    one run's `actual_usd` unknown (never fully settled), proves both the
+    counts and the ranges land correctly -- and that the unknown-cost run
+    is reported as unknown, not excluded or zeroed."""
+    records = [
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=500,
+            output_tokens=100,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+        ),
+        _summary_record(
+            diagnosis_correct=False,
+            disposition_correct=True,
+            latency_ms=900,
+            model_calls=4,
+            tools_executed=2,
+            input_tokens=4000,
+            output_tokens=800,
+            reserved_usd=0.05,
+            actual_usd=0.041,
+        ),
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=False,
+            latency_ms=500,
+            model_calls=2,
+            tools_executed=1,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.02,
+            # This run reserved but never fully settled -- `actual_usd`
+            # is `None`, the honest Item 2 case, not a real zero-dollar run.
+            actual_usd=None,
+        ),
+    ]
+
+    summary = summarize_evaluation(records)
+
+    assert summary.total_records == 3
+    assert summary.diagnosis_correct_count == 2
+    assert summary.disposition_correct_count == 2
+    assert (summary.latency_ms_min, summary.latency_ms_max) == (100, 900)
+    assert (summary.model_calls_min, summary.model_calls_max) == (1, 4)
+    assert (summary.tools_executed_min, summary.tools_executed_max) == (0, 2)
+    # Only 2 of 3 records carry token counts -- the range is over those 2,
+    # and `known_count` says so rather than silently averaging in a gap.
+    assert (summary.input_tokens_min, summary.input_tokens_max) == (500, 4000)
+    assert summary.input_tokens_known_count == 2
+    assert (summary.output_tokens_min, summary.output_tokens_max) == (100, 800)
+    assert summary.output_tokens_known_count == 2
+    assert (summary.reserved_usd_min, summary.reserved_usd_max) == pytest.approx(
+        (0.01, 0.05)
+    )
+    # Only 2 of 3 records ever fully settled -- the actual_usd range is over
+    # those 2, and the 3rd's unknown cost is counted, not folded in as 0.0.
+    assert (summary.actual_usd_min, summary.actual_usd_max) == pytest.approx(
+        (0.008, 0.041)
+    )
+    assert summary.actual_usd_known_count == 2
+
+
+def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
+    summary = summarize_evaluation([])
+
+    assert summary.total_records == 0
+    assert summary.diagnosis_correct_count == 0
+    assert summary.disposition_correct_count == 0
+    assert summary.latency_ms_min is None
+    assert summary.latency_ms_max is None
+    assert summary.actual_usd_known_count == 0

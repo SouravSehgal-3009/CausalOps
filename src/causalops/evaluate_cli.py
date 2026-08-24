@@ -34,7 +34,13 @@ from pathlib import Path
 from causalops.cost_ledger import run_cost_totals
 from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import Budgets, InvestigationResult, StoredIncident, utc_now
-from causalops.evaluation import EvaluationRecord, ExpectedOutcome, score_run
+from causalops.evaluation import (
+    EvaluationRecord,
+    EvaluationSummary,
+    ExpectedOutcome,
+    score_run,
+    summarize_evaluation,
+)
 from causalops.evidence import new_opaque_id
 from causalops.graph import run_graph_investigation
 from causalops.live_setup import build_model_and_registry, live_evaluation_ceiling_usd
@@ -224,14 +230,17 @@ def _run_one(
             ),
         )
         scores = score_run(result.report, result.evidence, result.receipts, expected)
-        reserved_usd, actual_usd = run_cost_totals(ledger_conn, run_id)
-        # A settled ledger row can never carry `actual_usd == 0.0` (tokens
-        # always cost something > 0), so `reserved_usd > 0` with
-        # `actual_usd == 0.0` unambiguously means "reserved, never
-        # settled" -- a crash, timeout, or refusal mid-request -- and the
-        # record should say so honestly (`None`) rather than report a real
-        # zero-dollar run.
-        never_settled = reserved_usd > 0 and actual_usd == 0.0
+        reserved_usd, actual_usd, fully_settled = run_cost_totals(ledger_conn, run_id)
+        # `actual_usd == 0.0` alone is not a reliable "nothing settled"
+        # signal: a run whose first three of four model calls settle while
+        # the fourth stays `RESERVED` (a timeout, a crash mid-call) has a
+        # non-zero but PARTIAL `actual_usd` -- reporting that partial sum as
+        # the run's complete cost would understate it silently. `cost_
+        # ledger.run_cost_totals` now checks every row's state directly and
+        # reports that as `fully_settled`; a run with any outstanding
+        # reservation records `actual_usd=None` here rather than a number
+        # that looks complete but is not.
+        incomplete_settlement = not fully_settled
         mode = "no_tool_baseline" if no_tool_baseline else "tool_enabled"
         return EvaluationRecord(
             run_key=f"{incident.scope.incident_id}/{model_name}/{mode}",
@@ -250,7 +259,7 @@ def _run_one(
             pricing_verified_on=CLAUDE_SONNET_5_PRICING.verified_on,
             configured_ceiling_usd=configured_ceiling_usd,
             reserved_usd=reserved_usd,
-            actual_usd=None if never_settled else actual_usd,
+            actual_usd=None if incomplete_settlement else actual_usd,
         )
     finally:
         ledger_conn.close()
@@ -319,11 +328,57 @@ def _new_evaluation_target(root: Path) -> Path:
     starts -- so `main` has a real, existing path to report even if the
     very first scored run fails before producing anything, and
     `run_evaluation` has a file already in place to keep overwriting as
-    real records land."""
+    real records land.
+
+    Can raise `OSError` (a read-only filesystem, a full disk, a permission
+    error) -- `main` guards this call explicitly rather than letting that
+    escape uncaught, the same "no raw traceback reaches the owner" posture
+    it already keeps for `run_evaluation`'s own failures.
+    """
     target = root / "results" / "evaluations" / new_opaque_id()
     target.mkdir(parents=True, exist_ok=True)
     write_jsonl(target / "records.jsonl", [])
     return target
+
+
+def _range_str(low: float | int | None, high: float | int | None) -> str:
+    if low is None or high is None:
+        return "no data"
+    if isinstance(low, int) and isinstance(high, int):
+        return f"{low}-{high}"
+    return f"{low:.4f}-{high:.4f}"
+
+
+def render_evaluation_summary(summary: EvaluationSummary) -> str:
+    """Counts and ranges only, one line per figure -- no percentile or mean,
+    per `TECHNICAL_SPEC.md` §10 (see `EvaluationSummary`'s own docstring).
+    `causalops doctor`'s `render_report` is this project's other CLI-summary
+    formatter; this follows its "one line per fact, plain labels" shape
+    rather than inventing a second style."""
+    total = summary.total_records
+    lines = [
+        f"evaluation summary: {total} record(s)",
+        f"  diagnosis_correct:   {summary.diagnosis_correct_count}/{total}",
+        f"  disposition_correct: {summary.disposition_correct_count}/{total}",
+        "  latency_ms:      "
+        f"{_range_str(summary.latency_ms_min, summary.latency_ms_max)}",
+        "  model_calls:     "
+        f"{_range_str(summary.model_calls_min, summary.model_calls_max)}",
+        "  tools_executed:  "
+        f"{_range_str(summary.tools_executed_min, summary.tools_executed_max)}",
+        "  input_tokens:    "
+        f"{_range_str(summary.input_tokens_min, summary.input_tokens_max)} "
+        f"({summary.input_tokens_known_count}/{total} known)",
+        "  output_tokens:   "
+        f"{_range_str(summary.output_tokens_min, summary.output_tokens_max)} "
+        f"({summary.output_tokens_known_count}/{total} known)",
+        "  reserved_usd:    "
+        f"{_range_str(summary.reserved_usd_min, summary.reserved_usd_max)}",
+        "  actual_usd:      "
+        f"{_range_str(summary.actual_usd_min, summary.actual_usd_max)} "
+        f"({summary.actual_usd_known_count}/{total} known)",
+    ]
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -333,7 +388,14 @@ def main(argv: list[str] | None = None) -> int:
     if root is None:
         print(f"FAIL PROJECT_ROOT_NOT_FOUND No pyproject.toml at or above {start}.")
         return 1
-    target = _new_evaluation_target(root)
+    try:
+        target = _new_evaluation_target(root)
+    except OSError as error:
+        # No `records_path` to report here -- target creation is what would
+        # have produced it, and it failed, so there is genuinely nothing on
+        # disk yet to point the owner at.
+        print(f"FAIL EVALUATION_TARGET_UNWRITABLE {error}")
+        return 1
     records_path = target / "records.jsonl"
     try:
         records = run_evaluation(root, target)
@@ -362,6 +424,18 @@ def main(argv: list[str] | None = None) -> int:
             f"disposition_correct={record.scores.disposition_correct} "
             f"reserved_usd={record.reserved_usd:.4f} actual_usd={record.actual_usd}"
         )
+    summary = summarize_evaluation(records)
+    print(render_evaluation_summary(summary))
+    summary_path = target / "summary.json"
+    # A single write after the batch has already finished and every record
+    # is already durable in `records.jsonl` -- unlike `write_jsonl`'s
+    # repeated writes to the same path across the whole batch, there is no
+    # earlier state here a crash mid-write could destroy, so this does not
+    # need `write_jsonl`'s atomic-replace treatment.
+    summary_path.write_text(
+        json.dumps(summary.model_dump(mode="json"), indent=2), encoding="utf-8"
+    )
+    print(f"summary: {summary_path}")
     print(f"records: {records_path}")
     return 0
 

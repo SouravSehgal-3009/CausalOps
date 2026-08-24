@@ -15,9 +15,10 @@ policy, budgets, run records, and scoring. Milestones 1 and 2 are complete:
 end through the LangGraph `StateGraph` orchestrator, including the
 escalation interrupt and owner approval/rejection — see
 `TECHNICAL_OVERVIEW.md` Part III for what it currently supports. Milestone 3
-is in progress: FTS5 runbook retrieval and the live Claude adapter
-(`--model claude`) have landed; only the paired evaluation under the cost
-cap remains.
+is in progress: FTS5 runbook retrieval, the live Claude adapter
+(`--model claude`), and the paired evaluation (`causalops-evaluate`) under
+the cost cap have all landed on the `paired-live-evaluation` branch, not
+yet merged to `master` or run for real against a live model.
 
 ## Check this machine
 

@@ -8,6 +8,7 @@ import json
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -64,8 +65,32 @@ class RunRecorder:
 
 
 def write_jsonl(path: Path, records: Sequence[BaseModel]) -> None:
+    """Writes every record to `path` in one atomic replace, never a
+    truncate-then-write in place.
+
+    `Path.write_text` truncates its target before writing a byte of the new
+    content -- a crash, kill, or write failure partway through leaves `path`
+    corrupted or empty, not merely stale. Some callers (`evaluate_cli.py`'s
+    `run_evaluation`) call this on the SAME real target path repeatedly, once
+    after every completed run in a batch, specifically so already-scored
+    results survive a later crash; an in-place truncate would defeat that by
+    risking the file itself on every one of those writes. This mirrors
+    `finalize_investigation`'s own stage-then-`Path.replace` pattern one
+    level down, at the file rather than the directory: build the complete
+    content in a sibling temporary file first, then atomically rename it onto
+    `path` (`Path.replace`, atomic on POSIX). If anything raises before the
+    rename, `path` is left exactly as it was -- readers never observe a
+    partial write.
+    """
     lines = [record.model_dump_json() for record in records]
-    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    content = "".join(f"{line}\n" for line in lines)
+    tmp_path = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def finalize_investigation(

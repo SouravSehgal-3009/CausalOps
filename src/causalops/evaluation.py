@@ -286,3 +286,122 @@ def score_run(
             output_tokens=report.usage.output_tokens if report.usage else None,
         ),
     )
+
+
+class EvaluationSummary(BaseModel):
+    """Batch-level counts and ranges across every `EvaluationRecord` in one
+    `causalops-evaluate` run.
+
+    `TECHNICAL_SPEC.md` §10: "Report counts and ranges for small samples; do
+    not report p95 or broad performance claims from a small synthetic
+    benchmark." This model deliberately has no percentile, mean, or standard
+    deviation field -- a count and a min-max range are what a corpus this
+    size (at most eight records, `EVALUATION_FAMILIES` in `evaluate_cli.py`)
+    can honestly support, and adding a statistical field here would invite
+    reporting it later even though the sample never grew to support it.
+
+    Every `*_min`/`*_max` pair is `None` only when `total_records == 0` (an
+    empty batch, not a realistic outcome of a successful run but a real
+    input to this function) or, for `input_tokens`/`output_tokens`/
+    `actual_usd`, when none of the records carry a value at all -- the
+    corresponding `*_known_count` says how many of `total_records` did, so
+    a reader can tell "no data" from "zero-width range" apart from "some
+    unknown."
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total_records: int
+    diagnosis_correct_count: int
+    disposition_correct_count: int
+
+    latency_ms_min: int | None = None
+    latency_ms_max: int | None = None
+    model_calls_min: int | None = None
+    model_calls_max: int | None = None
+    tools_executed_min: int | None = None
+    tools_executed_max: int | None = None
+
+    input_tokens_min: int | None = None
+    input_tokens_max: int | None = None
+    input_tokens_known_count: int
+    output_tokens_min: int | None = None
+    output_tokens_max: int | None = None
+    output_tokens_known_count: int
+
+    reserved_usd_min: float | None = None
+    reserved_usd_max: float | None = None
+    # `actual_usd` is `None` on any `EvaluationRecord` whose run did not
+    # fully settle (`cost_ledger.run_cost_totals`'s `fully_settled` --
+    # `evaluate_cli.py`'s `_run_one`). `actual_usd_known_count` reports how
+    # many of `total_records` have a real, complete figure, so a reader
+    # never mistakes "some runs' cost is unknown" for "every run cost
+    # nothing."
+    actual_usd_min: float | None = None
+    actual_usd_max: float | None = None
+    actual_usd_known_count: int
+
+
+def _min_max[NumberT: (int, float)](
+    values: Sequence[NumberT],
+) -> tuple[NumberT, NumberT] | tuple[None, None]:
+    if not values:
+        return None, None
+    return min(values), max(values)
+
+
+def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSummary:
+    """Counts and ranges only -- see `EvaluationSummary`'s own docstring for
+    why no percentile or mean is computed here."""
+    input_tokens_known = [
+        record.scores.efficiency.input_tokens
+        for record in records
+        if record.scores.efficiency.input_tokens is not None
+    ]
+    output_tokens_known = [
+        record.scores.efficiency.output_tokens
+        for record in records
+        if record.scores.efficiency.output_tokens is not None
+    ]
+    actual_usd_known = [
+        record.actual_usd for record in records if record.actual_usd is not None
+    ]
+    latency_min, latency_max = _min_max(
+        [record.scores.efficiency.latency_ms for record in records]
+    )
+    calls_min, calls_max = _min_max(
+        [record.scores.efficiency.model_calls for record in records]
+    )
+    tools_min, tools_max = _min_max(
+        [record.scores.efficiency.tools_executed for record in records]
+    )
+    input_tokens_min, input_tokens_max = _min_max(input_tokens_known)
+    output_tokens_min, output_tokens_max = _min_max(output_tokens_known)
+    reserved_min, reserved_max = _min_max([record.reserved_usd for record in records])
+    actual_min, actual_max = _min_max(actual_usd_known)
+    return EvaluationSummary(
+        total_records=len(records),
+        diagnosis_correct_count=sum(
+            1 for record in records if record.scores.diagnosis_correct
+        ),
+        disposition_correct_count=sum(
+            1 for record in records if record.scores.disposition_correct
+        ),
+        latency_ms_min=latency_min,
+        latency_ms_max=latency_max,
+        model_calls_min=calls_min,
+        model_calls_max=calls_max,
+        tools_executed_min=tools_min,
+        tools_executed_max=tools_max,
+        input_tokens_min=input_tokens_min,
+        input_tokens_max=input_tokens_max,
+        input_tokens_known_count=len(input_tokens_known),
+        output_tokens_min=output_tokens_min,
+        output_tokens_max=output_tokens_max,
+        output_tokens_known_count=len(output_tokens_known),
+        reserved_usd_min=reserved_min,
+        reserved_usd_max=reserved_max,
+        actual_usd_min=actual_min,
+        actual_usd_max=actual_max,
+        actual_usd_known_count=len(actual_usd_known),
+    )

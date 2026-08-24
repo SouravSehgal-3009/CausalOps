@@ -47,9 +47,15 @@ from causalops.evaluate_cli import (
     _new_evaluation_target,
     _run_id_from_events,
     build_parser,
+    main,
+    render_evaluation_summary,
     run_evaluation,
 )
-from causalops.evaluation import EvaluationRecord
+from causalops.evaluation import (
+    EvaluationRecord,
+    EvaluationSummary,
+    summarize_evaluation,
+)
 from causalops.evidence import new_opaque_id
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunEvent
@@ -378,3 +384,169 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     assert len(incident_ids) == 1
     for record in on_disk:
         assert record.model_name == "fake-claude-model"
+
+
+def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
+    """The P2 this fix exists for: `main()` used to print one line per
+    record and never a batch-level aggregate at all. `TECHNICAL_SPEC.md`
+    §10 forbids p95 or any other broad performance claim from a small
+    synthetic sample -- this asserts the rendered text carries the counts
+    and ranges an `EvaluationSummary` holds, including the honest "how many
+    runs' cost is actually known" annotation from Item 2, and never mentions
+    a percentile."""
+    summary = EvaluationSummary(
+        total_records=2,
+        diagnosis_correct_count=1,
+        disposition_correct_count=2,
+        latency_ms_min=100,
+        latency_ms_max=900,
+        model_calls_min=1,
+        model_calls_max=4,
+        tools_executed_min=0,
+        tools_executed_max=2,
+        input_tokens_min=500,
+        input_tokens_max=4000,
+        input_tokens_known_count=2,
+        output_tokens_min=100,
+        output_tokens_max=800,
+        output_tokens_known_count=2,
+        reserved_usd_min=0.01,
+        reserved_usd_max=0.05,
+        actual_usd_min=0.008,
+        actual_usd_max=0.008,
+        actual_usd_known_count=1,
+    )
+
+    rendered = render_evaluation_summary(summary)
+
+    assert "evaluation summary: 2 record(s)" in rendered
+    assert "diagnosis_correct:   1/2" in rendered
+    assert "disposition_correct: 2/2" in rendered
+    assert "latency_ms:      100-900" in rendered
+    assert "model_calls:     1-4" in rendered
+    assert "tools_executed:  0-2" in rendered
+    assert "input_tokens:    500-4000 (2/2 known)" in rendered
+    assert "output_tokens:   100-800 (2/2 known)" in rendered
+    assert "reserved_usd:    0.0100-0.0500" in rendered
+    assert "actual_usd:      0.0080-0.0080 (1/2 known)" in rendered
+    assert "p95" not in rendered.lower()
+    assert "percentile" not in rendered.lower()
+
+
+def test_render_evaluation_summary_of_an_empty_batch_says_no_data() -> None:
+    rendered = render_evaluation_summary(summarize_evaluation([]))
+
+    assert "evaluation summary: 0 record(s)" in rendered
+    assert "no data" in rendered
+
+
+def test_main_writes_a_summary_alongside_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end through `main()`: the aggregate summary this fix adds must
+    actually reach both stdout and a saved `summary.json`, not just exist as
+    a pure function nothing calls."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in EVALUATION_FAMILIES:
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text(
+            json.dumps({"family": family}), encoding="utf-8"
+        )
+    monkeypatch.chdir(tmp_path)
+
+    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
+        incident_id = new_opaque_id()
+        scope = IncidentScope.model_validate(
+            {**incident_scope().model_dump(), "incident_id": incident_id}
+        )
+        packet = alert_packet().model_copy(update={"incident_id": incident_id})
+        evidence = tuple(
+            record.model_copy(update={"incident_id": incident_id})
+            for record in packet_evidence()
+        )
+        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+        paths = run_paths(root, incident_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+        (paths.root / "evaluator").mkdir(exist_ok=True)
+        (paths.root / "evaluator" / "expected.json").write_text(
+            json.dumps(
+                {
+                    "seed": seed,
+                    "family": family,
+                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                    "disposition": "DIAGNOSED",
+                    "predicates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return incident_id
+
+    def fake_reset_scenario(root: Path, incident_id: str) -> None:
+        pass
+
+    def fake_build_model_and_registry(
+        incident: StoredIncident,
+        paths: object,
+        budgets: Budgets,
+        model_choice: str,
+        db_path: Path,
+    ) -> tuple[object, object, str, object]:
+        model = ReplayToolCallingModel(
+            ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
+        )
+        registry = registry_with(
+            run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+        )
+        ledger_conn = sqlite3.connect(":memory:")
+        return model, registry, "fake-claude-model", ledger_conn
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
+    monkeypatch.setattr(
+        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+    )
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "evaluation summary: 8 record(s)" in out
+    assert "summary:" in out
+    summary_path = (
+        next((tmp_path / "results" / "evaluations").iterdir()) / "summary.json"
+    )
+    assert str(summary_path) in out
+    saved = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert saved["total_records"] == 8
+
+
+def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The P2 this fix exists for: `_new_evaluation_target` used to run
+    before `main`'s `try:` block, so a failure there (read-only filesystem,
+    full disk, permission error) escaped as a raw, uncaught traceback
+    instead of the clean `FAIL ...` every other refusal path in this script
+    already gives. `records.jsonl` genuinely does not exist yet for this
+    specific failure, so this only asserts the clean failure message, not a
+    'records so far' line."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def failing_target(root: Path) -> Path:
+        raise OSError("simulated read-only filesystem")
+
+    monkeypatch.setattr("causalops.evaluate_cli._new_evaluation_target", failing_target)
+
+    exit_code = main([])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "FAIL EVALUATION_TARGET_UNWRITABLE" in out
+    assert "simulated read-only filesystem" in out

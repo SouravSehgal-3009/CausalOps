@@ -197,18 +197,28 @@ def _read_row(
     )
 
 
-def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float]:
-    """`(reserved_usd, actual_usd)` summed for one `run_id` only -- the
-    per-run figure `EvaluationRecord` needs (Unit 3c), a different question
-    from `_reserved_and_settled_total`'s application-wide ceiling sum right
-    below. Reads the same table through the same connection every other
-    reservation/settlement call already uses; this adds no new tracking
-    mechanism, only a differently-scoped read of the one that exists.
+def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float, bool]:
+    """`(reserved_usd, actual_usd, fully_settled)` for one `run_id` only --
+    the per-run figures `EvaluationRecord` needs (Unit 3c), a different
+    question from `_reserved_and_settled_total`'s application-wide ceiling
+    sum right below. Reads the same table through the same connection every
+    other reservation/settlement call already uses; this adds no new
+    tracking mechanism, only a differently-scoped read of the one that
+    exists.
 
     `actual_usd` sums only `SETTLED` rows -- a still-`RESERVED` row for this
     run has no real cost yet to report, and `COALESCE(SUM(...), 0.0)` on an
     empty match returns `0.0` rather than `NULL`, so a run with no rows at
-    all (nothing ever sent) reports `(0.0, 0.0)` rather than raising.
+    all (nothing ever sent) reports `(0.0, 0.0, True)` rather than raising.
+
+    `fully_settled` is `True` only when every row for this `run_id` has
+    reached `SETTLED` -- `actual_usd == 0.0` alone is NOT a reliable signal
+    for "nothing settled": a run whose first three of four model calls
+    settle normally while the fourth stays `RESERVED` (a timeout, a crash
+    mid-call) has a non-zero, but PARTIAL, `actual_usd`, and reporting that
+    partial sum as if it were the run's complete cost would silently
+    understate it. This checks the actual row states directly rather than
+    inferring completeness from whether the sum happens to be zero.
     """
     ensure_cost_ledger_table(conn)
     reserved = conn.execute(
@@ -222,7 +232,12 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
         (run_id,),
     )
     (actual_usd,) = actual.fetchone()
-    return float(reserved_usd), float(actual_usd)
+    unsettled = conn.execute(
+        "SELECT COUNT(*) FROM cost_ledger WHERE run_id = ? AND state != 'SETTLED'",
+        (run_id,),
+    )
+    (unsettled_count,) = unsettled.fetchone()
+    return float(reserved_usd), float(actual_usd), unsettled_count == 0
 
 
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:

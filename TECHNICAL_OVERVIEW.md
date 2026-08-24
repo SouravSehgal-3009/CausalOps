@@ -240,7 +240,9 @@ hand, not in CI).
 **Superseded, and partly overtaken:** the bullets below record the state at
 the time of this audit. Milestone 3 has since landed a live adapter,
 `--model claude`, and a cost ledger (`ecbf174`, merged `9ca9c2b`) — see
-Part III. Only the paired evaluation remains unbuilt.
+Part III. The paired evaluation has since landed too (Unit 3c, "Unit 3c —
+the paired live comparison" below), on the `paired-live-evaluation` branch —
+not yet merged to `master`, and not yet run for real against a live model.
 
 Nothing under this heading has landed. No commit, source file, or test
 implements any of it. Specifically absent at the time of this audit:

@@ -321,10 +321,11 @@ def test_run_cost_totals_sums_only_one_run_id(conn: sqlite3.Connection) -> None:
         settled_at=NOW,
     )
 
-    reserved_usd, actual_usd = run_cost_totals(conn, "run-1")
+    reserved_usd, actual_usd, fully_settled = run_cost_totals(conn, "run-1")
 
     assert reserved_usd == pytest.approx(0.05)
     assert actual_usd == pytest.approx(0.036)
+    assert fully_settled is True
 
 
 def test_run_cost_totals_counts_a_never_settled_reservation_only_as_reserved(
@@ -333,19 +334,67 @@ def test_run_cost_totals_counts_a_never_settled_reservation_only_as_reserved(
     """A `RESERVED` row that never settles still counts toward
     `reserved_usd` (matching `_reserved_and_settled_total`'s own "a crash
     loop must not silently forget a reservation" rule) but contributes
-    nothing to `actual_usd` -- there is no real cost yet to report."""
+    nothing to `actual_usd` -- there is no real cost yet to report. Also
+    the "nothing ever settled" case for `fully_settled`: a run with one
+    row, and that row still `RESERVED`, is not fully settled."""
     _reserve(conn, run_id="run-1", reserved_usd=0.07)
 
-    reserved_usd, actual_usd = run_cost_totals(conn, "run-1")
+    reserved_usd, actual_usd, fully_settled = run_cost_totals(conn, "run-1")
 
     assert reserved_usd == pytest.approx(0.07)
     assert actual_usd == 0.0
+    assert fully_settled is False
 
 
 def test_run_cost_totals_for_an_unknown_run_id_is_zero(
     conn: sqlite3.Connection,
 ) -> None:
-    reserved_usd, actual_usd = run_cost_totals(conn, "no-such-run")
+    """No rows at all for this `run_id` -- `fully_settled` is vacuously
+    `True` (there is no outstanding reservation to report), matching
+    `(0.0, 0.0)`'s own "nothing ever sent" reading."""
+    reserved_usd, actual_usd, fully_settled = run_cost_totals(conn, "no-such-run")
 
     assert reserved_usd == 0.0
     assert actual_usd == 0.0
+    assert fully_settled is True
+
+
+def test_run_cost_totals_reports_partial_settlement_as_not_fully_settled(
+    conn: sqlite3.Connection,
+) -> None:
+    """The P2 this fix exists for: a run with 3 of 4 model calls settled and
+    the 4th still `RESERVED` (a timeout or crash mid-call, short of a clean
+    settle) has a non-zero, but PARTIAL, `actual_usd` -- `actual_usd == 0.0`
+    is not a reliable signal that something is missing here, since the sum
+    of the 3 settled rows is a real, non-zero number that nonetheless
+    understates the run's true final cost. `fully_settled` must say `False`
+    based on row state, not on whether the sum happens to be zero."""
+    for turn in range(3):
+        _reserve(
+            conn,
+            run_id="run-1",
+            model_turn=turn,
+            context_digest=f"d{turn}",
+            reserved_usd=0.02,
+        )
+        settle_reservation(
+            conn,
+            run_id="run-1",
+            graph_phase="INVESTIGATE",
+            model_turn=turn,
+            context_digest=f"d{turn}",
+            actual_usd=0.015,
+            input_tokens=500,
+            output_tokens=50,
+            settled_at=NOW,
+        )
+    # The 4th reservation is made but never settled -- simulates a timeout
+    # or crash after the 4th request was reserved but before it returned.
+    _reserve(conn, run_id="run-1", model_turn=3, context_digest="d3", reserved_usd=0.02)
+
+    reserved_usd, actual_usd, fully_settled = run_cost_totals(conn, "run-1")
+
+    assert reserved_usd == pytest.approx(0.08)
+    assert actual_usd == pytest.approx(0.045)
+    assert actual_usd > 0.0  # the partial sum is real and non-zero
+    assert fully_settled is False
