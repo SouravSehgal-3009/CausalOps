@@ -717,13 +717,15 @@ def test_main_writes_a_summary_alongside_records(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    # Item 2: `main()` now prints one block per arm plus a combined block --
-    # four families each contribute one baseline and one tool-enabled run,
-    # so each arm's own block reports 4 records and the combined block
+    # Item 2 (round 3), refined by the retrieval-mode fix: `main()` prints
+    # one block per `(arm, retrieval_mode)` group plus a combined block --
+    # every run here is the replay fixture's fake model, which never calls
+    # `search_runbooks`, so both arms stay `RetrievalMode.DISABLED` and each
+    # arm still produces exactly one group of 4 records; the combined block
     # reports all 8, never one blended "8 record(s)" alone.
-    assert f"[{MODE_NO_TOOL_BASELINE}]" in out
-    assert f"[{MODE_TOOL_ENABLED}]" in out
-    assert "[combined, both arms]" in out
+    assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in out
+    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in out
+    assert "[combined -- spans every arm and retrieval mode above" in out
     assert "evaluation summary: 4 record(s)" in out
     assert "evaluation summary: 8 record(s)" in out
     assert "summary:" in out
@@ -732,11 +734,15 @@ def test_main_writes_a_summary_alongside_records(
     )
     assert str(summary_path) in out
     saved = json.loads(summary_path.read_text(encoding="utf-8"))
-    # Item 2: `summary.json` is now `PairedEvaluationSummary`'s nested
-    # shape -- `baseline`/`tool_enabled` sections readable separately from
-    # `combined`, not one flat, blended `EvaluationSummary`.
-    assert saved["baseline"]["total_records"] == 4
-    assert saved["tool_enabled"]["total_records"] == 4
+    # `summary.json` is now `PairedEvaluationSummary`'s `groups`/`combined`
+    # shape -- each group readable separately from `combined`, not one flat,
+    # blended `EvaluationSummary`.
+    assert len(saved["groups"]) == 2
+    groups_by_arm = {group["arm"]: group for group in saved["groups"]}
+    assert groups_by_arm[MODE_NO_TOOL_BASELINE]["retrieval_mode"] == "disabled"
+    assert groups_by_arm[MODE_NO_TOOL_BASELINE]["summary"]["total_records"] == 4
+    assert groups_by_arm[MODE_TOOL_ENABLED]["retrieval_mode"] == "disabled"
+    assert groups_by_arm[MODE_TOOL_ENABLED]["summary"]["total_records"] == 4
     assert saved["combined"]["total_records"] == 8
 
 
@@ -848,12 +854,17 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     assert len(on_disk) == 8
 
 
-def _paired_record(*, run_key: str, diagnosis_correct: bool) -> EvaluationRecord:
+def _paired_record(
+    *,
+    run_key: str,
+    diagnosis_correct: bool,
+    retrieval_mode: RetrievalMode = RetrievalMode.DISABLED,
+) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_paired_evaluation`/
     `render_paired_evaluation_summary` tests -- only `run_key` (which arm
-    encodes the mode as its final `/`-segment) and `diagnosis_correct` vary
-    across the records these tests build; everything else is fixed,
-    plausible filler."""
+    encodes the mode as its final `/`-segment), `diagnosis_correct`, and
+    `retrieval_mode` vary across the records these tests build; everything
+    else is fixed, plausible filler."""
     return EvaluationRecord(
         run_key=run_key,
         investigation_id="inv-1",
@@ -875,7 +886,7 @@ def _paired_record(*, run_key: str, diagnosis_correct: bool) -> EvaluationRecord
         versions=Versions(
             prompt_version="1", policy_version="1", tool_registry_version="1"
         ),
-        retrieval_mode=RetrievalMode.DISABLED,
+        retrieval_mode=retrieval_mode,
         fixture_sha256="a" * 64,
         model_name="fake-claude-model",
         pricing_source="https://platform.claude.com/docs/en/about-claude/pricing",
@@ -886,15 +897,30 @@ def _paired_record(*, run_key: str, diagnosis_correct: bool) -> EvaluationRecord
     )
 
 
+def _group(paired: object, arm: str, retrieval_mode: RetrievalMode) -> object:
+    """Finds the one `EvaluationGroupSummary` for `(arm, retrieval_mode)`
+    in `paired.groups` -- raises `StopIteration` (a clear test failure) if
+    no such group exists, which is itself part of what these tests check:
+    a group that should not exist must genuinely be absent, not merged into
+    another one."""
+    return next(
+        group
+        for group in paired.groups  # type: ignore[attr-defined]
+        if group.arm == arm and group.retrieval_mode == retrieval_mode
+    )
+
+
 def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
-    """Item 2: `evaluate_cli.py`'s `main()` used to call
+    """`evaluate_cli.py`'s `main()` used to call
     `summarize_evaluation(records)` once on the full flat 8-record list --
     a batch that scores `6/8 diagnosis_correct` gives no way to tell that
     apart from `2/4 baseline + 4/4 tool-enabled` versus the reverse split.
     Builds a batch where the baseline arm gets 1/2 correct and the
     tool-enabled arm gets 2/2 correct and proves both the structured summary
     and its rendered text keep the two arms visibly distinct, not blended
-    into one number."""
+    into one number. Every record here stays `RetrievalMode.DISABLED`, so
+    each arm produces exactly one group -- the retrieval-mode split itself
+    is covered separately below."""
     records = [
         _paired_record(
             run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}", diagnosis_correct=True
@@ -913,23 +939,92 @@ def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
 
     summary = summarize_paired_evaluation(records)
 
-    assert summary.baseline.total_records == 2
-    assert summary.baseline.diagnosis_correct_count == 1
-    assert summary.tool_enabled.total_records == 2
-    assert summary.tool_enabled.diagnosis_correct_count == 2
-    # The combined total is still reported too -- Item 2 adds the per-arm
-    # split, it does not remove the batch-wide figure a reader may also want.
+    assert len(summary.groups) == 2
+    baseline_group = _group(summary, MODE_NO_TOOL_BASELINE, RetrievalMode.DISABLED)
+    tool_enabled_group = _group(summary, MODE_TOOL_ENABLED, RetrievalMode.DISABLED)
+    assert baseline_group.summary.total_records == 2
+    assert baseline_group.summary.diagnosis_correct_count == 1
+    assert tool_enabled_group.summary.total_records == 2
+    assert tool_enabled_group.summary.diagnosis_correct_count == 2
+    # The combined total is still reported too -- the per-arm split does
+    # not remove the batch-wide figure a reader may also want.
     assert summary.combined.total_records == 4
     assert summary.combined.diagnosis_correct_count == 3
 
     rendered = render_paired_evaluation_summary(summary)
 
-    assert f"[{MODE_NO_TOOL_BASELINE}]" in rendered
-    assert f"[{MODE_TOOL_ENABLED}]" in rendered
-    assert "[combined, both arms]" in rendered
+    assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in rendered
+    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in rendered
+    assert "[combined -- spans every arm and retrieval mode above" in rendered
     assert "diagnosis_correct:   1/2" in rendered
     assert "diagnosis_correct:   2/2" in rendered
     assert "diagnosis_correct:   3/4" in rendered
+
+
+def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart() -> (
+    None
+):
+    """The exact P1 fix under test: the no-tool baseline is always
+    `RetrievalMode.DISABLED` structurally, but within the TOOL-ENABLED arm,
+    `retrieval_mode` depends on whether the model actually called
+    `search_runbooks` on that particular run -- so two tool-enabled runs in
+    the same batch can legitimately land in different retrieval modes. This
+    builds exactly that: one tool-enabled run that never retrieved
+    (`DISABLED`) and one that did (`FTS5_LEXICAL`), reproducing the scenario
+    `TECHNICAL_SPEC.md`'s "never... mix modes in one benchmark aggregate"
+    rule forbids blending. Before this fix, `summarize_paired_evaluation`
+    partitioned by arm alone, so both records would have landed in one
+    `tool_enabled` bucket with no way to tell the two retrieval modes
+    apart."""
+    records = [
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
+            diagnosis_correct=True,
+            retrieval_mode=RetrievalMode.DISABLED,
+        ),
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=True,
+            retrieval_mode=RetrievalMode.DISABLED,
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=False,
+            retrieval_mode=RetrievalMode.FTS5_LEXICAL,
+        ),
+    ]
+
+    summary = summarize_paired_evaluation(records)
+
+    # Three distinct (arm, retrieval_mode) pairs are present -- one baseline
+    # group and TWO tool-enabled groups, never one merged tool-enabled
+    # bucket.
+    assert len(summary.groups) == 3
+    tool_enabled_no_retrieval = _group(
+        summary, MODE_TOOL_ENABLED, RetrievalMode.DISABLED
+    )
+    tool_enabled_retrieved = _group(
+        summary, MODE_TOOL_ENABLED, RetrievalMode.FTS5_LEXICAL
+    )
+    assert tool_enabled_no_retrieval.summary.total_records == 1
+    assert tool_enabled_no_retrieval.summary.diagnosis_correct_count == 1
+    assert tool_enabled_retrieved.summary.total_records == 1
+    assert tool_enabled_retrieved.summary.diagnosis_correct_count == 0
+
+    rendered = render_paired_evaluation_summary(summary)
+
+    # Both tool-enabled groups render as visibly separate blocks -- neither
+    # retrieval-mode figure below is blended into the other.
+    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in rendered
+    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]" in rendered
+    no_retrieval_block, retrieved_block = (
+        rendered.split(f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]")[1].split(
+            f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]"
+        )[0],
+        rendered.split(f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]")[1],
+    )
+    assert "diagnosis_correct:   1/1" in no_retrieval_block
+    assert "diagnosis_correct:   0/1" in retrieved_block
 
 
 def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> None:

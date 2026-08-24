@@ -5,6 +5,7 @@ file, no network, no live model. This is the durable half of the cost gate;
 `test_live_model.py` covers the adapter that calls it.
 """
 
+import logging
 import sqlite3
 import warnings
 from datetime import UTC, datetime
@@ -360,18 +361,20 @@ def test_run_cost_totals_for_an_unknown_run_id_is_zero(
     assert fully_settled is True
 
 
-def test_settle_reservation_warns_when_the_real_bill_exceeds_the_reservation(
-    conn: sqlite3.Connection,
+def test_settle_reservation_logs_when_the_real_bill_exceeds_the_reservation(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The invariant-breach half of the P1 fix: a settlement is never
     refused for coming in above its own reservation (the money is already
     spent, and the row must record what was really billed), but it must not
-    be silent about it either -- a `RuntimeWarning` naming both figures is
+    be silent about it either -- a logged warning naming both figures is
     the signal that the pessimistic estimate this reservation was computed
-    from needs recalibrating."""
+    from needs recalibrating. Item 2 (P2) replaced `warnings.warn` with
+    `logging` here -- see `test_settle_reservation_survives_warnings_as_
+    errors_on_an_overrun` below for why."""
     _reserve(conn, reserved_usd=0.01)
 
-    with pytest.warns(RuntimeWarning) as caught:
+    with caplog.at_level(logging.WARNING, logger="causalops.cost_ledger"):
         row = settle_reservation(
             conn,
             run_id="run-1",
@@ -386,21 +389,20 @@ def test_settle_reservation_warns_when_the_real_bill_exceeds_the_reservation(
 
     assert row.actual_usd == pytest.approx(0.03)
     assert row.reserved_usd == pytest.approx(0.01)
-    assert len(caught) == 1
-    message = str(caught[0].message)
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
     assert "0.0300" in message
     assert "0.0100" in message
 
 
-def test_settle_reservation_does_not_warn_when_the_bill_stays_under_the_reservation(
-    conn: sqlite3.Connection,
+def test_settle_reservation_does_not_log_when_the_bill_stays_under_the_reservation(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The ordinary case -- `actual_usd <= reserved_usd` -- must stay
     silent, or every normal settlement would spuriously warn."""
     _reserve(conn, reserved_usd=0.05)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with caplog.at_level(logging.WARNING, logger="causalops.cost_ledger"):
         settle_reservation(
             conn,
             run_id="run-1",
@@ -412,6 +414,55 @@ def test_settle_reservation_does_not_warn_when_the_bill_stays_under_the_reservat
             output_tokens=200,
             settled_at=NOW,
         )
+
+    assert caplog.records == []
+
+
+def test_settle_reservation_survives_warnings_as_errors_on_an_overrun(
+    conn: sqlite3.Connection,
+) -> None:
+    """Direct proof of the P2 fix -- not just a happy-path run under
+    default settings. `PYTHONWARNINGS=error` (or any caller/environment
+    that sets `warnings.simplefilter("error")`) turns
+    `warnings.warn(..., RuntimeWarning)` into a raised exception: the exact
+    configuration `settle_reservation` used to run this same overrun branch
+    under, back when it called `warnings.warn` instead of today's module
+    logger. This test proves both halves directly, under the identical
+    filter, in the identical process:
+
+    1. `warnings.warn(..., RuntimeWarning)` genuinely does raise under this
+       filter -- confirming the premise that the old code's bug was real,
+       not hypothetical.
+    2. `settle_reservation` itself -- already committed to the database,
+       running the same `actual_usd > reserved_usd` branch that used to
+       call `warnings.warn` -- does NOT raise under the identical filter,
+       and returns the genuine, already-settled row. It no longer goes
+       anywhere near `warnings.warn`, so its return value cannot depend on
+       the caller's warning-filter configuration."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+
+        with pytest.raises(RuntimeWarning):
+            warnings.warn(
+                "reproducing the old failure mode", RuntimeWarning, stacklevel=2
+            )
+
+        _reserve(conn, reserved_usd=0.01)
+        row = settle_reservation(
+            conn,
+            run_id="run-1",
+            graph_phase="INVESTIGATE",
+            model_turn=0,
+            context_digest="digest-1",
+            actual_usd=0.03,
+            input_tokens=1000,
+            output_tokens=500,
+            settled_at=NOW,
+        )
+
+    assert row.actual_usd == pytest.approx(0.03)
+    assert row.reserved_usd == pytest.approx(0.01)
+    assert row.state == "SETTLED"
 
 
 def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(

@@ -36,7 +36,13 @@ from pydantic import BaseModel, ConfigDict
 
 from causalops.cost_ledger import run_cost_totals
 from causalops.doctor import ProjectPaths, find_project_root
-from causalops.domain import Budgets, InvestigationResult, StoredIncident, utc_now
+from causalops.domain import (
+    Budgets,
+    InvestigationResult,
+    RetrievalMode,
+    StoredIncident,
+    utc_now,
+)
 from causalops.evaluation import (
     EvaluationRecord,
     EvaluationSummary,
@@ -402,10 +408,11 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
     formatter; this follows its "one line per fact, plain labels" shape
     rather than inventing a second style.
 
-    Renders one arm's (or the combined total's) figures only --
-    `render_paired_evaluation_summary` below calls this once per arm plus
-    once for the combined total, rather than this function knowing anything
-    about arms itself."""
+    Renders one group's (or the combined total's) figures only --
+    `render_paired_evaluation_summary` below calls this once per
+    `(arm, retrieval_mode)` group plus once for the combined total, rather
+    than this function knowing anything about arms or retrieval modes
+    itself."""
     total = summary.total_records
     lines = [
         f"evaluation summary: {total} record(s)",
@@ -451,71 +458,139 @@ def _arm_of(record: EvaluationRecord) -> str:
     return record.run_key.rsplit("/", 1)[-1]
 
 
+# `RetrievalMode`'s own declared member order -- used only to give
+# `summarize_paired_evaluation`'s group ordering a fixed, deterministic
+# sequence within an arm, independent of dict/set iteration order.
+_RETRIEVAL_MODE_ORDER: tuple[RetrievalMode, ...] = (
+    RetrievalMode.DISABLED,
+    RetrievalMode.FTS5_LEXICAL,
+    RetrievalMode.PINECONE_SEMANTIC,
+)
+
+
+class EvaluationGroupSummary(BaseModel):
+    """One `(arm, retrieval_mode)` group's own batch summary.
+
+    `TECHNICAL_SPEC.md` (line ~281): "Never silently fall back, mix modes in
+    one benchmark aggregate, or represent FTS5 as semantic retrieval." A
+    round-3 fix partitioned summaries by arm alone (`baseline`/
+    `tool_enabled`) -- not sufficient, because `retrieval_mode` is not
+    reliably coupled to arm. The no-tool baseline is always `RetrievalMode.
+    DISABLED` structurally: `graph.py`'s baseline path never calls any tool,
+    including `search_runbooks`. But within the TOOL-ENABLED arm,
+    `retrieval_mode` depends on whether the model actually chose to call
+    `search_runbooks` during that specific run (`graph.py`'s
+    `dispatch_tool`, which only moves `state["retrieval_mode"]` away from
+    its initial `DISABLED` default once a retrieval call actually happens).
+    So two tool-enabled runs in the same batch can legitimately carry
+    different `retrieval_mode` values, and an arm-only partition can
+    silently blend them into one reported figure -- exactly what the spec
+    forbids. Partitioning by the `(arm, retrieval_mode)` pair instead means
+    every group this class represents came from records that share both
+    facts, so no group can mix retrieval modes."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    arm: str
+    retrieval_mode: RetrievalMode
+    summary: EvaluationSummary
+
+
 class PairedEvaluationSummary(BaseModel):
-    """Item 2: the flat, blended `summarize_evaluation(records)` total this
-    fix replaces at the top level. `TECHNICAL_SPEC.md` §10's whole reason for
-    a *paired* comparison is to see the no-tool baseline against the
-    tool-enabled workflow -- a single combined figure like "6/8 diagnosis_
-    correct" cannot tell a reader whether that is 2/4 baseline + 4/4 tool-
-    enabled or the reverse, which is exactly the comparison the evaluation
-    exists to show. `baseline` and `tool_enabled` are computed from the
-    records partitioned by `_arm_of`; `combined` is the same blended total
-    the previous version reported, kept alongside the split rather than
-    dropped, since a reader may still want the batch-wide figure too.
+    """Replaces the fixed three-field `baseline`/`tool_enabled`/`combined`
+    shape a round-3 fix introduced. `groups` holds one `EvaluationGroupSummary`
+    per distinct `(arm, retrieval_mode)` pair actually present in the batch --
+    however many distinct pairs that turns out to be (one group for the
+    baseline arm, since it is always `DISABLED`; one or two for the
+    tool-enabled arm, depending on whether the model ever retrieved) --
+    rather than assuming a fixed small set of buckets that a future third
+    retrieval mode or a mixed-mode batch could silently overflow.
+
+    `combined` is still reported alongside the split, since a reader may
+    still want the batch-wide total too -- but `render_paired_evaluation_
+    summary` labels it explicitly as spanning every arm and retrieval mode
+    present, never printed as if it were a single clean benchmark
+    aggregate. That label is the actual fix: the spec's rule is about not
+    silently mixing modes into a reported benchmark figure, not about
+    forbidding a clearly-labeled combined count outright.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    baseline: EvaluationSummary
-    tool_enabled: EvaluationSummary
+    groups: tuple[EvaluationGroupSummary, ...]
     combined: EvaluationSummary
 
 
 def summarize_paired_evaluation(
     records: Sequence[EvaluationRecord],
 ) -> PairedEvaluationSummary:
-    """Partitions `records` by arm via `_arm_of`, then calls the existing
-    arm-agnostic `summarize_evaluation` three times (baseline, tool-enabled,
-    combined) rather than teaching it anything about arms itself --
-    `summarize_evaluation` predates Unit 3c's paired design and stays usable
-    on any flat list of records, here or elsewhere.
+    """Partitions `records` by the `(arm, retrieval_mode)` pair -- see
+    `EvaluationGroupSummary`'s own docstring for why arm alone is not
+    enough -- then calls the existing arm/mode-agnostic
+    `summarize_evaluation` once per distinct pair present, plus once more
+    for `combined`. `summarize_evaluation` itself is taught nothing about
+    arms or retrieval modes; it predates Unit 3c's paired design and stays
+    usable on any flat list of records, here or elsewhere.
 
-    A record whose `run_key` carries neither known mode is a data-shape bug
-    upstream (a `run_key` no `_run_one` call in this script's history could
-    have produced), not a value to silently drop from a scored figure --
-    raising here surfaces that immediately rather than quietly under-
-    counting one arm.
+    A record whose `run_key` carries neither known arm word is a data-shape
+    bug upstream (a `run_key` no `_run_one` call in this script's history
+    could have produced), not a value to silently drop from a scored
+    figure -- raising here surfaces that immediately rather than quietly
+    under-counting one arm.
     """
-    baseline = [
-        record for record in records if _arm_of(record) == MODE_NO_TOOL_BASELINE
+    unrecognized = [
+        record
+        for record in records
+        if _arm_of(record) not in (MODE_NO_TOOL_BASELINE, MODE_TOOL_ENABLED)
     ]
-    tool_enabled = [
-        record for record in records if _arm_of(record) == MODE_TOOL_ENABLED
-    ]
-    unrecognized = len(records) - len(baseline) - len(tool_enabled)
-    if unrecognized != 0:
+    if unrecognized:
         raise ValueError(
-            f"{unrecognized} record(s) carry a run_key whose final segment is "
-            f"neither {MODE_NO_TOOL_BASELINE!r} nor {MODE_TOOL_ENABLED!r} -- "
-            "cannot partition this batch by arm"
+            f"{len(unrecognized)} record(s) carry a run_key whose final "
+            f"segment is neither {MODE_NO_TOOL_BASELINE!r} nor "
+            f"{MODE_TOOL_ENABLED!r} -- cannot partition this batch by arm"
         )
+
+    grouped: dict[tuple[str, RetrievalMode], list[EvaluationRecord]] = {}
+    for record in records:
+        key = (_arm_of(record), record.retrieval_mode)
+        grouped.setdefault(key, []).append(record)
+
+    def _sort_key(key: tuple[str, RetrievalMode]) -> tuple[int, int]:
+        arm, mode = key
+        arm_rank = 0 if arm == MODE_NO_TOOL_BASELINE else 1
+        return (arm_rank, _RETRIEVAL_MODE_ORDER.index(mode))
+
+    groups = tuple(
+        EvaluationGroupSummary(
+            arm=arm, retrieval_mode=mode, summary=summarize_evaluation(group_records)
+        )
+        for (arm, mode), group_records in sorted(
+            grouped.items(), key=lambda item: _sort_key(item[0])
+        )
+    )
     return PairedEvaluationSummary(
-        baseline=summarize_evaluation(baseline),
-        tool_enabled=summarize_evaluation(tool_enabled),
-        combined=summarize_evaluation(records),
+        groups=groups, combined=summarize_evaluation(records)
     )
 
 
 def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
-    """One block per arm, then the blended combined total -- the reader can
-    see the no-tool baseline and the tool-enabled workflow side by side,
-    instead of Item 2's one blended number that could not distinguish "2/4
-    baseline + 4/4 tool-enabled" from the reverse."""
+    """One block per `(arm, retrieval_mode)` group, then the combined total
+    -- labeled explicitly as spanning every arm and retrieval mode present,
+    so a reader can never mistake it for one clean benchmark figure. Each
+    group's own label states both facts it was partitioned on, so two
+    tool-enabled groups that differ only in retrieval mode -- exactly the
+    case `TECHNICAL_SPEC.md` forbids blending -- render as visibly separate
+    blocks, never one merged number."""
     blocks = [
-        f"[{MODE_NO_TOOL_BASELINE}]\n{render_evaluation_summary(paired.baseline)}",
-        f"[{MODE_TOOL_ENABLED}]\n{render_evaluation_summary(paired.tool_enabled)}",
-        f"[combined, both arms]\n{render_evaluation_summary(paired.combined)}",
+        f"[{group.arm}, retrieval_mode={group.retrieval_mode.value}]\n"
+        f"{render_evaluation_summary(group.summary)}"
+        for group in paired.groups
     ]
+    blocks.append(
+        "[combined -- spans every arm and retrieval mode above; not a "
+        "single clean benchmark figure]\n"
+        f"{render_evaluation_summary(paired.combined)}"
+    )
     return "\n\n".join(blocks)
 
 

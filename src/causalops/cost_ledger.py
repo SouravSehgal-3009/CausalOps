@@ -47,14 +47,30 @@ the request that already caused it, since refusing a request needs to happen
 before its real cost exists to check against.
 """
 
+import logging
 import sqlite3
-import warnings
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.tools import UtcDatetime
+
+# `settle_reservation`'s overrun diagnostic below used to go through
+# `warnings.warn`, whose default action is configuration-dependent: under
+# `PYTHONWARNINGS=error` (or any `warnings.simplefilter("error")` in the
+# calling process), `warnings.warn` raises instead of returning, which would
+# discard the `CostLedgerRow` this function is about to return even though
+# `conn.commit()` above already succeeded and the row is genuinely `SETTLED`.
+# A module logger's `.warning()` call never raises under any standard
+# configuration, so this function's return value can never depend on the
+# caller's or environment's warning-filter settings. This is the first use
+# of `logging` in this codebase; a caller who wants these diagnostics
+# surfaced configures a handler on this logger (or the root logger) the
+# normal way -- with no handler configured, Python's logging module already
+# defaults to at most one "no handlers found" notice on stderr the first
+# time a logger with no handlers is used, never a raised exception.
+_LOGGER = logging.getLogger(__name__)
 
 
 class CostCeilingExceeded(Exception):
@@ -411,16 +427,20 @@ def settle_reservation(
     If `actual_usd` comes in ABOVE the row's own `reserved_usd` -- the
     reservation's pessimistic estimate turned out to be wrong -- this still
     commits the true `actual_usd` (the row has to record what was really
-    billed, not a number massaged to look conservative) and raises a
-    `RuntimeWarning` naming both figures, so the overrun is visible rather
-    than silently absorbed. It is a warning, not a raised error that could
-    abort the settlement: the money is already spent by the time this
-    function runs, there is nothing left to refuse, and the caller still
-    needs the real `CostLedgerRow` back. `_reserved_and_settled_total`
-    above already accounts correctly for a row in this state once it lands
-    (counting it at its true, higher cost) -- this warning is the
-    diagnostic signal for whoever configured the pricing snapshot or token
-    estimate to recalibrate it, not a correctness gap in the ceiling itself.
+    billed, not a number massaged to look conservative) and logs a warning
+    naming both figures, so the overrun is visible rather than silently
+    absorbed. It is a logged diagnostic, not a raised error that could abort
+    the settlement: the money is already spent by the time this function
+    runs, there is nothing left to refuse, and the caller still needs the
+    real `CostLedgerRow` back. Logging rather than `warnings.warn` is
+    deliberate here, not a style choice -- see this module's own `_LOGGER`
+    comment for why `warnings.warn` could turn an already-committed, valid
+    settlement into an exception depending on the caller's warning-filter
+    configuration. `_reserved_and_settled_total` above already accounts
+    correctly for a row in this state once it lands (counting it at its
+    true, higher cost) -- this log line is the diagnostic signal for
+    whoever configured the pricing snapshot or token estimate to
+    recalibrate it, not a correctness gap in the ceiling itself.
     """
     ensure_cost_ledger_table(conn)
     try:
@@ -458,13 +478,15 @@ def settle_reservation(
     row = _read_row(conn, run_id, graph_phase, model_turn, context_digest)
     assert row is not None, "just-settled row vanished before it could be read back"
     if row.actual_usd is not None and row.actual_usd > row.reserved_usd:
-        warnings.warn(
-            f"cost_ledger settlement for run {run_id!r}, phase {graph_phase!r}, "
-            f"turn {model_turn} billed ${row.actual_usd:.4f}, above its "
-            f"${row.reserved_usd:.4f} reservation -- the pessimistic estimate "
-            "under-reserved this request; recalibrate the pricing snapshot or "
-            "token estimate this reservation was computed from",
-            RuntimeWarning,
-            stacklevel=2,
+        _LOGGER.warning(
+            "cost_ledger settlement for run %r, phase %r, turn %d billed "
+            "$%.4f, above its $%.4f reservation -- the pessimistic estimate "
+            "under-reserved this request; recalibrate the pricing snapshot "
+            "or token estimate this reservation was computed from",
+            run_id,
+            graph_phase,
+            model_turn,
+            row.actual_usd,
+            row.reserved_usd,
         )
     return row
