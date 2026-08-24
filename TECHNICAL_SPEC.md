@@ -430,7 +430,7 @@ dominates every reservation; ~1.54x for the smoke call's own turn shape).
 headroom this ceiling was always meant to leave, re-derived against the
 larger reservation rather than picked to make the new math comfortable.
 
-*Amendment (paired-live-evaluation branch):* the authorization check now
+*Amendment, Unit 3c:* the authorization check now
 stops a fixed `RESERVATION_CEILING_BUFFER_USD = 0.10` short of
 `LIVE_EVALUATION_MAX_USD`, not at it (`cost_ledger.py`'s
 `record_reservation_before_request`) -- a reservation is refused once

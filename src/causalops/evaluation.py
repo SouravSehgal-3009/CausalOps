@@ -195,20 +195,35 @@ def satisfies(predicate: RequiredEvidencePredicate, evidence: Evidence) -> bool:
 def cited_evidence(
     report: InvestigationReport, evidence: Sequence[Evidence]
 ) -> tuple[Evidence, ...]:
-    """Evidence records the report's assessment actually cited, scoped to
-    THIS incident -- the same `record.incident_id == report.incident_id`
-    filter `citations_are_valid`'s own `known` set below already applies.
+    """Evidence records the report's assessment actually cited as
+    SUPPORTING its diagnosis, scoped to THIS incident -- the same
+    `record.incident_id == report.incident_id` filter `citations_are_valid`'s
+    own `known` set below already applies.
 
-    Before this filter, an `evidence_id` match alone was enough regardless
-    of which incident a record belonged to, so `citations_sufficient`
-    (which reads only this function's output, in `score_run` below) could
-    be satisfied by a cross-incident record even on a report
-    `citations_are_valid` correctly refused for exactly that citation. The
-    isolation boundary held only because the graph never actually handed
-    this scorer cross-incident evidence in practice, not because the scorer
-    enforced it itself. This filter closes that gap: `citations_sufficient`
-    can no longer be satisfied by a record this function has already
-    excluded.
+    Deliberately excludes `contrary_evidence_ids`. This function's only
+    caller is `score_run`'s `citations_sufficient` check, which asks whether
+    the diagnosis actually rests on real evidence FOR it. Evidence the model
+    itself filed as contrary -- working against its own diagnosis, not for
+    it -- must not be able to satisfy that question just because it happens
+    to match a required predicate's field content. Before this narrowing,
+    `cited` combined both lists into one set, so a diagnosis whose only
+    predicate-matching evidence was filed under `contrary_evidence_ids`
+    still scored `citations_sufficient=True` -- backwards, since that
+    evidence is the model's own record of what argued against the
+    diagnosis. `citations_are_valid` below intentionally keeps validating
+    both lists together: whether a citation is a real, same-incident record
+    is a different question from which side it argues, and a contrary
+    citation should still be checked for existence.
+
+    Before the incident-id filter (an earlier round's fix), an
+    `evidence_id` match alone was enough regardless of which incident a
+    record belonged to, so `citations_sufficient` could be satisfied by a
+    cross-incident record even on a report `citations_are_valid` correctly
+    refused for exactly that citation. The isolation boundary held only
+    because the graph never actually handed this scorer cross-incident
+    evidence in practice, not because the scorer enforced it itself. That
+    filter closes that gap: `citations_sufficient` can no longer be
+    satisfied by a record this function has already excluded.
 
     Deliberately NOT also gating `citations_sufficient` on `citations_valid`
     in `score_run`: that would conflate two different questions. A report
@@ -222,14 +237,11 @@ def cited_evidence(
     """
     if report.assessment is None:
         return ()
-    cited = set(
-        report.assessment.supporting_evidence_ids
-        + report.assessment.contrary_evidence_ids
-    )
+    supporting = set(report.assessment.supporting_evidence_ids)
     return tuple(
         record
         for record in evidence
-        if record.evidence_id in cited and record.incident_id == report.incident_id
+        if record.evidence_id in supporting and record.incident_id == report.incident_id
     )
 
 

@@ -296,22 +296,28 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
     inferring completeness from whether the sum happens to be zero.
     """
     ensure_cost_ledger_table(conn)
-    reserved = conn.execute(
-        "SELECT COALESCE(SUM(reserved_usd), 0.0) FROM cost_ledger WHERE run_id = ?",
-        (run_id,),
-    )
-    (reserved_usd,) = reserved.fetchone()
-    actual = conn.execute(
-        "SELECT COALESCE(SUM(actual_usd), 0.0) FROM cost_ledger "
-        "WHERE run_id = ? AND state = 'SETTLED'",
-        (run_id,),
-    )
-    (actual_usd,) = actual.fetchone()
-    unsettled = conn.execute(
-        "SELECT COUNT(*) FROM cost_ledger WHERE run_id = ? AND state != 'SETTLED'",
-        (run_id,),
-    )
-    (unsettled_count,) = unsettled.fetchone()
+    try:
+        reserved = conn.execute(
+            "SELECT COALESCE(SUM(reserved_usd), 0.0) FROM cost_ledger WHERE run_id = ?",
+            (run_id,),
+        )
+        (reserved_usd,) = reserved.fetchone()
+        actual = conn.execute(
+            "SELECT COALESCE(SUM(actual_usd), 0.0) FROM cost_ledger "
+            "WHERE run_id = ? AND state = 'SETTLED'",
+            (run_id,),
+        )
+        (actual_usd,) = actual.fetchone()
+        unsettled = conn.execute(
+            "SELECT COUNT(*) FROM cost_ledger WHERE run_id = ? AND state != 'SETTLED'",
+            (run_id,),
+        )
+        (unsettled_count,) = unsettled.fetchone()
+    except sqlite3.Error as error:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.STORE_UNAVAILABLE,
+            f"cost_ledger unreadable for run totals: {error}",
+        ) from error
     return float(reserved_usd), float(actual_usd), unsettled_count == 0
 
 

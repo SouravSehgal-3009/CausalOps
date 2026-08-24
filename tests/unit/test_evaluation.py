@@ -241,6 +241,38 @@ def test_a_citation_from_another_incident_is_invalid() -> None:
     assert not scores.citations_sufficient
 
 
+def test_a_predicate_matched_only_by_contrary_evidence_is_insufficient() -> None:
+    """The P1 this test exists for: `cited_evidence` used to combine
+    `supporting_evidence_ids` and `contrary_evidence_ids` into one set, so a
+    diagnosis whose only predicate-matching evidence was filed as CONTRARY
+    (evidence the model itself said argued against its own diagnosis, not
+    for it) still scored `citations_sufficient=True`. That is backwards --
+    sufficiency is supposed to verify the diagnosis rests on real supporting
+    evidence, not evidence the model flagged as working against it.
+    """
+    matching = timeout_evidence()
+    unrelated_but_real = packet_evidence()[0]
+    report = diagnosed_report((unrelated_but_real.evidence_id,))
+    assert report.assessment is not None
+    report = report.model_copy(
+        update={
+            "assessment": report.assessment.model_copy(
+                update={"contrary_evidence_ids": (matching.evidence_id,)}
+            )
+        }
+    )
+
+    scores = score_run(
+        report, [matching, unrelated_but_real], [receipt()], expected_diagnosis()
+    )
+
+    # The predicate-matching record is a real, same-incident citation, so
+    # validity is unaffected -- only sufficiency, which asks whether the
+    # diagnosis rests on genuine SUPPORTING evidence, must go False.
+    assert scores.citations_valid
+    assert not scores.citations_sufficient
+
+
 def test_a_wrong_cause_or_disposition_scores_false() -> None:
     evidence = timeout_evidence()
     report = diagnosed_report((evidence.evidence_id,))

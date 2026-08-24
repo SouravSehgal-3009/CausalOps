@@ -12,7 +12,7 @@ loophole the AST scan alone cannot see.
 
 from pathlib import Path
 
-from import_scan import PACKAGE, imported_modules
+from import_scan import PACKAGE, dynamically_imported_modules, imported_modules
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CLI_SOURCE = REPOSITORY / "src" / PACKAGE / "cli.py"
@@ -49,6 +49,29 @@ def test_evaluate_cli_never_imports_cli_at_any_nesting_depth() -> None:
     direction explicitly."""
     evaluate_cli_source = REPOSITORY / "src" / PACKAGE / "evaluate_cli.py"
     names = imported_modules(evaluate_cli_source)
+
+    assert f"{PACKAGE}.cli" not in names
+    assert not any(name.startswith(f"{PACKAGE}.cli.") for name in names)
+
+
+def test_evaluate_cli_never_dynamically_imports_cli() -> None:
+    """The reverse direction's own closure for the dynamic-import loophole
+    the forward direction closes with a blunt substring check
+    (`test_cli_source_never_names_evaluate_cli_at_all`). A plain substring
+    check cannot be reused here: `evaluate_cli.py`'s own module docstring
+    legitimately names `causalops.cli` in prose explaining this exact
+    isolation rule (see its own top-of-file docstring), so a substring
+    check would false-positive on the file doing the right thing.
+    `dynamically_imported_modules` is scoped to `ast.Call` nodes matching
+    `importlib.import_module(...)`/`__import__(...)` with a string-literal
+    argument, so prose, comments, and docstrings can never trigger it --
+    only an actual dynamic-import call can. This closes a currently-
+    theoretical gap (nothing in this project dynamically imports anything
+    today) the AST-walk in the test above cannot see on its own, since a
+    function call is an `ast.Call` node, not the `ast.Import`/
+    `ast.ImportFrom` nodes that scan is built on."""
+    evaluate_cli_source = REPOSITORY / "src" / PACKAGE / "evaluate_cli.py"
+    names = dynamically_imported_modules(evaluate_cli_source)
 
     assert f"{PACKAGE}.cli" not in names
     assert not any(name.startswith(f"{PACKAGE}.cli.") for name in names)

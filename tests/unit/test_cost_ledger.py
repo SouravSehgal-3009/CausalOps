@@ -375,6 +375,28 @@ def test_run_cost_totals_for_an_unknown_run_id_is_zero(
     assert fully_settled is True
 
 
+def test_run_cost_totals_wraps_a_malformed_table_as_a_store_error(
+    conn: sqlite3.Connection,
+) -> None:
+    """`run_cost_totals`'s own three `SELECT`s used to run unwrapped, unlike
+    every other function in this module (`record_reservation_before_request`,
+    `settle_reservation`), which all catch `sqlite3.Error` and re-raise the
+    module's own `CheckpointStoreError(STORE_UNAVAILABLE, ...)`. A malformed
+    or corrupted ledger schema -- simulated here by replacing `cost_ledger`
+    with a table missing the columns these queries select -- used to raise a
+    raw `sqlite3.OperationalError` instead of that established, actionable
+    error contract."""
+    conn.execute("DROP TABLE cost_ledger")
+    conn.execute("CREATE TABLE cost_ledger (run_id TEXT NOT NULL)")
+    conn.commit()
+
+    with pytest.raises(CheckpointStoreError) as excinfo:
+        run_cost_totals(conn, "run-1")
+
+    assert excinfo.value.reason_code == CheckpointStoreReasonCode.STORE_UNAVAILABLE
+    assert "run totals" in str(excinfo.value)
+
+
 def test_settle_reservation_logs_when_the_real_bill_exceeds_the_reservation(
     conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:

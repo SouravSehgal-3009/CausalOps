@@ -31,6 +31,7 @@ from fake_incident import (
     packet_evidence,
     registry_with,
 )
+from pydantic import BaseModel
 
 from causalops.domain import (
     Budgets,
@@ -50,6 +51,7 @@ from causalops.evaluate_cli import (
     _load_expected_outcome,
     _new_evaluation_target,
     _run_id_from_events,
+    _write_json_atomic,
     build_parser,
     main,
     render_evaluation_summary,
@@ -87,6 +89,45 @@ def _init_git_repo(root: Path) -> None:
     (root / "tracked.txt").write_text("one\n", encoding="utf-8")
     _run_git(root, "add", "tracked.txt")
     _run_git(root, "commit", "--quiet", "-m", "initial")
+
+
+def _fake_start_scenario(root: Path, family: str, seed: str) -> str:
+    """A `causalops.evaluate_cli.start_scenario` stand-in shared by every
+    `main()` test that does not need to observe or vary its own calls into
+    it -- a fresh incident, its `incident.json`, and its evaluator/
+    expected.json, written the same way a real `start_scenario` call would
+    leave them for `_run_one` to read back. `test_run_id_from_events_finds_
+    the_investigation_started_run_id` keeps its OWN local closure instead
+    of this one: it needs to append to a test-local `started` list on
+    every call, a real behavioural difference this shared stand-in
+    deliberately does not carry."""
+    incident_id = new_opaque_id()
+    scope = IncidentScope.model_validate(
+        {**incident_scope().model_dump(), "incident_id": incident_id}
+    )
+    packet = alert_packet().model_copy(update={"incident_id": incident_id})
+    evidence = tuple(
+        record.model_copy(update={"incident_id": incident_id})
+        for record in packet_evidence()
+    )
+    incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+    paths = run_paths(root, incident_id)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+    (paths.root / "evaluator").mkdir(exist_ok=True)
+    (paths.root / "evaluator" / "expected.json").write_text(
+        json.dumps(
+            {
+                "seed": seed,
+                "family": family,
+                "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                "disposition": "DIAGNOSED",
+                "predicates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return incident_id
 
 
 def test_build_parser_accepts_no_arguments() -> None:
@@ -304,35 +345,6 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
             json.dumps({"family": family}), encoding="utf-8"
         )
 
-    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
-        incident_id = new_opaque_id()
-        scope = IncidentScope.model_validate(
-            {**incident_scope().model_dump(), "incident_id": incident_id}
-        )
-        packet = alert_packet().model_copy(update={"incident_id": incident_id})
-        evidence = tuple(
-            record.model_copy(update={"incident_id": incident_id})
-            for record in packet_evidence()
-        )
-        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
-        paths = run_paths(root, incident_id)
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
-        (paths.root / "evaluator").mkdir(exist_ok=True)
-        (paths.root / "evaluator" / "expected.json").write_text(
-            json.dumps(
-                {
-                    "seed": seed,
-                    "family": family,
-                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
-                    "disposition": "DIAGNOSED",
-                    "predicates": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return incident_id
-
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         pass
 
@@ -363,7 +375,7 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
         ledger_conn = sqlite3.connect(":memory:")
         return model, registry, "fake-claude-model", ledger_conn
 
-    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
         "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
@@ -416,35 +428,6 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
             json.dumps({"family": family}), encoding="utf-8"
         )
 
-    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
-        incident_id = new_opaque_id()
-        scope = IncidentScope.model_validate(
-            {**incident_scope().model_dump(), "incident_id": incident_id}
-        )
-        packet = alert_packet().model_copy(update={"incident_id": incident_id})
-        evidence = tuple(
-            record.model_copy(update={"incident_id": incident_id})
-            for record in packet_evidence()
-        )
-        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
-        paths = run_paths(root, incident_id)
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
-        (paths.root / "evaluator").mkdir(exist_ok=True)
-        (paths.root / "evaluator" / "expected.json").write_text(
-            json.dumps(
-                {
-                    "seed": seed,
-                    "family": family,
-                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
-                    "disposition": "DIAGNOSED",
-                    "predicates": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return incident_id
-
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         raise RuntimeError("simulated reset_scenario cleanup failure")
 
@@ -457,7 +440,7 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
     ) -> tuple[object, object, str, object]:
         raise RuntimeError("simulated billed-run failure")
 
-    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
         "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
@@ -503,35 +486,6 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
             json.dumps({"family": family}), encoding="utf-8"
         )
 
-    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
-        incident_id = new_opaque_id()
-        scope = IncidentScope.model_validate(
-            {**incident_scope().model_dump(), "incident_id": incident_id}
-        )
-        packet = alert_packet().model_copy(update={"incident_id": incident_id})
-        evidence = tuple(
-            record.model_copy(update={"incident_id": incident_id})
-            for record in packet_evidence()
-        )
-        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
-        paths = run_paths(root, incident_id)
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
-        (paths.root / "evaluator").mkdir(exist_ok=True)
-        (paths.root / "evaluator" / "expected.json").write_text(
-            json.dumps(
-                {
-                    "seed": seed,
-                    "family": family,
-                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
-                    "disposition": "DIAGNOSED",
-                    "predicates": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return incident_id
-
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         raise RuntimeError("simulated reset_scenario failure after a clean run")
 
@@ -551,7 +505,7 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
         ledger_conn = sqlite3.connect(":memory:")
         return model, registry, "fake-claude-model", ledger_conn
 
-    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
         "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
@@ -656,35 +610,6 @@ def test_main_writes_a_summary_alongside_records(
         )
     monkeypatch.chdir(tmp_path)
 
-    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
-        incident_id = new_opaque_id()
-        scope = IncidentScope.model_validate(
-            {**incident_scope().model_dump(), "incident_id": incident_id}
-        )
-        packet = alert_packet().model_copy(update={"incident_id": incident_id})
-        evidence = tuple(
-            record.model_copy(update={"incident_id": incident_id})
-            for record in packet_evidence()
-        )
-        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
-        paths = run_paths(root, incident_id)
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
-        (paths.root / "evaluator").mkdir(exist_ok=True)
-        (paths.root / "evaluator" / "expected.json").write_text(
-            json.dumps(
-                {
-                    "seed": seed,
-                    "family": family,
-                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
-                    "disposition": "DIAGNOSED",
-                    "predicates": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return incident_id
-
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         pass
 
@@ -704,7 +629,7 @@ def test_main_writes_a_summary_alongside_records(
         ledger_conn = sqlite3.connect(":memory:")
         return model, registry, "fake-claude-model", ledger_conn
 
-    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
         "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
@@ -767,10 +692,13 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     error) escaped as a raw traceback instead of the clean `FAIL ...`
     message every other refusal path in this script already gives, even
     though `records.jsonl` was already durably written by this point. Only
-    `summary.json`'s own write is made to fail here (matched by filename,
-    not by patching `Path.write_text` unconditionally), so `write_jsonl`'s
-    own earlier writes -- which is how `records.jsonl` gets to disk in the
-    first place -- are unaffected."""
+    the summary's own write is made to fail here (matched by filename
+    prefix, not by patching `Path.write_text` unconditionally), so `write_
+    jsonl`'s own earlier writes -- which is how `records.jsonl` gets to
+    disk in the first place -- are unaffected. `_write_json_atomic` (Item
+    4) now writes to a sibling `summary.json.tmp-<hex>` before renaming it
+    onto `summary.json`, so the matched name is a prefix, not the exact
+    final filename."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -779,35 +707,6 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
             json.dumps({"family": family}), encoding="utf-8"
         )
     monkeypatch.chdir(tmp_path)
-
-    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
-        incident_id = new_opaque_id()
-        scope = IncidentScope.model_validate(
-            {**incident_scope().model_dump(), "incident_id": incident_id}
-        )
-        packet = alert_packet().model_copy(update={"incident_id": incident_id})
-        evidence = tuple(
-            record.model_copy(update={"incident_id": incident_id})
-            for record in packet_evidence()
-        )
-        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
-        paths = run_paths(root, incident_id)
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
-        (paths.root / "evaluator").mkdir(exist_ok=True)
-        (paths.root / "evaluator" / "expected.json").write_text(
-            json.dumps(
-                {
-                    "seed": seed,
-                    "family": family,
-                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
-                    "disposition": "DIAGNOSED",
-                    "predicates": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return incident_id
 
     def fake_reset_scenario(root: Path, incident_id: str) -> None:
         pass
@@ -828,7 +727,7 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
         ledger_conn = sqlite3.connect(":memory:")
         return model, registry, "fake-claude-model", ledger_conn
 
-    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
         "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
@@ -840,7 +739,7 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     original_write_text = Path.write_text
 
     def failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
-        if self.name == "summary.json":
+        if self.name.startswith("summary.json"):
             raise OSError("simulated summary write failure")
         return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -865,6 +764,86 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
         if line.strip()
     ]
     assert len(on_disk) == 8
+
+
+class _TinyPayload(BaseModel):
+    """A minimal stand-in for `PairedEvaluationSummary` -- these tests are
+    about `_write_json_atomic`'s own file-write mechanics, not about
+    evaluation scoring, so a one-field model keeps that focus."""
+
+    value: int
+
+
+def test_write_json_atomic_writes_the_complete_content(tmp_path: Path) -> None:
+    """Item 4 regression coverage for the ordinary path: the full, valid
+    JSON content lands at the target path, and nothing else is left behind
+    in the directory -- the sibling temp file is gone once the rename
+    completes."""
+    target = tmp_path / "summary.json"
+
+    _write_json_atomic(target, _TinyPayload(value=7))
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"value": 7}
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_write_json_atomic_leaves_no_corrupted_file_on_an_interrupted_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The P3 this fix exists for: a plain `path.write_text` truncates its
+    target before writing a byte of the new content, so a hard process kill
+    mid-write -- not a catchable `OSError`, so no `except` clause anywhere
+    ever runs to warn about it -- could leave `summary.json` itself as a
+    truncated, corrupted file with no exception ever having fired.
+    Simulated here by monkeypatching `Path.write_text` to write only HALF
+    its content and then raise, the same shape a hard kill mid-write leaves
+    behind, without needing to actually kill this test process to prove the
+    guarantee. `_write_json_atomic` writes to a sibling temp file first and
+    only renames it onto the real target afterward, so an interruption here
+    must leave no file at all at the target path -- never a truncated one
+    -- and the temp file itself must be cleaned up, not left behind."""
+    target = tmp_path / "summary.json"
+    original_write_text = Path.write_text
+
+    def interrupted_write_text(
+        self: Path, content: str, *args: object, **kwargs: object
+    ) -> int:
+        original_write_text(self, content[: len(content) // 2], *args, **kwargs)
+        raise OSError("simulated interrupted write")
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write_text)
+
+    with pytest.raises(OSError, match="simulated interrupted write"):
+        _write_json_atomic(target, _TinyPayload(value=7))
+
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_json_atomic_preserves_prior_content_on_an_interrupted_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This project's one real call site (`main`'s `summary.json` write)
+    never has prior content to protect, but `_write_json_atomic` is written
+    as a general atomic-replace helper -- the same contract `run_records.
+    write_jsonl` already guarantees for `records.jsonl`, which IS rewritten
+    repeatedly onto the same path across a batch. This proves that broader
+    contract directly: an interrupted write must leave the ORIGINAL file
+    exactly as it was, never a partial mix of old and new content."""
+    target = tmp_path / "summary.json"
+    target.write_text('{"value": 1}', encoding="utf-8")
+
+    def interrupted_write_text(
+        self: Path, content: str, *args: object, **kwargs: object
+    ) -> int:
+        raise OSError("simulated interrupted write")
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write_text)
+
+    with pytest.raises(OSError, match="simulated interrupted write"):
+        _write_json_atomic(target, _TinyPayload(value=2))
+
+    assert target.read_text(encoding="utf-8") == '{"value": 1}'
 
 
 def _paired_record(
@@ -1083,12 +1062,12 @@ def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> N
 def test_main_reports_the_ceiling_reason_code_not_internal_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Round 6 review, Item 1: `live_setup.live_evaluation_ceiling_usd`
-    raises `CheckpointStoreError(CEILING_BELOW_RESERVATION_BUFFER, ...)` for
-    a too-small `LIVE_EVALUATION_MAX_USD` -- `.env.example` documents that
-    exact `FAIL CEILING_BELOW_RESERVATION_BUFFER` output. Before this fix,
-    `main()`'s typed refusal handler only caught `(LabError, RunRecordError)`,
-    so `CheckpointStoreError` fell through to the generic `except Exception`
+    """`live_setup.live_evaluation_ceiling_usd` raises `CheckpointStoreError(
+    CEILING_BELOW_RESERVATION_BUFFER, ...)` for a too-small
+    `LIVE_EVALUATION_MAX_USD` -- `.env.example` documents that exact `FAIL
+    CEILING_BELOW_RESERVATION_BUFFER` output. Before this fix, `main()`'s
+    typed refusal handler only caught `(LabError, RunRecordError)`, so
+    `CheckpointStoreError` fell through to the generic `except Exception`
     and reported the opaque `FAIL INTERNAL_ERROR` instead, contradicting
     that documented contract. `_git_provenance` is faked, the same seam
     every other `main()` test in this file uses, so this fails at the

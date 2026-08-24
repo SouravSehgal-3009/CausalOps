@@ -31,6 +31,7 @@ import sys
 from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -409,11 +410,12 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
     formatter; this follows its "one line per fact, plain labels" shape
     rather than inventing a second style.
 
-    Renders one group's (or the combined total's) figures only --
-    `render_paired_evaluation_summary` below calls this once per
-    `(arm, retrieval_mode)` group plus once for the combined total, rather
-    than this function knowing anything about arms or retrieval modes
-    itself."""
+    Renders one group's figures only -- `render_paired_evaluation_summary`
+    below calls this once per `(arm, retrieval_mode)` group; the trailing
+    batch-wide total it appends afterward is a plain record count, not a
+    second call into this function (see that function's own docstring for
+    why). This function itself knows nothing about arms or retrieval
+    modes."""
     total = summary.total_records
     lines = [
         f"evaluation summary: {total} record(s)",
@@ -607,6 +609,29 @@ def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
     return "\n\n".join(blocks)
 
 
+def _write_json_atomic(path: Path, payload: BaseModel) -> None:
+    """Writes `payload` to `path` in one atomic replace, never a
+    truncate-then-write in place -- the same pattern `run_records.
+    write_jsonl` already uses for `records.jsonl`, applied here to the
+    single-object `summary.json`. A plain `path.write_text` truncates its
+    target before writing a byte of the new content, so a hard process
+    kill mid-write -- not a catchable `OSError`, so no `except` clause below
+    ever runs to warn about it -- could leave `path` as a truncated,
+    corrupted file on disk. Building the complete content in a sibling
+    temporary file first, then atomically renaming it onto `path`
+    (`Path.replace`, atomic on POSIX), means a crash before the rename
+    leaves no file at all where none existed before, never a corrupted one.
+    """
+    content = payload.model_dump_json(indent=2)
+    tmp_path = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     build_parser().parse_args(argv)
     start = Path.cwd()
@@ -669,14 +694,18 @@ def main(argv: list[str] | None = None) -> int:
     print(render_paired_evaluation_summary(summary))
     summary_path = target / "summary.json"
     try:
-        # A single write after the batch has already finished and every
-        # record is already durable in `records.jsonl` -- unlike `write_
-        # jsonl`'s repeated writes to the same path across the whole batch,
-        # there is no earlier state here a crash mid-write could destroy, so
-        # this does not need `write_jsonl`'s atomic-replace treatment.
-        summary_path.write_text(
-            json.dumps(summary.model_dump(mode="json"), indent=2), encoding="utf-8"
-        )
+        # A crash mid-write here cannot destroy any EARLIER content -- this
+        # is the first and only write to `summary_path` -- but it can still
+        # leave `summary.json` itself half-written on disk: a hard process
+        # kill during `write_text` is not a catchable `OSError`, so nothing
+        # below would run to clean it up, and a reader would see a truncated
+        # file with no exception ever having fired to warn them. `_write_
+        # json_atomic` (below) closes that gap the same way `write_jsonl`
+        # already does for `records.jsonl`: build the complete content in a
+        # sibling temp file, then atomically rename it onto the real path,
+        # so a crash before the rename leaves no file at all where none
+        # existed before, never a corrupted one.
+        _write_json_atomic(summary_path, summary)
     except OSError as error:
         # Item 5: the same "no raw traceback reaches the owner" posture
         # `_new_evaluation_target`'s own `OSError` guard already keeps,

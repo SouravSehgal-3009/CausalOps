@@ -2153,13 +2153,16 @@ plus this fix, one at a time, reverted before the next):
 
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
-**Status:** not started. Adds curated FTS5 runbooks, retrieval provenance,
-and injection/no-ground-truth-leakage tests — deferred here from Milestone 2
-by `TECHNICAL_SPEC.md` §12's *Amendment, Milestone 2*. Runs the fixed paired
-evaluation under the USD 5 cap (Unit 3b-3, raised from USD 2), saves raw
-records and limitations, produces architecture and threat-model documents,
-verifies the clean source commit, and records a short diagnosis plus
-abstention/escalation demo.
+**Status:** Units 3a (curated FTS5 runbook retrieval) and 3b-1 through 3b-4
+(the live Claude adapter, its single-turn tool-calling protocol, and the
+cost-ledger reservation/idempotency guarantees underneath it) are complete
+and on `master`. Unit 3c — the fixed paired evaluation under the USD 5 cap
+(Unit 3b-3, raised from USD 2), below — is implemented and under review on
+branch `paired-live-evaluation`, not yet merged; Milestone 3 is complete once
+that branch lands. Deferred here from Milestone 2 by `TECHNICAL_SPEC.md`
+§12's *Amendment, Milestone 2*. Remaining scope: saving raw records and
+limitations, architecture and threat-model documents, verifying the clean
+source commit, and a short diagnosis plus abstention/escalation demo.
 
 ### Open gaps recorded during Unit 3b-1's review — for Unit 3b-2
 
@@ -3282,6 +3285,43 @@ schema that nothing else in this unit needs. `_run_one` (`evaluate_cli.py`) pass
 boundary, and this keeps scored-run graph checkpoints out of the shared `checkpoints.db`
 entirely -- the cost ledger is a separate connection to that same file, unrelated to the graph
 checkpointer.
+
+**Live-evaluation cost ceiling validation.** `live_setup.live_evaluation_ceiling_usd` resolves
+`LIVE_EVALUATION_MAX_USD` for both `causalops investigate --model claude` and `causalops-evaluate`
+-- one ceiling, read through the same shared module. Only an ABSENT or BLANK value falls back to
+the documented `$5.00` default; every other malformed or unusable shape fails loudly instead of
+silently accepting it. Three distinct failure shapes, each a specific `CheckpointStoreError`
+reason code rather than one generic refusal: unparseable text or a non-finite value (`inf`,
+`-inf`, `nan`) raises `CEILING_MALFORMED`; a well-formed, finite, positive number that is still
+too small to ever authorize even the cheapest real reservation raises
+`CEILING_BELOW_RESERVATION_BUFFER`; anything else -- including a well-formed number that is
+simply the wrong magnitude (`500` typed for `5.00`) -- is honoured as configured, since guarding
+against a fat-fingered value is the owner's job, not a parser's.
+
+The design choice worth stating explicitly: silently falling back to the `$5.00` default on a
+malformed or too-small value was judged MORE dangerous than refusing outright, not safer. A
+malformed value like `"0.05USD"` or a non-positive `"0"` reads as the owner asking for a small,
+cautious ceiling; silently substituting `$5.00` instead authorizes far more spend than that input
+suggested was wanted -- the same more-permissive-than-typed surprise this module already refuses
+to allow for the too-small case. Only unset/blank is exempt, because there both "the value the
+owner typed" and "the value the owner is implicitly asking for" are the same thing -- nothing was
+typed, so there is no wrong signal to silently override.
+
+`CEILING_BELOW_RESERVATION_BUFFER`'s own threshold, `MINIMUM_USABLE_CEILING_USD`, went through a
+correction during this unit's review. `cost_ledger.record_reservation_before_request` always
+subtracts the fixed `$0.10` `RESERVATION_CEILING_BUFFER_USD` margin from a configured ceiling
+before checking remaining budget, so the buffer alone is not the true floor -- a ceiling just
+above it can still leave less headroom than the cheapest real request could ever cost. An earlier
+version of this floor computed that cheapest-request figure assuming zero input tokens
+(`reservation_usd(input_tokens=0)`, $0.016), which is not a request any real call can send: every
+live call's own tool schema is itself billed input, so the true floor is the token cost of the
+SMALLEST tool schema any real call ever sends -- `respond()`'s final-assessment-only schema, 2,292
+tokens, $0.020584 at this project's pricing. `MINIMUM_USABLE_CEILING_USD` is therefore
+$0.10 + $0.020584 = $0.120584, computed fresh from that live schema at import time rather than
+hand-typed, so it cannot silently drift if the schema's size ever changes again. A ceiling at or
+below $0.120584 -- including the earlier, now-corrected $0.116 boundary -- is refused outright at
+config-resolution time rather than accepted and then silently unable to authorize a single
+reservation.
 
 **Verified before freezing**: 579 pre-existing tests plus this unit's additions all pass; `ruff
 check`/`ruff format --check` and `mypy --strict` are clean on every touched file; the confinement

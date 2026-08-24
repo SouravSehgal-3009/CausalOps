@@ -10,6 +10,7 @@ neutral ground both import from -- it imports neither `causalops.cli` nor
 `causalops.evaluate_cli`, and is not itself a command entry point.
 """
 
+import json
 import math
 import os
 import sqlite3
@@ -25,13 +26,13 @@ from causalops.cost_ledger import (
 from causalops.doctor import API_KEY_VARIABLE
 from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_model import LiveClaudeModel
+from causalops.live_model import LiveClaudeModel, _final_assessment_tool_definition
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
     ToolCallingModel,
 )
-from causalops.pricing import CLAUDE_SONNET_5_PRICING
+from causalops.pricing import CLAUDE_SONNET_5_PRICING, estimate_input_tokens
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
@@ -57,28 +58,24 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # whitespace, gets the documented default rather than a startup failure.
 # Unit 3b-3: that default was raised from 2.00 to 5.00, re-derived from the
 # smoke call's measured per-call reservation size after the ratio replan;
-# the calibration record is in `TECHNICAL_OVERVIEW.md`. `TECHNICAL_SPEC.md`
-# §10 carries the same amendment. Unit 3c: extracted here from `cli.py`,
-# still the one ceiling both `causalops` and `causalops-evaluate` read.
+# the calibration record is in `TECHNICAL_OVERVIEW.md`. Unit 3c: extracted
+# here from `cli.py`, still the one ceiling both `causalops` and
+# `causalops-evaluate` read.
 #
-# Round 6 review (Codex, three findings) corrected an earlier posture that
-# had this fallback cover a much wider set of shapes: unparseable text,
-# non-finite values (`inf`/`-inf`/`nan`), and non-positive values (`<= 0`)
-# used to default silently too, alongside unset/blank -- on the reasoning
-# that each was "the smallest plausible ceiling," so defaulting on them
-# could only make the gate stricter, never more permissive. That reasoning
-# does not actually hold: `DEFAULT_LIVE_EVALUATION_MAX_USD` ($5.00) is far
-# LARGER than $0, so silently defaulting a `0`, a negative number, or a
-# typo like `"0.05USD"` actually authorizes far MORE spend than the owner's
-# malformed input suggested they wanted -- exactly the more-permissive,
-# more-dangerous surprise this module's own reasoning about the too-small
-# case (immediately below) already correctly refuses to allow. This module
-# now applies that same "fail loudly rather than silently authorize more"
-# posture consistently: every one of those shapes raises `CheckpointStoreError`
-# now, the same as the too-small case always did. Only unset/blank still
-# defaults, because there both the "value the owner typed" and "value the
-# owner is implicitly asking for" are the same thing -- nothing was typed,
-# so there is no wrong signal to silently override.
+# Every malformed or unusable shape -- unparseable text, a non-finite value
+# (`inf`/`-inf`/`nan`), a non-positive value, or a well-formed value too
+# small to ever authorize a reservation -- raises `CheckpointStoreError`
+# rather than silently falling back to the default. Silently defaulting on
+# any of those would actually be MORE dangerous, not safer: `DEFAULT_
+# LIVE_EVALUATION_MAX_USD` ($5.00) is far larger than a malformed `0`, a
+# negative number, or a typo like `"0.05USD"` -- so silently defaulting
+# would authorize far more spend than the owner's malformed input
+# suggested they wanted. Only unset/blank still defaults, because there
+# both "the value the owner typed" and "the value the owner is implicitly
+# asking for" are the same thing -- nothing was typed, so there is no wrong
+# signal to silently override. Full design rationale, including why this
+# was worth a dedicated review pass, is in `TECHNICAL_OVERVIEW.md`'s
+# "Live-evaluation cost ceiling validation" section.
 #
 # A well-formed, finite, positive value can still be unusable: `cost_ledger.
 # record_reservation_before_request` always subtracts `cost_ledger.
@@ -86,27 +83,36 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # remaining budget, so any value at or below that buffer leaves `remaining`
 # permanently negative and refuses every single reservation. But the buffer
 # alone is not the true floor either: the cheapest real reservation this
-# project's pricing could ever produce is not $0 -- it is the fixed output
-# allowance alone, with zero input tokens, `pricing.CLAUDE_SONNET_5_PRICING.
-# reservation_usd(input_tokens=0)`, currently $0.016 (`pricing.
-# MAX_OUTPUT_TOKENS` tokens at the output rate; no real request could ever
-# reserve less, since every request reserves at least its full output
-# allowance regardless of how little input it sends). A ceiling of $0.11 --
-# above the $0.10 buffer, so an earlier version of this check accepted it --
-# still leaves only $0.01 of headroom once the buffer is subtracted, less
-# than the $0.016 floor, so even the cheapest possible request would still
-# be refused. `MINIMUM_USABLE_CEILING_USD` below is the buffer plus that
-# floor; a configured value at or below it can never authorize even one
-# reservation and is refused the same way the too-small case always was.
+# project's pricing could ever produce is not $0 -- no real call ever sends
+# zero input tokens, because every call's own tool schema is itself billed
+# input. `respond()`'s final-assessment-only schema
+# (`live_model._final_assessment_tool_definition`) is the smallest tool
+# payload any real call ever sends, so its token count -- not zero -- is
+# the genuine floor, computed fresh below rather than hand-typed so it
+# cannot silently drift the way an earlier, hand-typed zero-input floor
+# did. `MINIMUM_USABLE_CEILING_USD` below is the buffer plus that floor; a
+# configured value at or below it can never authorize even one reservation
+# and is refused the same way the too-small case always was.
 DEFAULT_LIVE_EVALUATION_MAX_USD = 5.00
 LIVE_EVALUATION_MAX_USD_VARIABLE = "LIVE_EVALUATION_MAX_USD"
 
-# The cheapest real reservation `pricing.py`'s math could ever produce:
-# every request reserves its full output allowance up front regardless of
-# how little input it sends, so `input_tokens=0` is the genuine theoretical
-# floor, not an approximation of one.
+# `respond()`'s own tool schema, serialized and estimated the identical way
+# `live_model._send` prices every real call's tool payload -- see that
+# function's own comment for why the schema's token cost is counted at all.
+# This is the smallest tool payload any real call ever sends (`propose()`'s
+# five-domain-tool-plus-stop-tool schema is always larger), so it is the
+# genuine floor, not an approximation of one. Deriving it from the live
+# schema, rather than hand-typing a figure, is what closes the P2 this
+# constant exists for: an earlier version hand-typed `input_tokens=0`,
+# which is not a real request any call could ever send, so a ceiling that
+# floor accepted could still refuse to authorize the cheapest genuine
+# request. Re-verify by reading `test_live_setup.py`'s own pinned assertion
+# on this figure if the tool schema's size ever changes.
+MINIMUM_REAL_RESERVATION_TOOL_SCHEMA_TOKENS = estimate_input_tokens(
+    json.dumps([_final_assessment_tool_definition()])
+)
 MINIMUM_POSSIBLE_RESERVATION_USD = CLAUDE_SONNET_5_PRICING.reservation_usd(
-    input_tokens=0
+    input_tokens=MINIMUM_REAL_RESERVATION_TOOL_SCHEMA_TOKENS
 )
 MINIMUM_USABLE_CEILING_USD = (
     RESERVATION_CEILING_BUFFER_USD + MINIMUM_POSSIBLE_RESERVATION_USD
@@ -167,17 +173,22 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
             ".env.example).",
         )
     if value <= MINIMUM_USABLE_CEILING_USD:
+        # `.6f`, not `.4f`, on the two derived-floor figures below: the real
+        # minimum reservation is $0.020584 (2,292 tool-schema tokens at the
+        # input rate), which needs six decimal places to render exactly --
+        # `.4f` would round it to $0.0206 and print a floor the owner could
+        # not reproduce by reading this message.
         raise CheckpointStoreError(
             CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER,
             f"{LIVE_EVALUATION_MAX_USD_VARIABLE}={value:.4f} is at or below "
-            f"${MINIMUM_USABLE_CEILING_USD:.4f} -- the "
+            f"${MINIMUM_USABLE_CEILING_USD:.6f} -- the "
             f"${RESERVATION_CEILING_BUFFER_USD:.2f} reservation safety "
             f"buffer every live request is checked against, plus "
-            f"${MINIMUM_POSSIBLE_RESERVATION_USD:.4f}, the cheapest real "
+            f"${MINIMUM_POSSIBLE_RESERVATION_USD:.6f}, the cheapest real "
             "reservation this project's pricing could ever produce -- so no "
             "reservation, however small, could ever be authorized at this "
             f"ceiling. Set {LIVE_EVALUATION_MAX_USD_VARIABLE} comfortably "
-            f"above ${MINIMUM_USABLE_CEILING_USD:.4f} (see .env.example).",
+            f"above ${MINIMUM_USABLE_CEILING_USD:.6f} (see .env.example).",
         )
     return value
 
