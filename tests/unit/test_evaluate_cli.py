@@ -36,11 +36,15 @@ from causalops.domain import (
     Budgets,
     Disposition,
     IncidentScope,
+    RetrievalMode,
     RootCauseCode,
     StoredIncident,
+    Versions,
 )
 from causalops.evaluate_cli import (
     EVALUATION_FAMILIES,
+    MODE_NO_TOOL_BASELINE,
+    MODE_TOOL_ENABLED,
     _fixture_sha256,
     _git_provenance,
     _load_expected_outcome,
@@ -49,11 +53,17 @@ from causalops.evaluate_cli import (
     build_parser,
     main,
     render_evaluation_summary,
+    render_paired_evaluation_summary,
     run_evaluation,
+    summarize_paired_evaluation,
 )
 from causalops.evaluation import (
+    ControlCounts,
+    Efficiency,
     EvaluationRecord,
     EvaluationSummary,
+    ExpectedOutcome,
+    MechanicalScores,
     summarize_evaluation,
 )
 from causalops.evidence import new_opaque_id
@@ -466,24 +476,128 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
     assert "simulated reset_scenario cleanup failure" in out
 
 
+def test_a_cleanup_failure_after_a_successful_run_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: the round-2 fix for the test above queried `sys.exc_info()`
+    from INSIDE the nested `except Exception as reset_error:` handler --
+    which always describes `reset_error` itself, never an outer exception,
+    since `sys.exc_info()` reports whatever the *nearest enclosing* `except`
+    is currently handling at the point it is called, and at that point the
+    nearest enclosing handler IS this one. So the round-2 code's `if sys.
+    exc_info()[0] is None: raise` was always `False` -- the `raise` was dead
+    code, and the cleanup failure was printed and silently swallowed
+    UNCONDITIONALLY, even when the scored run underneath succeeded cleanly.
+    This is the opposite of the intended behaviour and is the real bug this
+    fix corrects: a `reset_scenario` failure after a successful run must
+    raise, not be swallowed, since swallowing it lets `main()` return 0
+    while an active-scenario marker is left stranded. Run against the
+    ROUND-2 code (before this fix), this test fails: `run_evaluation`
+    returns its records normally instead of raising, because every family's
+    reset failure gets caught, printed, and discarded."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in EVALUATION_FAMILIES:
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text(
+            json.dumps({"family": family}), encoding="utf-8"
+        )
+
+    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
+        incident_id = new_opaque_id()
+        scope = IncidentScope.model_validate(
+            {**incident_scope().model_dump(), "incident_id": incident_id}
+        )
+        packet = alert_packet().model_copy(update={"incident_id": incident_id})
+        evidence = tuple(
+            record.model_copy(update={"incident_id": incident_id})
+            for record in packet_evidence()
+        )
+        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+        paths = run_paths(root, incident_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+        (paths.root / "evaluator").mkdir(exist_ok=True)
+        (paths.root / "evaluator" / "expected.json").write_text(
+            json.dumps(
+                {
+                    "seed": seed,
+                    "family": family,
+                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                    "disposition": "DIAGNOSED",
+                    "predicates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return incident_id
+
+    def fake_reset_scenario(root: Path, incident_id: str) -> None:
+        raise RuntimeError("simulated reset_scenario failure after a clean run")
+
+    def fake_build_model_and_registry(
+        incident: StoredIncident,
+        paths: object,
+        budgets: Budgets,
+        model_choice: str,
+        db_path: Path,
+    ) -> tuple[object, object, str, object]:
+        model = ReplayToolCallingModel(
+            ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
+        )
+        registry = registry_with(
+            run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+        )
+        ledger_conn = sqlite3.connect(":memory:")
+        return model, registry, "fake-claude-model", ledger_conn
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
+    monkeypatch.setattr(
+        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+    )
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    target = _new_evaluation_target(tmp_path)
+
+    with pytest.raises(
+        RuntimeError, match="simulated reset_scenario failure after a clean run"
+    ):
+        run_evaluation(tmp_path, target)
+
+
 def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
     """The P2 this fix exists for: `main()` used to print one line per
     record and never a batch-level aggregate at all. `TECHNICAL_SPEC.md`
     §10 forbids p95 or any other broad performance claim from a small
     synthetic sample -- this asserts the rendered text carries the counts
     and ranges an `EvaluationSummary` holds, including the honest "how many
-    runs' cost is actually known" annotation from Item 2, and never mentions
-    a percentile."""
+    runs' cost is actually known" annotation from Item 2, Item 3's citation
+    and policy/control aggregates, and never mentions a percentile."""
     summary = EvaluationSummary(
         total_records=2,
         diagnosis_correct_count=1,
         disposition_correct_count=2,
+        citations_valid_count=2,
+        citations_sufficient_count=1,
         latency_ms_min=100,
         latency_ms_max=900,
         model_calls_min=1,
         model_calls_max=4,
         tools_executed_min=0,
         tools_executed_max=2,
+        denied_min=0,
+        denied_max=1,
+        duplicate_min=0,
+        duplicate_max=0,
+        out_of_scope_min=0,
+        out_of_scope_max=1,
+        invalid_responses_min=0,
+        invalid_responses_max=0,
+        unsettled_min=0,
+        unsettled_max=0,
         input_tokens_min=500,
         input_tokens_max=4000,
         input_tokens_known_count=2,
@@ -502,9 +616,16 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     assert "evaluation summary: 2 record(s)" in rendered
     assert "diagnosis_correct:   1/2" in rendered
     assert "disposition_correct: 2/2" in rendered
+    assert "citations_valid:     2/2" in rendered
+    assert "citations_sufficient:1/2" in rendered
     assert "latency_ms:      100-900" in rendered
     assert "model_calls:     1-4" in rendered
     assert "tools_executed:  0-2" in rendered
+    assert "control.denied:            0-1" in rendered
+    assert "control.duplicate:         0-0" in rendered
+    assert "control.out_of_scope:      0-1" in rendered
+    assert "control.invalid_responses: 0-0" in rendered
+    assert "control.unsettled:         0-0" in rendered
     assert "input_tokens:    500-4000 (2/2 known)" in rendered
     assert "output_tokens:   100-800 (2/2 known)" in rendered
     assert "reserved_usd:    0.0100-0.0500" in rendered
@@ -596,6 +717,14 @@ def test_main_writes_a_summary_alongside_records(
 
     assert exit_code == 0
     out = capsys.readouterr().out
+    # Item 2: `main()` now prints one block per arm plus a combined block --
+    # four families each contribute one baseline and one tool-enabled run,
+    # so each arm's own block reports 4 records and the combined block
+    # reports all 8, never one blended "8 record(s)" alone.
+    assert f"[{MODE_NO_TOOL_BASELINE}]" in out
+    assert f"[{MODE_TOOL_ENABLED}]" in out
+    assert "[combined, both arms]" in out
+    assert "evaluation summary: 4 record(s)" in out
     assert "evaluation summary: 8 record(s)" in out
     assert "summary:" in out
     summary_path = (
@@ -603,7 +732,216 @@ def test_main_writes_a_summary_alongside_records(
     )
     assert str(summary_path) in out
     saved = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert saved["total_records"] == 8
+    # Item 2: `summary.json` is now `PairedEvaluationSummary`'s nested
+    # shape -- `baseline`/`tool_enabled` sections readable separately from
+    # `combined`, not one flat, blended `EvaluationSummary`.
+    assert saved["baseline"]["total_records"] == 4
+    assert saved["tool_enabled"]["total_records"] == 4
+    assert saved["combined"]["total_records"] == 8
+
+
+def test_main_reports_a_clean_failure_when_the_summary_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Item 5: `summary_path.write_text(...)` used to run outside every
+    `try/except` in `main()` -- a write failure there (disk full, permission
+    error) escaped as a raw traceback instead of the clean `FAIL ...`
+    message every other refusal path in this script already gives, even
+    though `records.jsonl` was already durably written by this point. Only
+    `summary.json`'s own write is made to fail here (matched by filename,
+    not by patching `Path.write_text` unconditionally), so `write_jsonl`'s
+    own earlier writes -- which is how `records.jsonl` gets to disk in the
+    first place -- are unaffected."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    for family in EVALUATION_FAMILIES:
+        scenarios = tmp_path / "lab" / "scenarios"
+        scenarios.mkdir(parents=True, exist_ok=True)
+        (scenarios / f"{family}.json").write_text(
+            json.dumps({"family": family}), encoding="utf-8"
+        )
+    monkeypatch.chdir(tmp_path)
+
+    def fake_start_scenario(root: Path, family: str, seed: str) -> str:
+        incident_id = new_opaque_id()
+        scope = IncidentScope.model_validate(
+            {**incident_scope().model_dump(), "incident_id": incident_id}
+        )
+        packet = alert_packet().model_copy(update={"incident_id": incident_id})
+        evidence = tuple(
+            record.model_copy(update={"incident_id": incident_id})
+            for record in packet_evidence()
+        )
+        incident = StoredIncident(scope=scope, packet=packet, evidence=evidence)
+        paths = run_paths(root, incident_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.incident_file.write_text(incident.model_dump_json(), encoding="utf-8")
+        (paths.root / "evaluator").mkdir(exist_ok=True)
+        (paths.root / "evaluator" / "expected.json").write_text(
+            json.dumps(
+                {
+                    "seed": seed,
+                    "family": family,
+                    "root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION",
+                    "disposition": "DIAGNOSED",
+                    "predicates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return incident_id
+
+    def fake_reset_scenario(root: Path, incident_id: str) -> None:
+        pass
+
+    def fake_build_model_and_registry(
+        incident: StoredIncident,
+        paths: object,
+        budgets: Budgets,
+        model_choice: str,
+        db_path: Path,
+    ) -> tuple[object, object, str, object]:
+        model = ReplayToolCallingModel(
+            ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
+        )
+        registry = registry_with(
+            run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+        )
+        ledger_conn = sqlite3.connect(":memory:")
+        return model, registry, "fake-claude-model", ledger_conn
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
+    monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
+    monkeypatch.setattr(
+        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+    )
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+
+    original_write_text = Path.write_text
+
+    def failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "summary.json":
+            raise OSError("simulated summary write failure")
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    exit_code = main([])
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "FAIL SUMMARY_WRITE_FAILED" in out
+    assert "simulated summary write failure" in out
+    records_path = (
+        next((tmp_path / "results" / "evaluations").iterdir()) / "records.jsonl"
+    )
+    assert "records (unaffected):" in out
+    assert str(records_path) in out
+    # `records.jsonl` itself is untouched by the summary write failure --
+    # all 8 real, already-billed results are still readable back.
+    on_disk = [
+        EvaluationRecord.model_validate_json(line)
+        for line in records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(on_disk) == 8
+
+
+def _paired_record(*, run_key: str, diagnosis_correct: bool) -> EvaluationRecord:
+    """A minimal `EvaluationRecord` for `summarize_paired_evaluation`/
+    `render_paired_evaluation_summary` tests -- only `run_key` (which arm
+    encodes the mode as its final `/`-segment) and `diagnosis_correct` vary
+    across the records these tests build; everything else is fixed,
+    plausible filler."""
+    return EvaluationRecord(
+        run_key=run_key,
+        investigation_id="inv-1",
+        incident_id=run_key.split("/", 1)[0],
+        expected=ExpectedOutcome(
+            root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
+            disposition=Disposition.DIAGNOSED,
+        ),
+        scores=MechanicalScores(
+            diagnosis_correct=diagnosis_correct,
+            disposition_correct=True,
+            citations_valid=True,
+            citations_sufficient=True,
+            control=ControlCounts(),
+            efficiency=Efficiency(latency_ms=100, model_calls=1, tools_executed=0),
+        ),
+        git_sha="f" * 40,
+        git_dirty=False,
+        versions=Versions(
+            prompt_version="1", policy_version="1", tool_registry_version="1"
+        ),
+        retrieval_mode=RetrievalMode.DISABLED,
+        fixture_sha256="a" * 64,
+        model_name="fake-claude-model",
+        pricing_source="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_verified_on="2026-08-24",
+        configured_ceiling_usd=5.0,
+        reserved_usd=0.01,
+        actual_usd=0.008,
+    )
+
+
+def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
+    """Item 2: `evaluate_cli.py`'s `main()` used to call
+    `summarize_evaluation(records)` once on the full flat 8-record list --
+    a batch that scores `6/8 diagnosis_correct` gives no way to tell that
+    apart from `2/4 baseline + 4/4 tool-enabled` versus the reverse split.
+    Builds a batch where the baseline arm gets 1/2 correct and the
+    tool-enabled arm gets 2/2 correct and proves both the structured summary
+    and its rendered text keep the two arms visibly distinct, not blended
+    into one number."""
+    records = [
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}", diagnosis_correct=True
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/{MODE_NO_TOOL_BASELINE}",
+            diagnosis_correct=False,
+        ),
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_TOOL_ENABLED}", diagnosis_correct=True
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/{MODE_TOOL_ENABLED}", diagnosis_correct=True
+        ),
+    ]
+
+    summary = summarize_paired_evaluation(records)
+
+    assert summary.baseline.total_records == 2
+    assert summary.baseline.diagnosis_correct_count == 1
+    assert summary.tool_enabled.total_records == 2
+    assert summary.tool_enabled.diagnosis_correct_count == 2
+    # The combined total is still reported too -- Item 2 adds the per-arm
+    # split, it does not remove the batch-wide figure a reader may also want.
+    assert summary.combined.total_records == 4
+    assert summary.combined.diagnosis_correct_count == 3
+
+    rendered = render_paired_evaluation_summary(summary)
+
+    assert f"[{MODE_NO_TOOL_BASELINE}]" in rendered
+    assert f"[{MODE_TOOL_ENABLED}]" in rendered
+    assert "[combined, both arms]" in rendered
+    assert "diagnosis_correct:   1/2" in rendered
+    assert "diagnosis_correct:   2/2" in rendered
+    assert "diagnosis_correct:   3/4" in rendered
+
+
+def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> None:
+    """A `run_key` whose final segment is neither known mode word is a
+    data-shape bug upstream, not a value `summarize_paired_evaluation`
+    should silently drop from one arm's scored total."""
+    record = _paired_record(
+        run_key="incident-a/model/mystery_mode", diagnosis_correct=True
+    )
+
+    with pytest.raises(ValueError, match="cannot partition this batch by arm"):
+        summarize_paired_evaluation([record])
 
 
 def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(

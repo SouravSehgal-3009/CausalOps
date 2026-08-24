@@ -732,6 +732,8 @@ causalops lab down
 causalops scenario start <family> --seed <development|evaluation>
 causalops scenario reset <incident-id>
 causalops investigate <incident-id> --model replay
+causalops investigate <incident-id> --model claude
+causalops-evaluate
 ```
 
 - `doctor` checks the operating system, at least 7.5 GiB detected total RAM,
@@ -747,11 +749,25 @@ causalops investigate <incident-id> --model replay
 - `investigate` accepts only an opaque incident ID, creates an opaque
   investigation ID, and finalizes JSONL evidence, receipts, a run record, and
   a Markdown report under `results/investigations/<investigation-id>`.
+  `--model` is required with no default (`replay` or `claude`) -- `claude`
+  sends a live, billed request through `live_model.py`, reserved and settled
+  against the same `cost_ledger.py`/`LIVE_EVALUATION_MAX_USD` gate described
+  above; there is no `--max-cost-usd` flag, since the ceiling is
+  application-wide, not per-run (see "Superseded v1 evaluation design" below
+  for why that per-run flag was dropped rather than built).
 - `scenario reset` verifies healthy state and cross-run isolation. It deletes
   only active lab/transient state for that incident and never finalized
   records, reports, receipts, or cited evidence under `results/`.
+- `causalops-evaluate` (`evaluate_cli.py`, Unit 3c) is a genuinely separate
+  console script, not a `causalops` subcommand -- `causalops.cli` never
+  imports it and vice versa (`tests/security/test_evaluate_cli_isolation.py`).
+  It takes no arguments: every invocation runs the full frozen four-pair
+  held-out corpus (`EVALUATION_FAMILIES`) against the live model, one
+  no-tool-baseline and one tool-enabled run per family, and writes
+  `results/evaluations/<opaque-id>/records.jsonl` and `summary.json`.
 
-Specified, not yet built:
+Nothing is currently specified in `TECHNICAL_SPEC.md` but still unbuilt in
+this CLI contract. The v1-era design below is superseded, not pending:
 
 ```powershell
 causalops investigate <incident-id> --model claude --max-cost-usd 0.15
@@ -759,10 +775,13 @@ causalops benchmark --model claude --variant evaluation --repetitions 3 --max-co
 causalops conformance
 ```
 
-None of these three commands is registered in `cli.py`'s parser. The
-`benchmark` signature above is the original v1 design; it is superseded by
-`TECHNICAL_SPEC.md` §10's paired evaluation (at most six held-out incidents,
-USD 5.00 cap, Unit 3b-3) — see Part III, "Superseded v1 evaluation design,"
+None of these three commands is registered in any parser, and none of them
+will be built as shown: `causalops investigate --model claude` (no
+`--max-cost-usd`) and `causalops-evaluate` (no arguments, no `benchmark`/
+`conformance` name or flags) are what actually landed, under
+`TECHNICAL_SPEC.md` §10's single USD 5.00 application-wide ceiling covering
+standalone and paired runs together, not the separate per-run/per-benchmark
+caps this v1 sketch shows. See Part III, "Superseded v1 evaluation design,"
 for what changed and why the numbers differ.
 
 Business outcomes `DIAGNOSED` and `INSUFFICIENT_EVIDENCE` are successful CLI

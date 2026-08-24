@@ -401,11 +401,21 @@ Evaluate three distinct purposes:
 The live comparison is a predefined paired set of at most six held-out
 incidents: one no-tool baseline and one tool-enabled run per incident. It must
 not invoke the escalation path; HITL is demonstrated and tested separately.
-`LIVE_EVALUATION_MAX_USD=5.00` is an application-wide hard ceiling. Before each
-provider request, persist a conservative reservation using the pricing snapshot
-and the request's bounded input/output allowance. Do not send a request that
-would exceed the remaining ceiling. Provider-reported usage settles the
-reservation; ambiguous requests retain it and are never repeated.
+`LIVE_EVALUATION_MAX_USD=5.00` is an application-wide ceiling on *authorizing
+new spend*, not a guarantee on the real-world dollar total. Before each
+provider request, persist a conservative reservation using the pricing
+snapshot and the request's bounded input/output allowance, counting
+reserved-or-settled spend (whichever is greater per row) against the ceiling
+so a past overrun cannot silently discount later decisions. Do not send a
+request that would exceed the remaining ceiling. Provider-reported usage
+settles the reservation; ambiguous requests retain it and are never repeated.
+This bounds the system's authorization behavior, not the bill: because the
+real cost of a request is only known after it settles, a single request whose
+actual bill exceeds its own conservative reservation can push cumulative
+spend transiently above the configured figure, by at most that one request's
+worst-case estimation error, until the next reservation check reflects it.
+There is no request-time fix for this -- a request cannot be refused for a
+cost that does not exist yet at the moment it is authorized.
 
 *Amendment, Unit 3b-3:* the original figure was `LIVE_EVALUATION_MAX_USD=
 2.00`. The owner's first live call (`TECHNICAL_OVERVIEW.md`'s "The smoke

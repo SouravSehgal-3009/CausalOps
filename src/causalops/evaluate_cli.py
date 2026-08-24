@@ -32,6 +32,8 @@ from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict
+
 from causalops.cost_ledger import run_cost_totals
 from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import Budgets, InvestigationResult, StoredIncident, utc_now
@@ -74,6 +76,16 @@ EVALUATION_FAMILIES: tuple[str, ...] = (
     "downstream_timeout_retry_amplification",
     "resource_pool_saturation",
 )
+
+# The two arms of the paired comparison, `TECHNICAL_SPEC.md` §10's "same
+# model and same answer-neutral initial alert compare a no-tool baseline
+# against the tool-enabled LangGraph workflow." `_run_one` writes one of
+# these two words as `run_key`'s final `/`-separated segment
+# (`f"{incident_id}/{model_name}/{mode}"`); `_arm_of` below is the one place
+# that reads it back out, so a change to either constant only has to update
+# both ends of that same encoding.
+MODE_NO_TOOL_BASELINE = "no_tool_baseline"
+MODE_TOOL_ENABLED = "tool_enabled"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -242,7 +254,7 @@ def _run_one(
         # reservation records `actual_usd=None` here rather than a number
         # that looks complete but is not.
         incomplete_settlement = not fully_settled
-        mode = "no_tool_baseline" if no_tool_baseline else "tool_enabled"
+        mode = MODE_NO_TOOL_BASELINE if no_tool_baseline else MODE_TOOL_ENABLED
         return EvaluationRecord(
             run_key=f"{incident.scope.incident_id}/{model_name}/{mode}",
             investigation_id=result.report.investigation_id,
@@ -326,23 +338,33 @@ def run_evaluation(root: Path, target: Path) -> list[EvaluationRecord]:
             # itself also raises, Python's ordinary exception chaining would
             # otherwise replace the original exception with this cleanup
             # failure, burying the actual reason a billed run failed behind
-            # an unrelated lab-reset problem. `sys.exc_info()[0]` inside a
-            # `finally` reports the exception currently unwinding through
-            # it, if any -- when one is present, the cleanup failure is
-            # printed (visible, not silently discarded) and suppressed
-            # rather than raised, so the original exception keeps
-            # propagating unchanged. When nothing is unwinding (the run
-            # itself succeeded), a `reset_scenario` failure still raises
-            # normally, unchanged from before this fix.
+            # an unrelated lab-reset problem.
+            #
+            # `already_failing` is read HERE, at the top of `finally` and
+            # BEFORE the nested `try` below -- not from inside the nested
+            # `except Exception as reset_error:` handler further down. That
+            # distinction is the actual fix: `sys.exc_info()` reports the
+            # exception the *nearest enclosing* `except` block is currently
+            # handling, at the point it is called. Called from inside
+            # `except Exception as reset_error:`, the nearest enclosing
+            # handler is that very `except` -- `sys.exc_info()` there always
+            # describes `reset_error` itself, never an outer exception from
+            # this function's own `try` block, so a check placed there could
+            # never see past its own just-caught exception. Called here,
+            # before the nested `try` exists, the nearest enclosing handler
+            # is whatever `finally` is unwinding for -- correctly the outer
+            # `try` body's own exception, or `None` if that body succeeded.
+            already_failing = sys.exc_info()[0] is not None
             try:
                 reset_scenario(root, incident_id)
             except Exception as reset_error:
-                if sys.exc_info()[0] is None:
+                if already_failing:
+                    print(
+                        f"FAIL RESET_SCENARIO_FAILED_DURING_CLEANUP {family}/"
+                        f"{incident_id}: {reset_error}"
+                    )
+                else:
                     raise
-                print(
-                    f"FAIL RESET_SCENARIO_FAILED_DURING_CLEANUP {family}/"
-                    f"{incident_id}: {reset_error}"
-                )
     return records
 
 
@@ -378,18 +400,35 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
     per `TECHNICAL_SPEC.md` §10 (see `EvaluationSummary`'s own docstring).
     `causalops doctor`'s `render_report` is this project's other CLI-summary
     formatter; this follows its "one line per fact, plain labels" shape
-    rather than inventing a second style."""
+    rather than inventing a second style.
+
+    Renders one arm's (or the combined total's) figures only --
+    `render_paired_evaluation_summary` below calls this once per arm plus
+    once for the combined total, rather than this function knowing anything
+    about arms itself."""
     total = summary.total_records
     lines = [
         f"evaluation summary: {total} record(s)",
         f"  diagnosis_correct:   {summary.diagnosis_correct_count}/{total}",
         f"  disposition_correct: {summary.disposition_correct_count}/{total}",
+        f"  citations_valid:     {summary.citations_valid_count}/{total}",
+        f"  citations_sufficient:{summary.citations_sufficient_count}/{total}",
         "  latency_ms:      "
         f"{_range_str(summary.latency_ms_min, summary.latency_ms_max)}",
         "  model_calls:     "
         f"{_range_str(summary.model_calls_min, summary.model_calls_max)}",
         "  tools_executed:  "
         f"{_range_str(summary.tools_executed_min, summary.tools_executed_max)}",
+        "  control.denied:            "
+        f"{_range_str(summary.denied_min, summary.denied_max)}",
+        "  control.duplicate:         "
+        f"{_range_str(summary.duplicate_min, summary.duplicate_max)}",
+        "  control.out_of_scope:      "
+        f"{_range_str(summary.out_of_scope_min, summary.out_of_scope_max)}",
+        "  control.invalid_responses: "
+        f"{_range_str(summary.invalid_responses_min, summary.invalid_responses_max)}",
+        "  control.unsettled:         "
+        f"{_range_str(summary.unsettled_min, summary.unsettled_max)}",
         "  input_tokens:    "
         f"{_range_str(summary.input_tokens_min, summary.input_tokens_max)} "
         f"({summary.input_tokens_known_count}/{total} known)",
@@ -403,6 +442,81 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
         f"({summary.actual_usd_known_count}/{total} known)",
     ]
     return "\n".join(lines)
+
+
+def _arm_of(record: EvaluationRecord) -> str:
+    """The mode `_run_one` encoded as `run_key`'s final `/`-segment -- see
+    `MODE_NO_TOOL_BASELINE`/`MODE_TOOL_ENABLED`'s own comment for why this is
+    the one place that decodes it back out."""
+    return record.run_key.rsplit("/", 1)[-1]
+
+
+class PairedEvaluationSummary(BaseModel):
+    """Item 2: the flat, blended `summarize_evaluation(records)` total this
+    fix replaces at the top level. `TECHNICAL_SPEC.md` §10's whole reason for
+    a *paired* comparison is to see the no-tool baseline against the
+    tool-enabled workflow -- a single combined figure like "6/8 diagnosis_
+    correct" cannot tell a reader whether that is 2/4 baseline + 4/4 tool-
+    enabled or the reverse, which is exactly the comparison the evaluation
+    exists to show. `baseline` and `tool_enabled` are computed from the
+    records partitioned by `_arm_of`; `combined` is the same blended total
+    the previous version reported, kept alongside the split rather than
+    dropped, since a reader may still want the batch-wide figure too.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    baseline: EvaluationSummary
+    tool_enabled: EvaluationSummary
+    combined: EvaluationSummary
+
+
+def summarize_paired_evaluation(
+    records: Sequence[EvaluationRecord],
+) -> PairedEvaluationSummary:
+    """Partitions `records` by arm via `_arm_of`, then calls the existing
+    arm-agnostic `summarize_evaluation` three times (baseline, tool-enabled,
+    combined) rather than teaching it anything about arms itself --
+    `summarize_evaluation` predates Unit 3c's paired design and stays usable
+    on any flat list of records, here or elsewhere.
+
+    A record whose `run_key` carries neither known mode is a data-shape bug
+    upstream (a `run_key` no `_run_one` call in this script's history could
+    have produced), not a value to silently drop from a scored figure --
+    raising here surfaces that immediately rather than quietly under-
+    counting one arm.
+    """
+    baseline = [
+        record for record in records if _arm_of(record) == MODE_NO_TOOL_BASELINE
+    ]
+    tool_enabled = [
+        record for record in records if _arm_of(record) == MODE_TOOL_ENABLED
+    ]
+    unrecognized = len(records) - len(baseline) - len(tool_enabled)
+    if unrecognized != 0:
+        raise ValueError(
+            f"{unrecognized} record(s) carry a run_key whose final segment is "
+            f"neither {MODE_NO_TOOL_BASELINE!r} nor {MODE_TOOL_ENABLED!r} -- "
+            "cannot partition this batch by arm"
+        )
+    return PairedEvaluationSummary(
+        baseline=summarize_evaluation(baseline),
+        tool_enabled=summarize_evaluation(tool_enabled),
+        combined=summarize_evaluation(records),
+    )
+
+
+def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
+    """One block per arm, then the blended combined total -- the reader can
+    see the no-tool baseline and the tool-enabled workflow side by side,
+    instead of Item 2's one blended number that could not distinguish "2/4
+    baseline + 4/4 tool-enabled" from the reverse."""
+    blocks = [
+        f"[{MODE_NO_TOOL_BASELINE}]\n{render_evaluation_summary(paired.baseline)}",
+        f"[{MODE_TOOL_ENABLED}]\n{render_evaluation_summary(paired.tool_enabled)}",
+        f"[combined, both arms]\n{render_evaluation_summary(paired.combined)}",
+    ]
+    return "\n\n".join(blocks)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -448,17 +562,33 @@ def main(argv: list[str] | None = None) -> int:
             f"disposition_correct={record.scores.disposition_correct} "
             f"reserved_usd={record.reserved_usd:.4f} actual_usd={record.actual_usd}"
         )
-    summary = summarize_evaluation(records)
-    print(render_evaluation_summary(summary))
+    # Item 2: partitioned by arm, not one blended total -- see
+    # `PairedEvaluationSummary`'s own docstring for why a single combined
+    # figure cannot show the paired comparison this evaluation exists for.
+    summary = summarize_paired_evaluation(records)
+    print(render_paired_evaluation_summary(summary))
     summary_path = target / "summary.json"
-    # A single write after the batch has already finished and every record
-    # is already durable in `records.jsonl` -- unlike `write_jsonl`'s
-    # repeated writes to the same path across the whole batch, there is no
-    # earlier state here a crash mid-write could destroy, so this does not
-    # need `write_jsonl`'s atomic-replace treatment.
-    summary_path.write_text(
-        json.dumps(summary.model_dump(mode="json"), indent=2), encoding="utf-8"
-    )
+    try:
+        # A single write after the batch has already finished and every
+        # record is already durable in `records.jsonl` -- unlike `write_
+        # jsonl`'s repeated writes to the same path across the whole batch,
+        # there is no earlier state here a crash mid-write could destroy, so
+        # this does not need `write_jsonl`'s atomic-replace treatment.
+        summary_path.write_text(
+            json.dumps(summary.model_dump(mode="json"), indent=2), encoding="utf-8"
+        )
+    except OSError as error:
+        # Item 5: the same "no raw traceback reaches the owner" posture
+        # `_new_evaluation_target`'s own `OSError` guard already keeps,
+        # applied to this later write site (disk full, permission error)
+        # instead of leaving it to escape uncaught. Every real, billed
+        # result is already safe in `records_path` by this point -- eight
+        # calls' worth of work is not lost just because the summary itself
+        # could not be written, so this reports that explicitly rather than
+        # letting the owner wonder.
+        print(f"FAIL SUMMARY_WRITE_FAILED {error}")
+        print(f"records (unaffected): {records_path}")
+        return 1
     print(f"summary: {summary_path}")
     print(f"records: {records_path}")
     return 0

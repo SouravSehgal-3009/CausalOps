@@ -577,12 +577,20 @@ def _summary_record(
     output_tokens: int | None,
     reserved_usd: float,
     actual_usd: float | None,
+    citations_valid: bool = True,
+    citations_sufficient: bool = True,
+    control: ControlCounts | None = None,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_evaluation` tests --
     `summarize_evaluation` only ever reads `scores.diagnosis_correct`,
-    `scores.disposition_correct`, `scores.efficiency`, `reserved_usd`, and
-    `actual_usd`, so this builds `MechanicalScores`/`Efficiency` directly
-    rather than driving a full report through `score_run`."""
+    `scores.disposition_correct`, `scores.citations_valid`,
+    `scores.citations_sufficient`, `scores.control`, `scores.efficiency`,
+    `reserved_usd`, and `actual_usd`, so this builds
+    `MechanicalScores`/`Efficiency` directly rather than driving a full
+    report through `score_run`. `citations_valid`/`citations_sufficient`/
+    `control` default to the same "nothing wrong" values every test before
+    Item 3 already assumed, so only the tests that actually vary them need
+    to pass something else."""
     kwargs = reproducibility_manifest_kwargs()
     kwargs["actual_usd"] = actual_usd
     kwargs["reserved_usd"] = reserved_usd
@@ -594,9 +602,9 @@ def _summary_record(
         scores=MechanicalScores(
             diagnosis_correct=diagnosis_correct,
             disposition_correct=disposition_correct,
-            citations_valid=True,
-            citations_sufficient=True,
-            control=ControlCounts(),
+            citations_valid=citations_valid,
+            citations_sufficient=citations_sufficient,
+            control=control if control is not None else ControlCounts(),
             efficiency=Efficiency(
                 latency_ms=latency_ms,
                 model_calls=model_calls,
@@ -676,6 +684,72 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
         (0.008, 0.041)
     )
     assert summary.actual_usd_known_count == 2
+    # Every record above used the `_summary_record` defaults --
+    # `citations_valid=True`, `citations_sufficient=True`, `control=
+    # ControlCounts()` (all-zero) -- so the Item 3 aggregates should show
+    # a full 3/3 citation count and an all-zero control range, not just be
+    # present and unchecked.
+    assert summary.citations_valid_count == 3
+    assert summary.citations_sufficient_count == 3
+    assert (summary.denied_min, summary.denied_max) == (0, 0)
+    assert (summary.duplicate_min, summary.duplicate_max) == (0, 0)
+    assert (summary.out_of_scope_min, summary.out_of_scope_max) == (0, 0)
+    assert (summary.invalid_responses_min, summary.invalid_responses_max) == (0, 0)
+    assert (summary.unsettled_min, summary.unsettled_max) == (0, 0)
+
+
+def test_summarize_evaluation_reports_citation_and_control_aggregates() -> None:
+    """Item 3: `TECHNICAL_SPEC.md` §10 requires "citation validity and
+    citation sufficiency against required-evidence predicates" and
+    "policy/control behavior" as mechanical scores alongside
+    diagnosis/disposition -- `EvaluationSummary` had neither before this
+    fix. Two records with deliberately different, non-default citation and
+    control values prove the aggregates are computed from the records, not
+    just structurally present."""
+    records = [
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=500,
+            output_tokens=100,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_valid=True,
+            citations_sufficient=False,
+            control=ControlCounts(
+                denied=1, duplicate=1, out_of_scope=0, invalid_responses=2, unsettled=0
+            ),
+        ),
+        _summary_record(
+            diagnosis_correct=False,
+            disposition_correct=True,
+            latency_ms=900,
+            model_calls=4,
+            tools_executed=2,
+            input_tokens=4000,
+            output_tokens=800,
+            reserved_usd=0.05,
+            actual_usd=0.041,
+            citations_valid=False,
+            citations_sufficient=True,
+            control=ControlCounts(
+                denied=3, duplicate=0, out_of_scope=1, invalid_responses=0, unsettled=1
+            ),
+        ),
+    ]
+
+    summary = summarize_evaluation(records)
+
+    assert summary.citations_valid_count == 1
+    assert summary.citations_sufficient_count == 1
+    assert (summary.denied_min, summary.denied_max) == (1, 3)
+    assert (summary.duplicate_min, summary.duplicate_max) == (0, 1)
+    assert (summary.out_of_scope_min, summary.out_of_scope_max) == (0, 1)
+    assert (summary.invalid_responses_min, summary.invalid_responses_max) == (0, 2)
+    assert (summary.unsettled_min, summary.unsettled_max) == (0, 1)
 
 
 def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
@@ -684,6 +758,10 @@ def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
     assert summary.total_records == 0
     assert summary.diagnosis_correct_count == 0
     assert summary.disposition_correct_count == 0
+    assert summary.citations_valid_count == 0
+    assert summary.citations_sufficient_count == 0
     assert summary.latency_ms_min is None
     assert summary.latency_ms_max is None
+    assert summary.denied_min is None
+    assert summary.denied_max is None
     assert summary.actual_usd_known_count == 0

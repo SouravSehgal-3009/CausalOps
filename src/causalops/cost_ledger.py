@@ -31,6 +31,20 @@ signal "refuse, do not repair, do not retry" up through `graph.py`'s
 `ask_once` -- a `None` return there is already the graph's own vocabulary
 for "invalid output, retry with a repair," which is the one thing a cost
 refusal must never be mistaken for.
+
+**What `LIVE_EVALUATION_MAX_USD` actually bounds.** This module refuses to
+*authorize a new reservation* once known spend would exceed the ceiling
+(`record_reservation_before_request` below) -- it is not a guarantee that the
+real dollar total never exceeds the configured figure. The real cost of a
+request is only known after it settles (`settle_reservation`), so a single
+request whose actual bill comes in above its own conservative reservation can
+push cumulative spend transiently past the ceiling, by at most that one
+request's worst-case estimation error, before the next reservation check
+observes it. `_reserved_and_settled_total`'s own docstring below explains why
+a settled row is counted at its true cost from that point forward -- the
+overrun cannot silently repeat -- but nothing can retroactively un-authorize
+the request that already caused it, since refusing a request needs to happen
+before its real cost exists to check against.
 """
 
 import sqlite3

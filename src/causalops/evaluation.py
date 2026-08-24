@@ -370,6 +370,16 @@ class EvaluationSummary(BaseModel):
     total_records: int
     diagnosis_correct_count: int
     disposition_correct_count: int
+    # `TECHNICAL_SPEC.md` §10 lists "citation validity and citation
+    # sufficiency against required-evidence predicates" as its own required
+    # mechanical score, alongside diagnosis/disposition -- these were
+    # missing entirely before this fix. Counted the same way as
+    # `diagnosis_correct_count`/`disposition_correct_count` above: each is a
+    # per-record boolean (`MechanicalScores.citations_valid`/
+    # `citations_sufficient`), so a batch total is the same kind of number,
+    # not a min/max range.
+    citations_valid_count: int
+    citations_sufficient_count: int
 
     latency_ms_min: int | None = None
     latency_ms_max: int | None = None
@@ -377,6 +387,24 @@ class EvaluationSummary(BaseModel):
     model_calls_max: int | None = None
     tools_executed_min: int | None = None
     tools_executed_max: int | None = None
+
+    # `TECHNICAL_SPEC.md` §10's other missing required score: "policy/control
+    # behavior." Each `ControlCounts` field (`evaluation.py`'s own
+    # `count_control`) is already a per-record integer, the same shape as
+    # `tools_executed` above -- a min/max range across the batch, not a
+    # single summed total, follows this file's existing "counts and ranges
+    # only" discipline for that kind of per-run scalar rather than
+    # introducing a third aggregation style.
+    denied_min: int | None = None
+    denied_max: int | None = None
+    duplicate_min: int | None = None
+    duplicate_max: int | None = None
+    out_of_scope_min: int | None = None
+    out_of_scope_max: int | None = None
+    invalid_responses_min: int | None = None
+    invalid_responses_max: int | None = None
+    unsettled_min: int | None = None
+    unsettled_max: int | None = None
 
     input_tokens_min: int | None = None
     input_tokens_max: int | None = None
@@ -431,6 +459,21 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
     tools_min, tools_max = _min_max(
         [record.scores.efficiency.tools_executed for record in records]
     )
+    denied_min, denied_max = _min_max(
+        [record.scores.control.denied for record in records]
+    )
+    duplicate_min, duplicate_max = _min_max(
+        [record.scores.control.duplicate for record in records]
+    )
+    out_of_scope_min, out_of_scope_max = _min_max(
+        [record.scores.control.out_of_scope for record in records]
+    )
+    invalid_responses_min, invalid_responses_max = _min_max(
+        [record.scores.control.invalid_responses for record in records]
+    )
+    unsettled_min, unsettled_max = _min_max(
+        [record.scores.control.unsettled for record in records]
+    )
     input_tokens_min, input_tokens_max = _min_max(input_tokens_known)
     output_tokens_min, output_tokens_max = _min_max(output_tokens_known)
     reserved_min, reserved_max = _min_max([record.reserved_usd for record in records])
@@ -443,12 +486,28 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
         disposition_correct_count=sum(
             1 for record in records if record.scores.disposition_correct
         ),
+        citations_valid_count=sum(
+            1 for record in records if record.scores.citations_valid
+        ),
+        citations_sufficient_count=sum(
+            1 for record in records if record.scores.citations_sufficient
+        ),
         latency_ms_min=latency_min,
         latency_ms_max=latency_max,
         model_calls_min=calls_min,
         model_calls_max=calls_max,
         tools_executed_min=tools_min,
         tools_executed_max=tools_max,
+        denied_min=denied_min,
+        denied_max=denied_max,
+        duplicate_min=duplicate_min,
+        duplicate_max=duplicate_max,
+        out_of_scope_min=out_of_scope_min,
+        out_of_scope_max=out_of_scope_max,
+        invalid_responses_min=invalid_responses_min,
+        invalid_responses_max=invalid_responses_max,
+        unsettled_min=unsettled_min,
+        unsettled_max=unsettled_max,
         input_tokens_min=input_tokens_min,
         input_tokens_max=input_tokens_max,
         input_tokens_known_count=len(input_tokens_known),
