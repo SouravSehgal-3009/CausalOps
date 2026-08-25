@@ -311,21 +311,35 @@ def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one
 
 def test_the_aligned_window_keeps_window_end_as_an_evaluated_point() -> None:
     """Lab-defect-fix Unit 2, W2. Asserts on the EMITTED request parameters
-    only -- `(end - start) % step == 0` and `start >= window_start` --
+    only -- `(end - start) % step == 0` and `start > window_start` --
     never inferred Prometheus rounding/millisecond semantics (round-3
     correction, `LAB_DEFECTS_FIX_PLAN.md` §11.5: a sound inference is not a
-    documented guarantee). The second assertion is what would catch a
-    naive `ceil`-based version that escapes the authorized window by
-    pushing `start` before `window_start`. `end == window_end` by
-    construction is what makes `window_end` itself an evaluated grid
-    point: `query_range` evaluates `start, start+step, ..., end`, and
-    `(end - start) % step == 0` guarantees `end` lands exactly on that
-    grid, never between two points."""
-    start, end, step = aligned_metric_window(WINDOW_START, WINDOW_END)
+    documented guarantee).
+
+    Post-freeze review (three independent reviewers, same finding): a
+    `WINDOW_START`/`WINDOW_END` span is exactly `120 * METRIC_STEP_SECONDS`
+    -- an exact multiple of the step -- so floor division (the correct
+    fix) and ceiling division (the exact bug this design explicitly warns
+    against: it pushes `start` *before* `window_start`, widening the
+    authorized scope past what policy granted) produce IDENTICAL results
+    on that fixture. Confirmed by mutation: reverting `aligned_metric_
+    window` to `ceil`-based rounding, this test still passed -- it could
+    not actually distinguish the fix from the bug it exists to catch.
+    `non_round_start`, offset 7 seconds from an exact multiple of the
+    step, makes floor and ceil diverge: floor division lands `start` a few
+    seconds *after* `non_round_start` (this test's own `start >
+    non_round_start`, now strict), while ceiling division would land it a
+    few seconds *before* -- exactly the scope-widening bug. `end ==
+    window_end` by construction is what makes `window_end` itself an
+    evaluated grid point: `query_range` evaluates `start, start+step, ...,
+    end`, and `(end - start) % step == 0` guarantees `end` lands exactly
+    on that grid, never between two points."""
+    non_round_start = WINDOW_START + timedelta(seconds=7)
+    start, end, step = aligned_metric_window(non_round_start, WINDOW_END)
 
     assert step == timedelta(seconds=METRIC_STEP_SECONDS)
     assert (end - start) % step == timedelta(0)
-    assert start >= WINDOW_START
+    assert start > non_round_start
     assert end == WINDOW_END
 
 
@@ -554,6 +568,12 @@ def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
     assert outcome.payload["max_value"] == 0.0
     assert outcome.payload["readings_discarded"] == 3
     assert "3 unreadable, discarded" in outcome.summary
+    # Lab-defect-fix Unit 2, post-freeze review (three independent
+    # reviewers, same finding): a direct `payload["status"]` assertion,
+    # not just the summary-text behavior above -- all 3 raw rows came back
+    # but none survived `read_sample`, `ALL_READINGS_DISCARDED`.
+    assert outcome.payload["status"] == "ALL_READINGS_DISCARDED"
+    assert "every returned reading was unreadable" in outcome.summary
 
     empty_body = json.dumps(
         {"status": "success", "data": {"result": [{"values": []}]}}
@@ -565,6 +585,11 @@ def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
     assert genuinely_empty.payload["max_value"] == 0.0
     assert genuinely_empty.payload["readings_discarded"] == 0
     assert "unreadable, discarded" not in genuinely_empty.summary
+    # A series came back but yielded no raw rows at all -- `NO_USABLE_
+    # SAMPLES`, distinct in `payload["status"]` from `ALL_READINGS_
+    # DISCARDED` above, not just in prose.
+    assert genuinely_empty.payload["status"] == "NO_USABLE_SAMPLES"
+    assert "a series returned but had no usable samples" in genuinely_empty.summary
     # The two summaries must differ -- this is the actual claim: a reader
     # (or the model) can no longer confuse "confirmed zero" with "every
     # reading was unreadable" from the summary text alone.
@@ -608,6 +633,38 @@ def test_multiple_series_reports_status_without_suppressing_real_data() -> None:
     assert "series 1 of 2" in outcome.summary
 
 
+def test_multiple_series_wins_even_when_series_zero_is_itself_unusable() -> None:
+    """Lab-defect-fix Unit 2, W7/W14, post-freeze review P2 (three
+    independent reviewers, same finding). `raw_count`/`all_samples` are
+    both computed from `series[0]` alone, so a response can have
+    `series_count > 1` AND an empty, unusable `series[0]` at the same
+    time. If the empty-series checks (`NO_USABLE_SAMPLES`/
+    `ALL_READINGS_DISCARDED`) ran before the `series_count` check, this
+    exact response would silently render as `NO_USABLE_SAMPLES` --
+    correct about `series[0]` alone, but hiding the multi-series anomaly
+    entirely. `run_metric_check`'s own comment states why the order is
+    load-bearing; this is the regression test for it."""
+    body = json.dumps(
+        {
+            "status": "success",
+            "data": {
+                "result": [
+                    {"values": []},
+                    {"values": [[0, "5.0"]]},
+                ],
+            },
+        }
+    ).encode("utf-8")
+    with _serve_fixed_prometheus_body(body) as url:
+        outcome = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert outcome.payload["status"] == "MULTIPLE_SERIES"
+    assert outcome.payload["status"] != "NO_USABLE_SAMPLES"
+    assert outcome.payload["sample_count"] == 0
+    assert "multiple series returned" in outcome.summary
+    assert "series 1 of 2" in outcome.summary
+
+
 def test_no_returned_series_is_distinguishable_from_no_usable_samples() -> None:
     """Lab-defect-fix Unit 2, W7. `NO_RETURNED_SERIES` (empty `result`
     list) and `NO_USABLE_SAMPLES` (a series returned but yielded nothing)
@@ -622,6 +679,25 @@ def test_no_returned_series_is_distinguishable_from_no_usable_samples() -> None:
 
     assert outcome.payload["status"] == "NO_RETURNED_SERIES"
     assert "no series returned for this query" in outcome.summary
+
+
+def test_the_ordinary_case_reports_sampled(small_fake_prometheus: str) -> None:
+    """Lab-defect-fix Unit 2, post-freeze review (three independent
+    reviewers, same finding): `SAMPLED` -- the ordinary, successful case,
+    exercised by nearly every other test in this file -- had no test
+    asserting `payload["status"]` directly. `small_fake_prometheus`
+    returns a genuinely un-truncated, real response (`prometheus_body
+    (sample_count=3)`), so this is the plain happy path, not an edge
+    case."""
+    outcome = run_metric_check(
+        metric_arguments(), incident_scope(), small_fake_prometheus, 5
+    )
+
+    assert outcome.payload["status"] == "SAMPLED"
+    assert outcome.payload["sample_count"] == 3
+    # None of the non-SAMPLED status notes leak into an ordinary summary.
+    assert "status:" not in outcome.summary
+    assert "multiple series" not in outcome.summary
 
 
 def test_a_log_query_returns_only_matching_rows_in_the_window(tmp_path: Path) -> None:
@@ -923,18 +999,40 @@ def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(
     here it would wrongly drop the newer, real one. `run_changes_check`
     sorts matched changes by their parsed `at` (ascending) before
     `trim_to_bytes` pops from the front, so trimming always drops the
-    truly oldest change regardless of declaration order."""
+    truly oldest change regardless of declaration order.
+
+    Post-freeze review (three independent reviewers, same finding): both
+    timestamps used to come from `.isoformat()` on datetimes sharing the
+    same `tzinfo=UTC`, so both strings rendered with an identical `+00:00`
+    offset -- a raw lexicographic string sort and the correct parsed-
+    `datetime` sort agree on that shape, so this test could not actually
+    tell them apart. Confirmed by mutation: reverting `_change_moment` to
+    return the raw string instead of `datetime.fromisoformat(moment)`, all
+    6 changes-related tests still passed. `newer_at` below is the SAME
+    absolute instant as `WINDOW_START + timedelta(minutes=5)`, re-rendered
+    in a `-05:00` offset instead of `+00:00` -- its string now starts
+    `"...T05:05..."`, which sorts lexicographically BEFORE `older_at`'s
+    `"...T10:00..."`, the opposite of true chronological order. A raw
+    string sort would therefore keep `older_at` (wrong); the real,
+    datetime-based sort keeps `newer_at` (correct) -- exactly the
+    divergence needed to catch a regression back to string comparison."""
     paths = RunPaths(root=tmp_path)
+    newer_at = "2026-08-16T05:05:00-05:00"
+    assert datetime.fromisoformat(newer_at) == WINDOW_START + timedelta(minutes=5)
+    older_at = WINDOW_START.isoformat()
+    assert newer_at < older_at, (
+        "the fixture must string-sort backwards to prove anything"
+    )
     paths.changes_file.write_text(
         json.dumps(
             [
                 {
-                    "at": (WINDOW_START + timedelta(minutes=5)).isoformat(),
+                    "at": newer_at,
                     "service": "orders",
                     "summary": "newer: " + "n" * 4000,
                 },
                 {
-                    "at": WINDOW_START.isoformat(),
+                    "at": older_at,
                     "service": "orders",
                     "summary": "older: " + "o" * 4000,
                 },

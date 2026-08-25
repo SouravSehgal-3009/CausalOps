@@ -323,6 +323,18 @@ def run_metric_check(
     # never become a reason to withhold them -- a reader who cannot tell
     # `MULTIPLE_SERIES` apart from "no usable data" would be worse off than
     # before this status existed.
+    #
+    # Post-freeze review, P2 (three independent reviewers, same finding):
+    # `MULTIPLE_SERIES` must be checked BEFORE `NO_USABLE_SAMPLES`/
+    # `ALL_READINGS_DISCARDED`, not just for style -- `raw_count`/`all_
+    # samples` are both computed from `series[0]` alone, so a response can
+    # have `series_count > 1` AND an empty/unusable `series[0]` at the same
+    # time. If the empty-series checks ran first, that exact response would
+    # silently render as `NO_USABLE_SAMPLES` -- correctly describing
+    # `series[0]`, but hiding the multi-series anomaly this status exists
+    # to surface in the first place. Checking `series_count` first makes
+    # that case unreachable: `MULTIPLE_SERIES` always wins the label,
+    # whatever `series[0]` itself contains.
     if fetched.series_count > 1:
         status = MetricSampleStatus.MULTIPLE_SERIES
     elif fetched.series_count == 0:
