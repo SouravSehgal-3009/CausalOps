@@ -2,6 +2,7 @@ import json
 import shutil
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,13 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             scenarios / f"{family}.json",
         )
     monkeypatch.setattr(scenario_control, "REQUEST_PAUSE_SECONDS", 0.0)
+    # Lab-defect-fix Unit 2, W3. Same reason as `REQUEST_PAUSE_SECONDS`
+    # above: every `start_scenario(...)` call in this file goes through
+    # this fixture and uses the default (real) `sleeper`, which reads this
+    # module-level constant fresh on every call -- zeroing it here keeps
+    # this whole file a real unit suite instead of adding 12 real seconds
+    # to every one of its `start_scenario` calls.
+    monkeypatch.setattr(scenario_control, "SCRAPE_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(
         scenario_control, "call_gateway", gateway_reading_config(tmp_path)
     )
@@ -206,6 +214,41 @@ def test_recorded_changes_fall_inside_the_recorded_window(project: Path) -> None
     for change in changes:
         assert incident.scope.started_at.isoformat() <= change["at"]
         assert change["at"] <= incident.scope.ended_at.isoformat()
+
+
+def test_start_scenario_settles_before_stamping_window_end(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lab-defect-fix Unit 2, W3. The `project` fixture zeroes
+    `SCRAPE_SETTLE_SECONDS` for every other test in this file (so the suite
+    does not spend 12 real seconds per scenario start); this test restores
+    the real constant and passes a recording `sleeper` explicitly instead,
+    asserting *that* the wait happened, *for how long*, and *where* --
+    strictly after the fault-traffic phase, strictly before `window_end` is
+    read from `clock` -- a stronger assertion than a real sleep would give,
+    and the reason `start_scenario` takes an injectable `sleeper` at all.
+
+    `clock` is called exactly twice by `start_scenario`: once for
+    `window_start` (before any traffic), once for `window_end` (after the
+    fault phase). Recording both `clock` and `sleeper` calls into one
+    shared, ordered list proves the settle wait lands strictly between
+    them, not merely that it happened somewhere."""
+    monkeypatch.setattr(scenario_control, "SCRAPE_SETTLE_SECONDS", 12)
+    events: list[str] = []
+    fixed_moment = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def recording_clock() -> datetime:
+        events.append("clock")
+        return fixed_moment
+
+    def recording_sleeper(seconds: float) -> None:
+        events.append(f"sleep:{seconds}")
+
+    start_scenario(
+        project, FAMILY, "development", recording_clock, sleeper=recording_sleeper
+    )
+
+    assert events == ["clock", "sleep:12", "clock"]
 
 
 def test_nothing_the_investigator_can_read_names_the_family(project: Path) -> None:

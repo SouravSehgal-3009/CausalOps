@@ -119,12 +119,25 @@ def trim_to_bytes(
     rows: list[JsonValue],
     count_key: str,
 ) -> dict[str, JsonValue]:
-    """Drop rows from the end until the whole result fits the byte bound.
+    """Drop rows from the front until the whole result fits the byte bound.
     `count_key` (`"row_count"`/`"change_count"`/`"edge_count"`/
     `"sample_count"`, one per caller) is kept equal to `len(kept)`
     throughout, not just set once from the pre-trim count and left stale --
     an owner reading the payload after trimming must see a count that
     actually matches what `payload[rows_key]` holds.
+
+    Lab-defect-fix Unit 2, W4. Pops from the front (`kept.pop(0)`), not the
+    end, so that whenever `rows` arrives in oldest-to-newest order --
+    already true for `prometheus.py`'s samples and `telemetry.py`'s log
+    rows, and true for `run_changes_check`'s changes once it sorts them
+    before calling here -- the *newest* rows survive. Every real
+    observation in this lab sits near the tail of the incident window
+    (the fault only manifests close to `window_end`), so dropping from the
+    end used to discard exactly the data-bearing region first. This is a
+    property of the SHARED function, so `run_topology_check`'s two calls
+    (`edges`, `services`) get it too -- harmless there, since a static
+    topology snapshot has no chronological order for "newest" to mean
+    anything about.
 
     Unit 3b-4 addendum, C3. Dropping rows alone cannot help when the
     payload's real weight is a SCALAR field assembled from those rows
@@ -164,7 +177,7 @@ def trim_to_bytes(
     payload[rows_key] = kept
     payload[count_key] = len(kept)
     while kept and not fits(payload):
-        kept.pop()
+        kept.pop(0)
         payload[rows_key] = kept
         payload[count_key] = len(kept)
         payload["truncated"] = True

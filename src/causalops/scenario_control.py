@@ -47,7 +47,31 @@ WINDOW_LEAD_IN = timedelta(minutes=5)
 REQUEST_TIMEOUT_SECONDS = 5
 # Traffic is paced so Prometheus records more than one scrape of it.
 REQUEST_PAUSE_SECONDS = 0.2
+# Lab-defect-fix Unit 2, W3. `lab/prometheus.yml`'s `scrape_interval: 5s` --
+# two full scrape intervals, plus margin, before `window_end` is stamped, so
+# at least one scrape has observed the post-fault state and a `rate()` query
+# has a real denominator (`rate()` needs two samples inside its lookback).
+# Without this wait, `window_end = clock()` could land before Prometheus
+# ever scraped the fault, making every metric query over the window
+# structurally unable to see it -- not a query bug, a timing one.
+SCRAPE_SETTLE_SECONDS = 12
 ALERT_SOURCE_VERSION = "alert-1"
+
+
+def _real_sleep(seconds: float) -> None:
+    """`start_scenario`'s default `sleeper`, kept as a named module-level
+    function rather than binding `time.sleep` directly as the default
+    value. A default value is evaluated once, at import time -- binding
+    `time.sleep` itself there would capture that one function object
+    permanently, immune to a test later monkeypatching `time.sleep` (the
+    same reason `clock`'s own default is a lambda, not a bound method).
+    This function's own body looks up `time.sleep` fresh on every call, the
+    same pattern `test_graph_frozen_reports.py` already relies on for
+    `evidence_module.time.monotonic` -- so a test can monkeypatch the
+    shared `time` module's `sleep` attribute directly, with no change
+    needed to any of this module's existing `start_scenario(...)` call
+    sites."""
+    time.sleep(seconds)
 
 
 class LabReasonCode(StrEnum):
@@ -408,6 +432,8 @@ def start_scenario(
     family: str,
     seed: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    *,
+    sleeper: Callable[[float], None] = _real_sleep,
 ) -> str:
     """Create one incident: healthy baseline, then the fault, then the packet."""
     definition = apply_seed_variant(load_definition(root, family), seed)
@@ -435,6 +461,9 @@ def start_scenario(
                 LabReasonCode.FAULT_NOT_OBSERVED,
                 f"{incident_id}: the fault produced no failing request",
             )
+        # Lab-defect-fix Unit 2, W3. Let telemetry settle before stamping
+        # `window_end` -- see `SCRAPE_SETTLE_SECONDS`'s own comment for why.
+        sleeper(SCRAPE_SETTLE_SECONDS)
         window_end = clock()
         write_manifests(paths, definition, window_end)
         incident = build_incident(

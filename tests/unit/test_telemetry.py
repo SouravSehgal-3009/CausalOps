@@ -1,9 +1,10 @@
 import json
 import threading
 import time
+import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,8 +32,11 @@ from causalops.domain import (
 from causalops.evidence import MAX_RESULT_BYTES
 from causalops.prometheus import (
     MAX_METRIC_SAMPLES,
+    METRIC_STEP_SECONDS,
     MetricSample,
     ParsedSamples,
+    aligned_metric_window,
+    fetch_metric_samples,
     parse_samples,
     read_sample,
     run_metric_check,
@@ -85,6 +89,13 @@ def stalled_prometheus() -> Iterator[str]:
     server.server_close()
 
 
+# Lab-defect-fix Unit 2, W4. Mirrors `prometheus_body()`'s own default
+# (`fake_incident.py`) by the same formula -- `fake_prometheus` always
+# calls `prometheus_body()` with no argument, so this is exactly how many
+# samples every test using that fixture actually receives.
+FAKE_PROMETHEUS_SAMPLE_COUNT = MAX_METRIC_SAMPLES + 5
+
+
 def metric_arguments(
     service: str = "gateway",
     template: MetricTemplate = MetricTemplate.GATEWAY_ERROR_RATE,
@@ -113,6 +124,14 @@ def test_a_metric_query_returns_bounded_samples(
     tmp_path: Path,
     fake_prometheus: RecordingPrometheus,
 ) -> None:
+    """Lab-defect-fix Unit 2, W4. `fake_prometheus` returns `prometheus_body()`'s
+    default `MAX_METRIC_SAMPLES + 5` samples with `value = index * 0.5`,
+    strictly increasing with index -- so the newest-kept slice (indices
+    `5..MAX_METRIC_SAMPLES+4`) peaks at its own last index, not at
+    `MAX_METRIC_SAMPLES - 1` the way the pre-W4 oldest-kept slice did.
+    Derived from `FAKE_PROMETHEUS_SAMPLE_COUNT`, not hand-typed, so a future
+    change to `prometheus_body`'s own default cannot silently desync this
+    literal again."""
     outcome = run_metric_check(
         metric_arguments(), incident_scope(), fake_prometheus.url, 5
     )
@@ -121,7 +140,7 @@ def test_a_metric_query_returns_bounded_samples(
     assert outcome.kind is EvidenceKind.METRIC
     assert outcome.payload["sample_count"] == MAX_METRIC_SAMPLES
     assert outcome.payload["truncated"] is True
-    assert outcome.payload["max_value"] == (MAX_METRIC_SAMPLES - 1) * 0.5
+    assert outcome.payload["max_value"] == (FAKE_PROMETHEUS_SAMPLE_COUNT - 1) * 0.5
     assert f"{MAX_METRIC_SAMPLES} samples" in outcome.summary
 
 
@@ -168,7 +187,11 @@ def test_a_metric_summary_names_truncation_when_samples_were_cut(
     )
 
     assert outcome.payload["truncated"] is True
-    assert outcome.summary.endswith("(truncated)")
+    # Lab-defect-fix Unit 2, W4: the note now names the kept direction, not
+    # just that trimming happened.
+    assert outcome.summary.endswith(
+        f"(kept the newest {MAX_METRIC_SAMPLES} of {FAKE_PROMETHEUS_SAMPLE_COUNT})"
+    )
 
 
 def test_a_metric_summary_names_no_truncation_when_nothing_was_cut(
@@ -240,13 +263,24 @@ def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one
     fires below the `MAX_METRIC_SAMPLES` count cap already applied
     earlier), fixed anyway per the owner's ruling to close the class, not
     just the reachable `event_codes` instance. Monkeypatching
-    `trim_to_bytes` to additionally pop the LAST sample (simulating what a
-    future, larger row shape would trigger) drops the highest-value
-    sample -- `test_a_metric_query_returns_bounded_samples` above already
-    establishes values increase with index, so the last sample is always
-    the peak -- forcing `payload["max_value"]` and the pre-trim peak to
+    `trim_to_bytes` to additionally pop the LAST sample drops the
+    highest-value sample -- `test_a_metric_query_returns_bounded_samples`
+    above already establishes values increase with index, so the last
+    sample in the kept (post-W4, newest-first-preserved) slice is always
+    its peak -- forcing `payload["max_value"]` and the pre-trim peak to
     genuinely differ, proving the field reads the samples the payload
-    itself reports, not a stale local variable."""
+    itself reports, not a stale local variable.
+
+    Lab-defect-fix Unit 2, W4 note: production's own `trim_to_bytes` now
+    pops from the FRONT, not the end (see its docstring) -- this
+    monkeypatch deliberately pops the opposite end anyway. That is still a
+    valid test of the property under test here (`max_value` is rebuilt
+    from whatever `payload["samples"]` actually holds after trimming, not
+    a stale pre-trim computation) -- that property holds regardless of
+    which end trimming removes from. It is no longer a simulation of a
+    real, larger-row-shape trigger of production's own byte-trim path,
+    which pops the front and would instead drop the LOWEST-value sample
+    from this fixture's strictly-increasing data."""
     import causalops.prometheus as prometheus_module
 
     real_trim_to_bytes = prometheus_module.trim_to_bytes
@@ -272,7 +306,85 @@ def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one
     )
 
     assert outcome.payload["sample_count"] == MAX_METRIC_SAMPLES - 1
-    assert outcome.payload["max_value"] == (MAX_METRIC_SAMPLES - 2) * 0.5
+    assert outcome.payload["max_value"] == (FAKE_PROMETHEUS_SAMPLE_COUNT - 2) * 0.5
+
+
+def test_the_aligned_window_keeps_window_end_as_an_evaluated_point() -> None:
+    """Lab-defect-fix Unit 2, W2. Asserts on the EMITTED request parameters
+    only -- `(end - start) % step == 0` and `start >= window_start` --
+    never inferred Prometheus rounding/millisecond semantics (round-3
+    correction, `LAB_DEFECTS_FIX_PLAN.md` §11.5: a sound inference is not a
+    documented guarantee). The second assertion is what would catch a
+    naive `ceil`-based version that escapes the authorized window by
+    pushing `start` before `window_start`. `end == window_end` by
+    construction is what makes `window_end` itself an evaluated grid
+    point: `query_range` evaluates `start, start+step, ..., end`, and
+    `(end - start) % step == 0` guarantees `end` lands exactly on that
+    grid, never between two points."""
+    start, end, step = aligned_metric_window(WINDOW_START, WINDOW_END)
+
+    assert step == timedelta(seconds=METRIC_STEP_SECONDS)
+    assert (end - start) % step == timedelta(0)
+    assert start >= WINDOW_START
+    assert end == WINDOW_END
+
+
+@contextmanager
+def _recording_prometheus() -> Iterator[tuple[str, list[dict[str, str]]]]:
+    """A loopback stand-in that records every full query-string dict it
+    received (`start`/`end`/`step`/`query`), not just `query` alone the
+    way `conftest.py`'s `fake_prometheus` does -- needed here because W2's
+    own claim is about the emitted `start`/`end`/`step` parameters
+    themselves, not the PromQL string."""
+    received: list[dict[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            parsed = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            received.append({key: values[0] for key, values in parsed.items()})
+            payload = prometheus_body(sample_count=1)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", received
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_metric_samples_emits_a_plain_integer_second_step() -> None:
+    """Lab-defect-fix Unit 2, W2/(a). `step` is a `timedelta` parameter as
+    of this unit (passed through from `aligned_metric_window`, not read a
+    second time from `METRIC_STEP_SECONDS` inside `query_prometheus` --
+    see its own docstring for the drift hazard this closes). `f"{step}s"`
+    on a bare `timedelta` renders its own `str()` form (`"0:00:15s"` for 15
+    seconds), which Prometheus would reject with a 400 -- and that failure
+    would misleadingly present as `TOOL_UNAVAILABLE` through this module's
+    existing `except (urllib.error.URLError, OSError)` handler, not the
+    real formatting cause. Asserts the emitted `step` query parameter is
+    the exact string `"15s"`, not just that the modulo-alignment property
+    holds."""
+    with _recording_prometheus() as (url, received):
+        outcome = fetch_metric_samples(url, "up", metric_arguments(), 5, "query_metric")
+
+    assert isinstance(outcome, ParsedSamples)
+    (call,) = received
+    assert call["step"] == f"{METRIC_STEP_SECONDS}s"
+    start = datetime.fromisoformat(call["start"])
+    end = datetime.fromisoformat(call["end"])
+    assert end == WINDOW_END
+    assert start <= end
+    assert (end - start) % timedelta(seconds=METRIC_STEP_SECONDS) == timedelta(0)
 
 
 def test_a_metric_query_against_nothing_is_unavailable() -> None:
@@ -309,7 +421,7 @@ def test_an_unreadable_prometheus_answer_is_an_error() -> None:
     assert parse_samples({"status": "error"}) is None
     assert parse_samples(
         {"status": "success", "data": {"result": []}}
-    ) == ParsedSamples([], 0)
+    ) == ParsedSamples([], 0, 0)
     assert parse_samples("nonsense") is None
 
 
@@ -459,6 +571,59 @@ def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
     assert outcome.summary != genuinely_empty.summary
 
 
+def test_multiple_series_reports_status_without_suppressing_real_data() -> None:
+    """Lab-defect-fix Unit 2, W7/W14, round-2 refinement (c). The positive
+    case for `MULTIPLE_SERIES`: it is a status LABEL, never a gate that
+    withholds `series[0]`'s real samples. Without a test proving this
+    specifically, a future refactor that early-returns on `MULTIPLE_SERIES`
+    (treating it as another failure-shaped status, the same trap `§8.11`
+    already caught once for `readings_discarded`) would pass every other
+    test in this file while silently regressing exactly the property this
+    status exists to preserve."""
+    body = json.dumps(
+        {
+            "status": "success",
+            "data": {
+                "result": [
+                    {"values": [[0, "1.5"], [1, "9.5"], [2, "3.0"]]},
+                    {"values": [[0, "100.0"]]},
+                ]
+            },
+        }
+    ).encode("utf-8")
+    with _serve_fixed_prometheus_body(body) as url:
+        outcome = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert outcome.payload["status"] == "MULTIPLE_SERIES"
+    assert outcome.payload["sample_count"] == 3
+    samples = outcome.payload["samples"]
+    assert isinstance(samples, list)
+    assert samples
+    # The real peak from series[0] (9.5), not series[1]'s 100.0 -- proving
+    # the samples genuinely came from series[0], not some other placeholder.
+    assert outcome.payload["max_value"] == 9.5
+    assert "3 samples" in outcome.summary
+    assert "peak 9.5" in outcome.summary
+    assert "multiple series returned" in outcome.summary
+    assert "series 1 of 2" in outcome.summary
+
+
+def test_no_returned_series_is_distinguishable_from_no_usable_samples() -> None:
+    """Lab-defect-fix Unit 2, W7. `NO_RETURNED_SERIES` (empty `result`
+    list) and `NO_USABLE_SAMPLES` (a series returned but yielded nothing)
+    are different facts about what the query returned -- the neutral
+    naming this unit adopted specifically avoids claiming either one means
+    the series does not exist (round-1 correction, plan §9.1)."""
+    empty_result = json.dumps({"status": "success", "data": {"result": []}}).encode(
+        "utf-8"
+    )
+    with _serve_fixed_prometheus_body(empty_result) as url:
+        outcome = run_metric_check(metric_arguments(), incident_scope(), url, 5)
+
+    assert outcome.payload["status"] == "NO_RETURNED_SERIES"
+    assert "no series returned for this query" in outcome.summary
+
+
 def test_a_log_query_returns_only_matching_rows_in_the_window(tmp_path: Path) -> None:
     paths = RunPaths(root=tmp_path)
     write_log(
@@ -502,7 +667,13 @@ def test_a_log_result_stays_inside_the_byte_bound(tmp_path: Path) -> None:
     # what trimming did.
     assert outcome.payload["row_count"] < 30
     assert f"{outcome.payload['row_count']} rows" in outcome.summary
-    assert outcome.summary.endswith("(truncated)")
+    # Lab-defect-fix Unit 2, W4: the note now names the kept direction. All
+    # 30 rows matched the filter/window (`row_limit=30` never triggers the
+    # ring's own eviction here -- only byte-trimming reduces the count
+    # below 30), so the "of" figure is 30, the matched total.
+    assert outcome.summary.endswith(
+        f"(kept the newest {outcome.payload['row_count']} of 30)"
+    )
 
 
 def test_log_event_codes_reflect_the_post_trim_rows_not_every_matched_row(
@@ -513,18 +684,19 @@ def test_log_event_codes_reflect_the_post_trim_rows_not_every_matched_row(
     `trim_to_bytes` runs. So a row popped by byte trimming (as opposed to
     the `row_limit` cap the loop already respects) could still have its
     event code listed even though it no longer appears in
-    `payload["rows"]`. `trim_to_bytes` pops from the END of the row list
-    (`kept.pop()`), so the LAST matched row here -- the only one carrying
-    "config_loaded" -- is the first one trimmed away once the payload is
-    oversized; every surviving row is "config_rejected_request". Reachable
-    with real data (same oversized-detail shape as the byte-bound test
-    above), not a monkeypatch."""
+    `payload["rows"]`. `trim_to_bytes` pops from the FRONT of the row list
+    (`kept.pop(0)`) as of lab-defect-fix Unit 2, W4, so the FIRST matched
+    row here -- the only one carrying "config_loaded" -- is the first one
+    trimmed away once the payload is oversized; every surviving row is
+    "config_rejected_request". Reachable with real data (same
+    oversized-detail shape as the byte-bound test above), not a
+    monkeypatch."""
     paths = RunPaths(root=tmp_path)
-    rows = [
+    rows = [log_row(0, event="config_loaded", detail="x" * 2000)]
+    rows.extend(
         log_row(minute, event="config_rejected_request", detail="x" * 2000)
-        for minute in range(29)
-    ]
-    rows.append(log_row(29, event="config_loaded", detail="x" * 2000))
+        for minute in range(1, 30)
+    )
     write_log(paths, rows)
 
     outcome = run_logs_check(
@@ -661,7 +833,9 @@ def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
     # "1 recent changes on orders" while the payload actually held zero.
     # Reproduced by correctness directly against this exact scenario.
     assert outcome.payload["change_count"] == 0
-    assert outcome.summary == "0 recent changes on orders (truncated)"
+    # Lab-defect-fix Unit 2, W4: the note now names the kept direction --
+    # one change matched (`len(changes) == 1`), none survived.
+    assert outcome.summary == "0 recent changes on orders (kept the newest 0 of 1)"
     assert isinstance(outcome.payload["summaries"], str)
     assert len(outcome.payload["summaries"]) < MAX_RESULT_BYTES
     # Round 6 review, item 2. `changes` was fully emptied here, so the
@@ -681,13 +855,19 @@ def test_changes_summaries_only_name_changes_still_present_after_trimming(
     case above (where `changes` is fully emptied), this scenario is the
     more common partial trim: enough changes to force byte trimming, but
     not so much oversized text that popping rows alone cannot bring the
-    payload back under budget. `trim_to_bytes` pops rows from the END of
-    the list, so `changes` 000 through 006 survive and 007 through 029 do
-    not -- reproduced directly against the real function (not asserted
-    blindly): 30 changes here reduce to `change_count == 7`, with
-    `summaries` still holding the text of every one of the 30 (only
-    `changes` had been trimmed) before this fix's rebuild. `summaries`
-    must name only the survivors, and the payload must still fit."""
+    payload back under budget. Every entry here shares the identical `at`
+    timestamp, so `run_changes_check`'s own chronological sort (lab-defect-
+    fix Unit 2, W4/#4) is a no-op and declaration order survives unchanged
+    into `trim_to_bytes`. `trim_to_bytes` pops rows from the FRONT of the
+    list as of that same unit (`kept.pop(0)`), so `changes` 023 through 029
+    survive and 000 through 022 do not -- reproduced directly against the
+    real function (not asserted blindly): 30 changes here reduce to
+    `change_count == 7`, with `summaries` still holding the text of every
+    one of the 30 (only `changes` had been trimmed) before this fix's
+    rebuild. `summaries` must name only the survivors, and the payload must
+    still fit. The assertions below read whatever actually survived
+    dynamically, so they hold regardless of which end trims -- only this
+    docstring's specific illustration is direction-sensitive."""
     paths = RunPaths(root=tmp_path)
     paths.changes_file.write_text(
         json.dumps(
@@ -728,6 +908,53 @@ def test_changes_summaries_only_name_changes_still_present_after_trimming(
             assert marker not in summaries, (
                 f"{marker} was trimmed away but still named in summaries"
             )
+
+
+def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(
+    tmp_path: Path,
+) -> None:
+    """Lab-defect-fix Unit 2, W4/#4. `changes.json` can declare entries out
+    of chronological order -- confirmed directly against this repo's own
+    `configuration_change.json`, whose `require_order_token` entry
+    (`offset_seconds: -60`, chronologically newer) is declared BEFORE its
+    `image_rebuild` entry (`offset_seconds: -240`, chronologically older).
+    A naive front-pop over declaration order would drop whichever entry
+    happens to be declared first, which is not necessarily the oldest --
+    here it would wrongly drop the newer, real one. `run_changes_check`
+    sorts matched changes by their parsed `at` (ascending) before
+    `trim_to_bytes` pops from the front, so trimming always drops the
+    truly oldest change regardless of declaration order."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=5)).isoformat(),
+                    "service": "orders",
+                    "summary": "newer: " + "n" * 4000,
+                },
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": "orders",
+                    "summary": "older: " + "o" * 4000,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
+    assert outcome.payload["truncated"] is True
+    assert outcome.payload["change_count"] == 1
+    assert "newer" in str(outcome.payload["summaries"])
+    assert "older" not in str(outcome.payload["summaries"])
 
 
 def test_recent_changes_are_filtered_by_service_and_window(tmp_path: Path) -> None:
@@ -1044,6 +1271,42 @@ def test_a_changes_check_never_surfaces_another_incidents_entries(
     dumped = json.dumps(outcome.payload)
     assert "incident-a-only-change" in dumped
     assert "incident-b-only-change" not in dumped
+
+
+def test_w5_narrows_only_the_two_rate_templates_the_finding_measured(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    """Lab-defect-fix Unit 2, W5. `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
+    render `[30s]`; `GATEWAY_LATENCY_P95` -- whose own `rate(...)` feeds
+    `histogram_quantile`, a different computation this unit does not touch
+    -- still renders `[1m]`, confirmed directly rather than assumed from
+    the plan's own "two templates" phrasing."""
+    run_metric_check(
+        metric_arguments(template=MetricTemplate.GATEWAY_ERROR_RATE),
+        incident_scope(),
+        fake_prometheus.url,
+        5,
+    )
+    run_metric_check(
+        metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_RATE),
+        incident_scope(),
+        fake_prometheus.url,
+        5,
+    )
+    run_metric_check(
+        metric_arguments(template=MetricTemplate.GATEWAY_LATENCY_P95),
+        incident_scope(),
+        fake_prometheus.url,
+        5,
+    )
+
+    error_query, timeout_query, latency_query = fake_prometheus.queries[-3:]
+    assert "[30s]" in error_query
+    assert "[1m]" not in error_query
+    assert "[30s]" in timeout_query
+    assert "[1m]" not in timeout_query
+    assert "[1m]" in latency_query
+    assert "[30s]" not in latency_query
 
 
 def test_the_metric_query_label_is_derived_from_the_scope_not_an_argument(

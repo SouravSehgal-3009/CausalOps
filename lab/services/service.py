@@ -33,6 +33,47 @@ NO_INCIDENT = "none"
 MAX_LOG_FIELDS = 8
 MAX_FIELD_LENGTH = 120
 
+# Lab-defect-fix Unit 2, W6. `prometheus_client`'s own default buckets
+# (`.005` to `10.0`, doubling roughly every 2-3 steps) put this lab's
+# entire real dynamic range inside one bucket -- confirmed measured
+# (§8.6): a real ~1.21s mean latency was reported by `histogram_quantile`
+# as `peak 2.425`, a bucket-interpolation artifact roughly double reality,
+# not a query defect. Deriving a replacement ladder from the histogram's
+# OWN `histogram_quantile` output during a live run would be circular --
+# the histogram's coarseness IS the defect being fixed, so its own output
+# cannot be trusted to reveal where the boundaries should go. This ladder
+# is derived instead from the lab's known, source-level timing mechanics:
+#   - the timeout path: `orders.py`'s `INVENTORY_MAX_ATTEMPTS` (3) ×
+#     `INVENTORY_ATTEMPT_TIMEOUT_SECONDS` (0.4s) ~= 1.2s before
+#     `upstream_timeout` is logged;
+#   - the delayed-success path: `inventory.py`'s configured
+#     `response_delay_seconds`, `1.5` or `2.0` across the four scenario
+#     definitions.
+# Boundaries cluster tightly around both landmarks (1.1-1.3s, 1.5-2.5s) so
+# `histogram_quantile`'s interpolation has real cut points to work with in
+# exactly the range this lab's own fault traffic actually populates,
+# instead of one 5-9.995-wide gap swallowing it whole. `+Inf` is not
+# hand-appended: `prometheus_client`'s own `Histogram` adds it automatically
+# when the given sequence does not already end there (`_prepare_buckets`),
+# so no infinity literal needs copying from this comment into code.
+LATENCY_BUCKETS_SECONDS = (
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.1,
+    1.2,
+    1.3,
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.5,
+    5.0,
+)
+
 # What a route hands back: an HTTP status, a small JSON body, and the outcome label
 # the metrics carry.
 RouteResult = tuple[int, dict[str, Any], str]
@@ -58,6 +99,7 @@ class LabService:
             "Latency of requests handled by a lab service.",
             ["service", "incident"],
             registry=self.registry,
+            buckets=LATENCY_BUCKETS_SECONDS,
         )
         self.pool_in_use = Gauge(
             "causalops_pool_in_use",

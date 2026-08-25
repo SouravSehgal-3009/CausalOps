@@ -3396,6 +3396,31 @@ not a model given a specially-tailored no-tools prompt. `prompts.py` was not tou
 finding; `graph.py`'s `build_graph` carries a short pointer comment back to this paragraph next
 to its own `no_tool_baseline` documentation.
 
+## Lab defect remediation — Unit 2, telemetry truthfulness
+
+Following the first real billed `causalops-evaluate` run, `LAB_DEFECTS_FIX_PLAN.md`
+catalogued 17 defects in the synthetic lab, telemetry pipeline, and incident-window
+handling found by re-examining that run's own artifacts. Unit 2 fixes the telemetry
+layer specifically: truncation that kept the oldest samples instead of the newest
+(W4); a metric query grid that never evaluated `window_end`, the instant closest to
+the fault (W2); `window_end` stamped before Prometheus had scraped the post-fault
+state (W3); a `[1m]` rate window that diluted a 4-15s fault against 45s of nothing
+(W5); default histogram buckets that put the lab's entire real latency range inside
+one bucket (W6); a metric zero that could not distinguish "confirmed empty" from
+"the query itself returned nothing usable," now also covering an unexpected
+multi-series response (W7 + W14); and one-hour Prometheus retention, raised to 24
+hours (W13).
+
+W13 raises Prometheus retention from 1h to 24h so a completed evaluation's raw
+telemetry survives long enough for the kind of post-hoc re-analysis this very unit
+grew out of. That longer window accumulates more label/series cardinality over the
+lab's uptime than the old 1h window did — W15's re-scoped answer (a documented
+container restart between evaluation batches, not a code change: the scenario
+controller has no way to reach into a running service container's own in-process
+registry or `LeakyPool` state to clear it directly) is what bounds that growth, not
+a shorter retention window. A restart clears the exporter's own in-process state
+without touching anything Prometheus already scraped and stored.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

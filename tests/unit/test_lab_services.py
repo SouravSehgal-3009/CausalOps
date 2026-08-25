@@ -75,6 +75,33 @@ def test_metrics_carry_the_active_incident_label(runs: Path) -> None:
     assert 'service="inventory"' in exposed
 
 
+def test_the_latency_histogram_has_boundaries_near_the_lab_s_real_range(
+    runs: Path,
+) -> None:
+    """Lab-defect-fix Unit 2, W6. Proves the ladder is actually wired into
+    the exposed `/metrics` text, not just declared -- `histogram_quantile`
+    reads bucket boundaries (`le=` labels) off exactly this output. Checks
+    for boundaries near both landmarks this ladder was derived from
+    (`service.py`'s own `LATENCY_BUCKETS_SECONDS` comment): the ~1.2s
+    timeout path and the 1.5s/2.0s delayed-success path -- not the
+    `prometheus_client` default ladder's `1.0`-to-`2.5` gap, which is what
+    put this lab's entire dynamic range inside one bucket in the first
+    place."""
+    activate(runs)
+    orders = LabService(name="orders", port=8081, path="/orders")
+
+    orders.observe("success", 1.21)
+
+    exposed = generate_latest(orders.registry).decode("utf-8")
+    assert 'le="1.2"' in exposed
+    assert 'le="1.5"' in exposed
+    assert 'le="2.0"' in exposed
+    # The default ladder's own coarse jump is gone: nothing between 1.0 and
+    # 2.5 should be missing a real cut point.
+    assert 'le="1.0"' in exposed
+    assert 'le="2.5"' in exposed
+
+
 def test_configuration_is_read_from_the_active_run(runs: Path) -> None:
     activate(runs)
     config_file = runs / INCIDENT / "lab" / "config.json"

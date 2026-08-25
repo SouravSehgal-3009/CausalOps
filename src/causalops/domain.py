@@ -90,6 +90,42 @@ class GatewaySymptom(StrEnum):
     ELEVATED_ERRORS_AND_LATENCY = "ELEVATED_ERRORS_AND_LATENCY"
 
 
+class MetricSampleStatus(StrEnum):
+    """Lab-defect-fix Unit 2, W7 (+ W14's `MULTIPLE_SERIES`, folded in per
+    owner decision Q15). What a `query_metric` check's raw Prometheus
+    response actually contained -- describing only what the query
+    returned, never claiming anything about what exists in Prometheus's
+    own storage. Before this, `sample_count: 0, max_value: 0.0` rendered
+    identically whether the series had genuinely never been scraped, a
+    series existed but no grid point resolved to a sample, or every
+    returned reading was unreadable -- three different facts collapsed
+    into one indistinguishable zero.
+
+    Deliberately neutral names, not `SERIES_ABSENT`: an empty `result`
+    list proves only that this one query, over this one window, matched
+    nothing -- not that the series does not exist (a `rate(...)` query
+    needs two samples inside its lookback, so a real, existing series can
+    still return empty here). Naming that state as if it proved absence
+    would replace one uninterpretable zero with a confidently wrong one,
+    which is worse.
+
+    `MULTIPLE_SERIES` is a label on top of the same sample data every
+    other status describes, never a gate that withholds it: a
+    multi-series response still has real samples in its first series
+    (`parse_samples` always reads `series[0]`, regardless of how many
+    series came back), and the payload/summary must still carry them --
+    see `run_metric_check`'s own comment on this. A reader who mistakes
+    `MULTIPLE_SERIES` for "no usable data" would make the interpretability
+    problem this status exists to fix worse, not better.
+    """
+
+    MULTIPLE_SERIES = "MULTIPLE_SERIES"
+    NO_RETURNED_SERIES = "NO_RETURNED_SERIES"
+    NO_USABLE_SAMPLES = "NO_USABLE_SAMPLES"
+    ALL_READINGS_DISCARDED = "ALL_READINGS_DISCARDED"
+    SAMPLED = "SAMPLED"
+
+
 class PolicyResult(StrEnum):
     ALLOWED = "ALLOWED"
     DENIED = "DENIED"

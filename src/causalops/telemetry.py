@@ -9,6 +9,7 @@ investigation.
 import json
 import math
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -166,9 +167,20 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
             f"no log for {arguments.service} in this run",
         )
     limit = min(arguments.row_limit, MAX_LOG_ROWS)
-    rows: list[JsonValue] = []
-    events: set[str] = set()
-    truncated = False
+    # Lab-defect-fix Unit 2, W4. A bounded ring, not a `break`-at-`limit`
+    # scan: every real observation in this lab sits near the tail of the
+    # window (see W3/`SCRAPE_SETTLE_SECONDS`), so keeping the first `limit`
+    # matching rows in file order -- the oldest matches -- silently
+    # discarded exactly the data-bearing region once more than `limit` rows
+    # matched. `deque(maxlen=limit)` evicts the oldest match automatically
+    # as newer ones arrive, so what survives is always the newest `limit`
+    # matches. Cost, stated plainly: this removes the early exit, so the
+    # whole log file is scanned regardless of `limit` -- bounded by the
+    # lab's own per-incident log size (each incident's traffic is capped by
+    # its scenario's baseline/fault request counts), not by anything this
+    # function controls.
+    rows: deque[JsonValue] = deque(maxlen=limit)
+    matched_count = 0
     with log_file.open("rb") as handle:
         for raw_line in handle:
             try:
@@ -183,21 +195,19 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
                 moment, arguments.window_start, arguments.window_end
             ):
                 continue
-            if len(rows) >= limit:
-                truncated = True
-                break
+            matched_count += 1
             rows.append(record)
-            event = record.get("event")
-            if isinstance(event, str):
-                events.add(event)
+    truncated = matched_count > len(rows)
     payload: dict[str, JsonValue] = {
         "filter": arguments.log_filter.value,
         "service": arguments.service,
         "row_count": len(rows),
-        "event_codes": ",".join(sorted(events)),
+        # Rebuilt from the post-trim `payload["rows"]` a few lines below --
+        # this placeholder is never read as final output.
+        "event_codes": "",
         "truncated": truncated,
     }
-    payload = trim_to_bytes(payload, "rows", rows, "row_count")
+    payload = trim_to_bytes(payload, "rows", list(rows), "row_count")
     # Post-freeze review, P3-1. `len(rows)` here is the PRE-trim count --
     # `trim_to_bytes` mutates a COPY (`kept = list(rows)`), never `rows`
     # itself, so this summary used to claim more rows than `payload["rows"]`
@@ -227,7 +237,13 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
             if isinstance(kept_event, str):
                 kept_events.add(kept_event)
     payload["event_codes"] = ",".join(sorted(kept_events))
-    truncated_note = " (truncated)" if payload["truncated"] else ""
+    # Lab-defect-fix Unit 2, W4. Names the *direction* kept, matching the
+    # metric/change checks -- see `run_metric_check`'s identical note.
+    truncated_note = (
+        f" (kept the newest {payload['row_count']} of {matched_count})"
+        if payload["truncated"]
+        else ""
+    )
     return executed_check(
         EvidenceKind.LOG,
         source,
@@ -269,6 +285,26 @@ def run_changes_check(
         summary = entry.get("summary")
         if isinstance(summary, str):
             summaries.append(summary)
+
+    # Lab-defect-fix Unit 2, W4/#4. `changes.json` lists entries in
+    # scenario-definition order, not chronological order (confirmed:
+    # `configuration_change.json` declares its -60s entry before its
+    # -240s one), so `trim_to_bytes`'s front-pop (this unit's own W4 fix,
+    # "drop the oldest, keep the newest") only actually drops the oldest
+    # if `changes` is sorted oldest-first beforehand. Sorted by the SAME
+    # parsed `datetime` `within_window` already validated above, never by
+    # the raw string -- every record happens to share the same UTC offset
+    # format today, so a string sort would happen to agree, but that is
+    # not a guarantee this function should depend on. `sorted`/`list.sort`
+    # are stable, so two changes sharing an identical timestamp keep their
+    # original relative order -- deterministic, not arbitrary.
+    def _change_moment(entry: JsonValue) -> datetime:
+        assert isinstance(entry, dict)
+        moment = entry["at"]
+        assert isinstance(moment, str)
+        return datetime.fromisoformat(moment)
+
+    changes.sort(key=_change_moment)
     payload: dict[str, JsonValue] = {
         "service": arguments.service,
         "change_count": len(changes),
@@ -287,12 +323,15 @@ def run_changes_check(
     #
     # Unlike `event_codes`/`max_value`, this rebuild is not simply
     # guaranteed smaller by construction without checking: `trim_to_bytes`
-    # pops rows from the END of the list, so `kept_summaries` is always a
-    # PREFIX (in original order) of the full `summaries` this scalar was
-    # first built from -- if `changes` still holds any rows, `summaries`
-    # was never touched during the row-popping loop above, so the payload
-    # already fit WITH the full string present, and a prefix of it can
-    # only be smaller or equal. If `changes` was fully emptied, the
+    # pops rows from the FRONT of the list as of lab-defect-fix Unit 2, W4
+    # (`changes` is sorted chronologically ascending just above this
+    # block, so popping the front drops the oldest -- see the sort's own
+    # comment), so `kept_summaries` is always a SUFFIX (in sorted order) of
+    # the full `summaries` this scalar was first built from -- if `changes`
+    # still holds any rows, `summaries` was never touched during the
+    # row-popping loop above, so the payload already fit WITH the full
+    # string present, and a suffix of it can only be smaller or equal in
+    # byte length. If `changes` was fully emptied, the
     # scalar-shrinking fallback already halved `summaries` down before
     # this rebuild replaces it with an even shorter (or empty) string.
     # Both branches can only shrink the payload -- but that reasoning is
@@ -329,7 +368,15 @@ def run_changes_check(
         "rebuilding summaries from the post-trim changes list must not "
         "grow the payload back over the byte bound"
     )
-    truncated_note = " (truncated)" if payload["truncated"] else ""
+    # Lab-defect-fix Unit 2, W4. Names the *direction* kept, matching the
+    # metric/log checks -- see `run_metric_check`'s identical note. `changes`
+    # itself is unmutated by `trim_to_bytes` (which pops from a copy), so
+    # `len(changes)` still reflects the pre-trim, post-sort count here.
+    truncated_note = (
+        f" (kept the newest {payload['change_count']} of {len(changes)})"
+        if payload["truncated"]
+        else ""
+    )
     return executed_check(
         EvidenceKind.CHANGE,
         source,

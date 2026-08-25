@@ -52,7 +52,7 @@ services:
     mem_limit: 256m
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=1h
+      - --storage.tsdb.retention.time=24h
       - --storage.tsdb.path=/prometheus
     ports:
       - "127.0.0.1:9090:9090"
