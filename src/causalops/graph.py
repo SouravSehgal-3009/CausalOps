@@ -230,18 +230,24 @@ def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
 
     Lab-defect-fix Unit 1, W16: asserts every reconstructed receipt's
     `incident_id` agrees with this thread's own `state["incident_id"]`.
-    `thread_id` *is* the investigation's `incident_id` end to end
-    (`run_graph_investigation`), and every receipt this codebase can produce
-    is stamped `incident_id=scope.incident_id` at reserve/deny time
-    (`tool_wrappers.py`) from that same state -- so on every live, replay, or
-    resume path this can never actually disagree; `cli.py`'s
-    `_load_verified_incident` closes the one place an operator could
-    otherwise smuggle in a mismatched scope. This is defence-in-depth against
-    a hand-edited or otherwise corrupted checkpoint DB, not a fix for a
-    reachable cross-incident leak -- see `LAB_DEFECTS_FIX_PLAN.md` §2.2 for
-    the full trace. Raises loudly rather than silently dropping the
-    offending receipt: a dropped receipt would hand back a check slot that
-    was actually spent, which is a worse failure than refusing to proceed.
+    `thread_id` *is* `investigation_id` (`run_graph_investigation` passes
+    `investigation_id` as LangGraph's own `thread_id`) -- a distinct field
+    from `incident_id`, not the same identifier under two names. What
+    actually makes the invariant hold: `state["incident_id"]` is set once,
+    at investigation creation, from the `IncidentScope` of the one incident
+    this investigation was built against (`initial_state`, this module), and
+    every receipt this codebase can produce is stamped
+    `incident_id=scope.incident_id` at reserve/deny time (`tool_wrappers.py`)
+    from that same state -- so within one investigation this can never
+    actually disagree. `cli.py`'s `_load_verified_incident` is what verifies
+    that scope before an investigation is ever started or resumed, closing
+    the one place an operator could otherwise smuggle in a mismatched scope.
+    This is defence-in-depth against a hand-edited or otherwise corrupted
+    checkpoint DB, not a fix for a reachable cross-incident leak -- see
+    `LAB_DEFECTS_FIX_PLAN.md` §2.2 for the full trace. Raises loudly rather
+    than silently dropping the offending receipt: a dropped receipt would
+    hand back a check slot that was actually spent, which is a worse failure
+    than refusing to proceed.
     """
     receipts = [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
     incident_id = state["incident_id"]
