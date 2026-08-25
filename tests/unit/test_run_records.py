@@ -9,9 +9,14 @@ from fake_incident import (
     RecordingMetricBackend,
     StepClock,
     alert_packet,
+    assessment_json,
     incident_scope,
+    metric_proposal,
     packet_evidence,
+    plan_json,
     registry_with,
+    replay_model,
+    update_json,
 )
 
 from causalops.domain import Budgets, InvestigationResult, ReasonCode
@@ -131,6 +136,102 @@ def test_results_live_under_the_investigation_id(tmp_path: Path) -> None:
     assert written.parent.name == "investigations"
     assert written.name == result.report.investigation_id
     assert written.is_dir()
+
+
+def test_a_replay_run_answers_which_window_and_what_was_expected_from_disk_alone(
+    tmp_path: Path,
+) -> None:
+    """The live-reproduction proof lab-defect-fix Unit 1 (W11) exists for.
+
+    The `TOOL_SELECTION_BIAS_FINDINGS.md` investigation had to run a fresh,
+    paid, live reproduction against the Docker lab to answer "which window
+    produced this zero, and what did the model expect to see" for the
+    billed evaluation run's own saved artifacts -- neither question was
+    answerable from `receipts.jsonl`/`events.jsonl` alone. This proves that
+    gap is closed, with a $0 replay run: after `finalize_investigation`
+    writes the artifacts to disk, re-reading *only* the JSON files back --
+    no live objects, no lab query -- recovers the exact window the metric
+    check used, the hypothesis/evidence-gap/expected-observation reasoning
+    that led to proposing it, and the join (`proposal_turn` and
+    `receipt_id`) tying the proposal record to the receipt that settled it.
+    """
+    clock = StepClock()
+    recorder = RunRecorder(clock)
+    proposal = metric_proposal()
+    script = {
+        "initial_plan": [plan_json(proposal=proposal)],
+        "hypothesis_update": [update_json(stop_reason="nothing else to check")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_metric=RecordingMetricBackend())
+
+    result = run_graph_investigation(
+        incident_scope(),
+        alert_packet(),
+        packet_evidence(),
+        model,
+        registry,
+        recorder,
+        Budgets(),
+        clock,
+    )
+    written = finalize_investigation(
+        tmp_path / "results",
+        result.report,
+        recorder.events,
+        result.evidence,
+        result.receipts,
+        "# Investigation\n",
+    )
+
+    receipts_on_disk = [
+        json.loads(line)
+        for line in (written / "receipts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events_on_disk = [
+        json.loads(line)
+        for line in (written / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    # Which window did this query use? -- the receipt on disk carries the
+    # exact effective arguments the backend ran, byte for byte the same
+    # dump the proposal's own `ToolArguments` would produce.
+    (only_receipt,) = receipts_on_disk
+    expected_arguments = proposal.arguments.model_dump(mode="json")
+    assert only_receipt["arguments"] == expected_arguments
+    assert (
+        only_receipt["arguments"]["window_start"] == expected_arguments["window_start"]
+    )
+    assert only_receipt["arguments"]["window_end"] == expected_arguments["window_end"]
+
+    # What did the model expect to see, and why did it ask? -- the
+    # `investigate`-side proposal record on disk.
+    proposal_recorded = next(
+        event for event in events_on_disk if event["name"] == "proposal_recorded"
+    )
+    assert proposal_recorded["fields"]["arguments"] == expected_arguments
+    assert proposal_recorded["fields"]["evidence_gap"] == proposal.evidence_gap
+    assert (
+        proposal_recorded["fields"]["expected_observation"]
+        == proposal.expected_observation
+    )
+    assert len(proposal_recorded["fields"]["hypotheses"]) >= 2
+
+    # The join: `proposal_turn` ties the proposal record to the outcome
+    # event, and `receipt_id` ties the outcome event to the settled receipt
+    # that actually carries the arguments above -- all recoverable from
+    # `events.jsonl`/`receipts.jsonl` alone, no in-memory state involved.
+    check_finished = next(
+        event for event in events_on_disk if event["name"] == "check_finished"
+    )
+    assert check_finished["fields"]["receipt_id"] == only_receipt["receipt_id"]
+    assert (
+        check_finished["fields"]["proposal_turn"]
+        == proposal_recorded["fields"]["proposal_turn"]
+    )
 
 
 def _run_event(sequence: int) -> RunEvent:

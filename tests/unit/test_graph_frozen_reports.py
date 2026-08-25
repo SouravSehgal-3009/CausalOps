@@ -46,6 +46,12 @@ What each test pins, and what it does not:
   `proposal_denied`, `check_started`, `check_finished`) the graph's own
   `RunRecorder` produced, as ordered `(name, fields)` pairs -- except
   `check_finished`'s `duration_ms`, dropped for the reason below.
+  `proposal_denied`/`check_finished` also carry `proposal_turn` and
+  `receipt_id` as of lab-defect-fix Unit 1 (W11, see the note below);
+  both are pinned like every other field here, not excluded, since the
+  counting id generator two paragraphs down makes `receipt_id`
+  deterministic the same way it already does for `evidence_ids`/
+  `receipt_ids` above.
 - Wall-clock fields (`latency_ms`, `started_at`, `finished_at`) are excluded,
   as they always were: nothing about a frozen literal makes `StepClock`
   readings meaningful to pin. `check_finished`'s `duration_ms` joined that
@@ -107,6 +113,21 @@ reworded sentence shifts every digest in this file again, confirmed by
 running the suite before and after and updating only the six
 `final_context_digest` literals to match -- no other field in this file
 changed.
+
+**Lab-defect-fix Unit 1 (W11) adds two fields to `proposal_denied` and
+`check_finished`, and moves no digest.** `dispatch_tool` (`graph.py`) now
+stamps both events with `proposal_turn` (the zero-based `investigate` turn
+that produced the dispatched proposal) and `receipt_id` (the settled or
+denied receipt's own id) -- the join key back to `investigate`'s own new
+`proposal_recorded` event and to `receipts.jsonl`, added so a saved run can
+answer "which window did this query use, and what did the model expect to
+see" from `events.jsonl`/`receipts.jsonl` alone. Neither `SYSTEM_TEXT` nor
+any tool schema changed, so `final_context_digest` is unaffected in every
+scenario below -- confirmed by running the suite before and after: only the
+six `dispatch_events(...)` literals moved, gaining `proposal_turn`/
+`receipt_id` on their `proposal_denied`/`check_finished` entries, with
+values read directly off each scenario's own already-deterministic id
+sequence (`_install_counting_ids` below) rather than guessed.
 """
 
 from pathlib import Path
@@ -504,7 +525,14 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "EXECUTED"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "outcome": "EXECUTED",
+            },
+        ),
     ]
     assert_check_finished_durations_are_measured(recorder)
     assert [record.kind for record in result.evidence] == [
@@ -561,11 +589,23 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         ("proposal_received", {"tool": "query_logs"}),
         (
             "proposal_denied",
-            {"reason": "UNKNOWN_SERVICE", "message": "that service is out of scope"},
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "reason": "UNKNOWN_SERVICE",
+                "message": "that service is out of scope",
+            },
         ),
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 1,
+                "receipt_id": "00000000000000000000000000000003",
+                "outcome": "UNAVAILABLE",
+            },
+        ),
     ]
     assert_check_finished_durations_are_measured(recorder)
 
@@ -623,11 +663,20 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "outcome": "UNAVAILABLE",
+            },
+        ),
         ("proposal_received", {"tool": "query_logs"}),
         (
             "proposal_denied",
             {
+                "proposal_turn": 1,
+                "receipt_id": "00000000000000000000000000000003",
                 "reason": "DUPLICATE_PROPOSAL",
                 "message": "this check was proposed already",
             },
@@ -674,7 +723,14 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "UNAVAILABLE"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "outcome": "UNAVAILABLE",
+            },
+        ),
     ]
     assert_check_finished_durations_are_measured(recorder)
 
@@ -733,10 +789,24 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "EXECUTED"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "outcome": "EXECUTED",
+            },
+        ),
         ("proposal_received", {"tool": "list_recent_changes"}),
         ("check_started", {"tool": "list_recent_changes"}),
-        ("check_finished", {"outcome": "EXECUTED"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 1,
+                "receipt_id": "00000000000000000000000000000004",
+                "outcome": "EXECUTED",
+            },
+        ),
     ]
     assert_check_finished_durations_are_measured(recorder)
     assert [record.kind for record in result.evidence] == [
@@ -816,10 +886,24 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
     assert dispatch_events(recorder) == [
         ("proposal_received", {"tool": "query_logs"}),
         ("check_started", {"tool": "query_logs"}),
-        ("check_finished", {"outcome": "EXECUTED"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 0,
+                "receipt_id": "00000000000000000000000000000002",
+                "outcome": "EXECUTED",
+            },
+        ),
         ("proposal_received", {"tool": "list_recent_changes"}),
         ("check_started", {"tool": "list_recent_changes"}),
-        ("check_finished", {"outcome": "EXECUTED"}),
+        (
+            "check_finished",
+            {
+                "proposal_turn": 1,
+                "receipt_id": "00000000000000000000000000000004",
+                "outcome": "EXECUTED",
+            },
+        ),
     ]
     assert_check_finished_durations_are_measured(recorder)
     measured = [

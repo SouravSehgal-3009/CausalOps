@@ -226,7 +226,58 @@ def _rebuild_store(
 
 
 def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
-    return [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
+    """Rebuild every receipt this thread has recorded so far.
+
+    Lab-defect-fix Unit 1, W16: asserts every reconstructed receipt's
+    `incident_id` agrees with this thread's own `state["incident_id"]`.
+    `thread_id` *is* the investigation's `incident_id` end to end
+    (`run_graph_investigation`), and every receipt this codebase can produce
+    is stamped `incident_id=scope.incident_id` at reserve/deny time
+    (`tool_wrappers.py`) from that same state -- so on every live, replay, or
+    resume path this can never actually disagree; `cli.py`'s
+    `_load_verified_incident` closes the one place an operator could
+    otherwise smuggle in a mismatched scope. This is defence-in-depth against
+    a hand-edited or otherwise corrupted checkpoint DB, not a fix for a
+    reachable cross-incident leak -- see `LAB_DEFECTS_FIX_PLAN.md` §2.2 for
+    the full trace. Raises loudly rather than silently dropping the
+    offending receipt: a dropped receipt would hand back a check slot that
+    was actually spent, which is a worse failure than refusing to proceed.
+    """
+    receipts = [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
+    incident_id = state["incident_id"]
+    for receipt in receipts:
+        if receipt.incident_id != incident_id:
+            raise AssertionError(
+                f"receipt {receipt.receipt_id} has incident_id "
+                f"{receipt.incident_id!r}, but this thread's own state "
+                f"incident_id is {incident_id!r} -- a corrupted checkpoint, "
+                "not a reachable cross-incident leak (see "
+                "LAB_DEFECTS_FIX_PLAN.md §2.2)"
+            )
+    return receipts
+
+
+def _proposal_turn(state: GraphState) -> int:
+    """The zero-based `investigate` turn that produced `state["pending_
+    proposal"]`, canonical name `proposal_turn` (lab-defect-fix Unit 1).
+
+    `investigate` reads `turn_index = state["model_turn"]` (zero-based, and
+    the value that selects `Stage`/schema) and returns `"model_turn":
+    turn_index + 1` in the same update that sets `pending_proposal` --
+    `dispatch_tool` always runs after that return has landed, so by the time
+    this is called `state["model_turn"]` is one turn ahead of the turn that
+    actually produced the pending proposal. Subtracting 1 recovers
+    `investigate`'s own `turn_index`, so `dispatch_tool`'s events agree with
+    `investigate`'s own `proposal_recorded` event on the same number for the
+    same turn -- the join key evaluation needs to answer "which proposal
+    produced this receipt" from `events.jsonl` alone. Safe because
+    `model_turn` is written in exactly one place (`investigate`'s return) and
+    `stopped_state` deliberately omits it -- a stopped turn neither
+    increments `model_turn` nor leaves a `pending_proposal`, so this is only
+    ever called when the invariant `state["model_turn"] == producing
+    turn_index + 1` holds.
+    """
+    return state["model_turn"] - 1
 
 
 def _rebuild_passages(state: GraphState) -> list[RunbookPassage]:
@@ -757,6 +808,36 @@ def _make_investigate(
                 "stage_finished",
                 proposed=proposal is not None,
             )
+            # Lab-defect-fix Unit 1, W11. `parsed` (the whole `InitialPlan`/
+            # `HypothesisUpdate`) and `proposal` (`ToolProposal | None`) are
+            # both still in hand here, right where `stage_finished` is
+            # already emitted -- the one place this turn's ranked hypotheses,
+            # evidence gap, expected observation, and as-requested tool
+            # arguments exist before they are otherwise discarded (only
+            # `pending_proposal`, which carries no hypotheses, survives past
+            # this return). `hypotheses` is always present (both schemas
+            # require it whether the turn proposes a check or gives a stop
+            # reason); the other four fields are `None` on a stop-reason turn,
+            # since there is no proposal to describe. `proposal_turn` is the
+            # zero-based `turn_index`, the same convention `_proposal_turn`
+            # recovers for `dispatch_tool`'s own events, so a reader can join
+            # this record to the receipt it produced (if any) without
+            # re-deriving the off-by-one between the two nodes.
+            recorder.event(
+                GraphPhase.INVESTIGATE.value,
+                "proposal_recorded",
+                proposal_turn=turn_index,
+                stage=stage.value,
+                hypotheses=[h.model_dump(mode="json") for h in parsed.hypotheses],
+                tool=proposal.tool.value if proposal else None,
+                evidence_gap=proposal.evidence_gap if proposal else None,
+                expected_observation=(
+                    proposal.expected_observation if proposal else None
+                ),
+                arguments=(
+                    proposal.arguments.model_dump(mode="json") if proposal else None
+                ),
+            )
             return {
                 "phase": GraphPhase.INVESTIGATE.value,
                 "model_turn": turn_index + 1,
@@ -875,10 +956,22 @@ def _make_dispatch_tool(
             # around the real call) is the authoritative figure;
             # `check_finished` carries it explicitly so nothing has to
             # subtract these two timestamps to get zero.
+            # Lab-defect-fix Unit 1, W11: `proposal_turn` and `receipt_id`
+            # are the join key back to `investigate`'s own `proposal_recorded`
+            # event and to the receipt in `receipts.jsonl` -- added to these
+            # two existing events only (never `proposal_received`/
+            # `check_started`, which fire before `result.receipt` exists).
+            # No new event: the outcome is already fully recorded here, in
+            # two mutually exclusive branches; what was missing was a way to
+            # correlate this record back to the turn and receipt that
+            # produced it.
+            proposal_turn = _proposal_turn(state)
             if result.receipt.policy_result is PolicyResult.DENIED:
                 recorder.event(
                     GraphPhase.DISPATCH_TOOL.value,
                     "proposal_denied",
+                    proposal_turn=proposal_turn,
+                    receipt_id=result.receipt.receipt_id,
                     reason=(
                         result.receipt.reason_code.value
                         if result.receipt.reason_code
@@ -895,6 +988,8 @@ def _make_dispatch_tool(
                 recorder.event(
                     GraphPhase.DISPATCH_TOOL.value,
                     "check_finished",
+                    proposal_turn=proposal_turn,
+                    receipt_id=result.receipt.receipt_id,
                     outcome=(
                         result.receipt.outcome.value if result.receipt.outcome else ""
                     ),

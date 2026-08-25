@@ -439,6 +439,24 @@ class ToolReceipt(BaseModel):
     is one-shot: policy decides, the backend runs (or doesn't), and the receipt
     is written once with a known outcome. Only the new reservation path in
     `tool_wrappers.py` ever constructs a `RESERVED` receipt.
+
+    `arguments` defaults to `None` for the same reason `state` does above:
+    every receipt built before the lab-defect-fix Unit 1 that added this field
+    predates it entirely. `None` here means "this receipt was written before
+    Unit 1," never "this check ran with no arguments" -- every tool this
+    application registers requires at least one argument, so a settled
+    receipt for a real check always has a real `ToolArguments` value once this
+    field is populated. `ledger.reserve`, `ledger.settle`, and
+    `_denied_receipt` in `tool_wrappers.py` always set it on a freshly built
+    receipt; only a receipt round-tripped from a pre-Unit-1 `receipts.jsonl`
+    or checkpoint can carry `None`. This carries the *effective* arguments a
+    backend actually ran (or would have run, for a denial) -- today identical
+    to what the model requested, since nothing yet normalizes a proposal's
+    window before dispatch; a later unit that adds clamping only has to set
+    this field to the clamped value at the same construction sites, no shape
+    change here. No `SCHEMA_VERSION` bump: an added optional field breaks no
+    reader, the same reasoning `state`'s own addition and `GraphState.model_
+    name`'s addition both already used.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -456,6 +474,7 @@ class ToolReceipt(BaseModel):
     duration_ms: int = Field(ge=0)
     result_digest: str | None = None
     evidence_id: str | None = None
+    arguments: ToolArguments | None = None
 
     @model_validator(mode="after")
     def check_lifecycle_coherence(self) -> Self:

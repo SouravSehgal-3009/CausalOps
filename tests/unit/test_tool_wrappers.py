@@ -236,6 +236,7 @@ def test_a_receipt_settles_exactly_once() -> None:
         tool=ToolName.QUERY_LOGS,
         fingerprint="f" * 8,
         requested_at=WINDOW_START,
+        arguments=logs_proposal().arguments,
     )
     assert reserved is not None
 
@@ -482,13 +483,17 @@ def test_a_receipt_round_trips_through_json_without_losing_fidelity() -> None:
     live `ToolReceipt` objects. If that round trip lost anything -- a
     timestamp's timezone, an enum's value -- budget accounting would corrupt
     silently, since `slots_left()` reads `policy_result` off the
-    reconstructed object."""
+    reconstructed object. `arguments` (lab-defect-fix Unit 1) round-trips
+    through the same `model_dump`/`model_validate` pair, via `ToolArguments`'s
+    own `tool`-discriminated union, exactly like every other typed field
+    here."""
     ledger = ReservationLedger(executed_tools_budget=1)
     reserved = ledger.reserve(
         incident_id=incident_scope().incident_id,
         tool=ToolName.QUERY_LOGS,
         fingerprint="f" * 8,
         requested_at=WINDOW_START,
+        arguments=logs_proposal().arguments,
     )
     assert reserved is not None
 
@@ -496,6 +501,7 @@ def test_a_receipt_round_trips_through_json_without_losing_fidelity() -> None:
     reloaded = ToolReceipt.model_validate(dumped)
 
     assert reloaded == reserved
+    assert reloaded.arguments == logs_proposal().arguments
 
 
 def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
@@ -503,13 +509,17 @@ def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
     take -- `outcome`, `reason_code`, `result_digest`, and `evidence_id` are
     all still `None`. A `SETTLED` receipt with every optional field filled
     in is the harder case to prove lossless, and the more representative one
-    for what Milestone 2's checkpoint resume actually has to survive."""
+    for what Milestone 2's checkpoint resume actually has to survive.
+    `arguments` set at reserve time must still be present after `settle()`
+    replaces the receipt -- `settle()` copies it from the reserved receipt
+    rather than re-deriving it, since it never sees the original proposal."""
     ledger = ReservationLedger(executed_tools_budget=1)
     reserved = ledger.reserve(
         incident_id=incident_scope().incident_id,
         tool=ToolName.QUERY_LOGS,
         fingerprint="f" * 8,
         requested_at=WINDOW_START,
+        arguments=logs_proposal().arguments,
     )
     assert reserved is not None
     settled = ledger.settle(
@@ -521,10 +531,83 @@ def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
         evidence_id="evidence-1",
     )
 
+    assert settled.arguments == logs_proposal().arguments
+
     dumped = settled.model_dump(mode="json")
     reloaded = ToolReceipt.model_validate(dumped)
 
     assert reloaded == settled
+
+
+def test_a_receipt_dict_written_before_this_unit_still_validates() -> None:
+    """Backward compatibility, lab-defect-fix Unit 1: a `receipts.jsonl` line
+    or checkpoint dump written before this unit's `arguments` field existed
+    has no `arguments` key at all -- `_rebuild_receipts` in `graph.py` runs
+    `ToolReceipt.model_validate` over every persisted receipt on every node
+    call, so a dict missing this key must still validate, with `arguments`
+    defaulting to `None`, or every pre-existing checkpoint would fail to
+    resume. `None` means "written before this unit," never "ran with no
+    arguments" -- see `ToolReceipt.arguments`'s own docstring."""
+    pre_unit_dump = {
+        "receipt_id": "receipt-pre-unit-1",
+        "incident_id": incident_scope().incident_id,
+        "tool": ToolName.QUERY_LOGS.value,
+        "fingerprint": "f" * 8,
+        "policy_result": PolicyResult.ALLOWED.value,
+        "state": ReceiptState.SETTLED.value,
+        "outcome": ToolOutcome.EXECUTED.value,
+        "requested_at": WINDOW_START.isoformat(),
+        "duration_ms": 5,
+        # No "arguments" key -- exactly what a pre-Unit-1 dump looks like.
+    }
+
+    reloaded = ToolReceipt.model_validate(pre_unit_dump)
+
+    assert reloaded.arguments is None
+
+
+def test_every_fresh_receipt_construction_site_sets_arguments() -> None:
+    """The forward guarantee lab-defect-fix Unit 1 pins with a test rather
+    than a validator (per the plan's own reasoning: a `schema_version`-tied
+    `model_validator` would encode a migration policy this project does not
+    otherwise have, for a field nothing reads yet): every receipt built
+    *fresh* by this module -- `ledger.reserve`, `ledger.settle` (which
+    carries the reserved receipt's `arguments` forward), and
+    `_denied_receipt` -- always sets `arguments` to a real value, never
+    `None`. Only a receipt round-tripped from a pre-Unit-1 artifact should
+    ever carry `None`, which the test above covers separately."""
+    ledger = ReservationLedger(executed_tools_budget=2)
+    reserved = ledger.reserve(
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        requested_at=WINDOW_START,
+        arguments=logs_proposal().arguments,
+    )
+    assert reserved is not None
+    assert reserved.arguments is not None
+
+    settled = ledger.settle(
+        receipt_id=reserved.receipt_id,
+        outcome=ToolOutcome.EXECUTED,
+        reason_code=None,
+        duration_ms=5,
+        result_digest="digest",
+        evidence_id="evidence-1",
+    )
+    assert settled.arguments is not None
+
+    wrapper = query_logs_wrapper(RecordingLogsBackend())
+    denied = wrapper.dispatch(
+        out_of_scope_proposal(),
+        incident_scope(),
+        set(),
+        Budgets(),
+        ReservationLedger(executed_tools_budget=2),
+        StepClock(),
+    )
+    assert denied.receipt.policy_result is PolicyResult.DENIED
+    assert denied.receipt.arguments is not None
 
 
 def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:

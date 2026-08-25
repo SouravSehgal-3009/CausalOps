@@ -62,6 +62,7 @@ from causalops.tools import (
     QueryLogsArguments,
     QueryMetricArguments,
     SearchRunbooksArguments,
+    ToolArguments,
     ToolName,
 )
 
@@ -142,9 +143,16 @@ class ReservationLedger:
         tool: ToolName,
         fingerprint: str,
         requested_at: datetime,
+        arguments: ToolArguments,
     ) -> ToolReceipt | None:
         """Atomically spend one slot and record a `RESERVED` receipt, or
-        refuse without spending anything if none remain."""
+        refuse without spending anything if none remain.
+
+        `arguments` is the effective (as-dispatched) proposal, required, not
+        defaulted: every real reservation has one, and a caller that omits it
+        should fail at the call site, not produce a receipt silently missing
+        the data lab-defect-fix Unit 1 added this parameter to capture.
+        """
         if self.slots_left() <= 0:
             return None
         receipt = ToolReceipt(
@@ -156,6 +164,7 @@ class ReservationLedger:
             state=ReceiptState.RESERVED,
             requested_at=requested_at,
             duration_ms=0,
+            arguments=arguments,
         )
         self._receipts[receipt.receipt_id] = receipt
         return receipt
@@ -204,6 +213,7 @@ class ReservationLedger:
             duration_ms=duration_ms,
             result_digest=result_digest,
             evidence_id=evidence_id,
+            arguments=current.arguments,
         )
         self._receipts[receipt_id] = settled
         if evidence is not None:
@@ -327,6 +337,7 @@ def _denied_receipt(
         reason_code=reason_code,
         requested_at=clock(),
         duration_ms=0,
+        arguments=proposal.arguments,
     )
     return DispatchResult(receipt=receipt, message=message)
 
@@ -425,6 +436,7 @@ def _make_wrapper[ArgsT: BaseModel](
             tool=proposal.tool,
             fingerprint=decision.fingerprint,
             requested_at=clock(),
+            arguments=proposal.arguments,
         )
         if reserved is None:
             # authorize() was fed ledger.slots_left() directly above, so the

@@ -62,6 +62,7 @@ from causalops.domain import (
     RunbookCheckOutcome,
     ToolOutcome,
     ToolProposal,
+    ToolReceipt,
     utc_now,
 )
 from causalops.evaluation import count_control
@@ -446,6 +447,165 @@ def test_the_graph_does_not_ask_a_third_investigate_turn_after_a_denial(
     assert first.policy_result is PolicyResult.ALLOWED
     assert second.policy_result is PolicyResult.DENIED
     assert second.reason_code is ReasonCode.DUPLICATE_PROPOSAL
+
+
+def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) -> None:
+    """W11 (lab-defect-fix Unit 1). `investigate` writes its
+    `proposal_recorded` event regardless of what `dispatch_tool` later does
+    with the proposal -- a denial's hypotheses, evidence gap, and expected
+    observation must survive even though the check itself never ran. Before
+    this unit a denied turn's reasoning simply vanished, which is precisely
+    how the tool-selection-bias investigation's W1 defect (an incident-
+    window denial costing a run its own proposal, with no evidence-check
+    slot spent to show for it) stayed invisible in `events.jsonl` until a
+    fresh live reproduction was run to find it."""
+    out_of_scope = ToolProposal(
+        arguments=QueryLogsArguments(
+            log_filter=LogFilter.ERRORS_ONLY,
+            service="billing",
+            window_start=incident_scope().started_at,
+            window_end=incident_scope().ended_at,
+            row_limit=20,
+        ),
+        evidence_gap="whether billing logged anything",
+        expected_observation="nothing, billing is out of scope",
+    )
+    script = {
+        "initial_plan": [plan_json(proposal=out_of_scope)],
+        "hypothesis_update": [update_json(stop_reason="nothing safe left to check")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+
+    result, recorder = investigate_via_graph(model)
+
+    (only_receipt,) = result.receipts
+    assert only_receipt.policy_result is PolicyResult.DENIED
+
+    recorded = [event for event in recorder.events if event.name == "proposal_recorded"]
+    # Two `investigate` turns ran (the denial does not spend a check slot, so
+    # `hypothesis_update` is still asked): turn 0 proposed and was denied,
+    # turn 1 gave a stop reason instead.
+    assert len(recorded) == 2
+    first, second = recorded
+    assert first.fields["proposal_turn"] == 0
+    assert first.fields["tool"] == ToolName.QUERY_LOGS.value
+    assert first.fields["evidence_gap"] == "whether billing logged anything"
+    assert first.fields["expected_observation"] == "nothing, billing is out of scope"
+    assert first.fields["arguments"] is not None
+    assert len(first.fields["hypotheses"]) >= 2
+    # A stop-reason turn still has ranked hypotheses to record, but no
+    # proposal-specific fields -- the deliberate scope call from this unit's
+    # pre-edit report.
+    assert second.fields["proposal_turn"] == 1
+    assert second.fields["tool"] is None
+    assert second.fields["evidence_gap"] is None
+    assert second.fields["expected_observation"] is None
+    assert second.fields["arguments"] is None
+    assert len(second.fields["hypotheses"]) >= 2
+
+    denied_event = next(
+        event for event in recorder.events if event.name == "proposal_denied"
+    )
+    assert denied_event.fields["proposal_turn"] == 0
+    assert denied_event.fields["receipt_id"] == only_receipt.receipt_id
+
+
+def test_investigates_own_proposal_turn_matches_dispatch_tools_check_finished_event(
+    tmp_path: Path,
+) -> None:
+    """The plan's own specified acceptance test for the canonical
+    `proposal_turn` convention: for a run with two proposals, each
+    `investigate` turn's own `proposal_recorded.proposal_turn` equals the
+    `proposal_turn` on the `check_finished` event `dispatch_tool` emits for
+    that same proposal, and the two turns differ -- proving this is a real
+    per-turn join, not a coincidence of both reading 0."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [plan_json(proposal=another_logs_proposal())],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+
+    result, recorder = investigate_via_graph(model)
+
+    assert result.report.tools_executed == 2
+    proposal_recorded = [
+        event for event in recorder.events if event.name == "proposal_recorded"
+    ]
+    check_finished = [
+        event for event in recorder.events if event.name == "check_finished"
+    ]
+    assert len(proposal_recorded) == 2
+    assert len(check_finished) == 2
+
+    recorded_turns = [event.fields["proposal_turn"] for event in proposal_recorded]
+    finished_turns = [event.fields["proposal_turn"] for event in check_finished]
+    assert recorded_turns == [0, 1]
+    assert finished_turns == [0, 1]
+    assert recorded_turns[0] != recorded_turns[1]
+
+    first_receipt, second_receipt = result.receipts
+    assert check_finished[0].fields["receipt_id"] == first_receipt.receipt_id
+    assert check_finished[1].fields["receipt_id"] == second_receipt.receipt_id
+    assert first_receipt.arguments == logs_proposal().arguments
+    assert second_receipt.arguments == another_logs_proposal().arguments
+
+
+def test_rebuild_receipts_raises_on_an_incident_id_mismatch() -> None:
+    """W16 (lab-defect-fix Unit 1). A receipt dump reconstructed from a
+    corrupted checkpoint whose `incident_id` disagrees with the thread's own
+    `state["incident_id"]` must raise loudly, never be silently dropped -- a
+    dropped receipt would hand back a check slot that was actually spent.
+    Not a reachable cross-incident leak on any live/replay/resume path
+    (`LAB_DEFECTS_FIX_PLAN.md` §2.2 traces why: `thread_id` *is* the
+    `incident_id`, and every receipt this codebase produces is stamped from
+    that same thread's own state at reserve/deny time) -- this proves the
+    tripwire itself, using a hand-corrupted state dict no real path can
+    produce."""
+    mismatched_receipt = ToolReceipt(
+        receipt_id="receipt-mismatched",
+        incident_id=OTHER_INCIDENT_ID,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        outcome=ToolOutcome.EXECUTED,
+        requested_at=WINDOW_START,
+        duration_ms=5,
+    )
+    state = {
+        "incident_id": incident_scope().incident_id,
+        "receipts": [mismatched_receipt.model_dump(mode="json")],
+    }
+
+    with pytest.raises(AssertionError) as excinfo:
+        graph_module._rebuild_receipts(state)  # type: ignore[arg-type]
+
+    message = str(excinfo.value)
+    assert mismatched_receipt.receipt_id in message
+    assert OTHER_INCIDENT_ID in message
+    assert incident_scope().incident_id in message
+
+
+def test_rebuild_receipts_leaves_matching_receipts_unaffected() -> None:
+    matching_receipt = ToolReceipt(
+        receipt_id="receipt-matching",
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_LOGS,
+        fingerprint="f" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        outcome=ToolOutcome.EXECUTED,
+        requested_at=WINDOW_START,
+        duration_ms=5,
+    )
+    state = {
+        "incident_id": incident_scope().incident_id,
+        "receipts": [matching_receipt.model_dump(mode="json")],
+    }
+
+    receipts = graph_module._rebuild_receipts(state)  # type: ignore[arg-type]
+
+    assert receipts == [matching_receipt]
 
 
 class _RaisingModel:
@@ -1247,11 +1407,23 @@ def test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output(
     tmp_path: Path,
 ) -> None:
     """`test_workflow.py::test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output`,
-    ported. Pins the same actual behavior: a hypothesis citation is never
-    validated against the evidence store, so a forged id inside a
-    hypothesis's own `supporting_evidence_ids`/`contrary_evidence_ids` lives
-    only in that one parsed response and never reaches later context, the
-    report, or a recorded event."""
+    ported, then narrowed by lab-defect-fix Unit 1 (W11). A hypothesis
+    citation is never validated against the evidence store, so a forged id
+    inside a hypothesis's own `supporting_evidence_ids`/`contrary_evidence_ids`
+    must still never reach later model context or the final report -- those
+    two assertions are unchanged from the port.
+
+    What changed under Unit 1, deliberately (owner decision Q3,
+    `LAB_DEFECTS_FIX_PLAN.md` §5): every turn's ranked hypotheses -- forged
+    citations and all, since `Hypothesis` carries no separate sanitized
+    projection -- are now persisted verbatim into that turn's own
+    `proposal_recorded` event, as declared typed data the model submitted
+    under an application-defined schema, not as validated evidence. The
+    forged id legitimately DOES now appear in `events.jsonl`, and this test
+    pins exactly where: once, inside `proposal_recorded`'s own `hypotheses`
+    field, and nowhere else -- in particular never inside a
+    `check_finished`/`proposal_denied` event, which would wrongly imply it
+    was tied to a real, settled check outcome."""
     plan_hypotheses = (
         Hypothesis(
             root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
@@ -1288,8 +1460,15 @@ def test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output(
     for request in model.requests[1:]:
         assert FORGED_HYPOTHESIS_EVIDENCE_ID not in request.context_text
     assert FORGED_HYPOTHESIS_EVIDENCE_ID not in result.report.model_dump_json()
-    recorded = "".join(event.model_dump_json() for event in recorder.events)
-    assert FORGED_HYPOTHESIS_EVIDENCE_ID not in recorded
+
+    carrying = [
+        event
+        for event in recorder.events
+        if FORGED_HYPOTHESIS_EVIDENCE_ID in event.model_dump_json()
+    ]
+    assert [event.name for event in carrying] == ["proposal_recorded"]
+    (only,) = carrying
+    assert FORGED_HYPOTHESIS_EVIDENCE_ID in str(only.fields["hypotheses"])
 
 
 def test_running_out_of_model_calls_fails_safe() -> None:
