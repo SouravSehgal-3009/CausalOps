@@ -157,6 +157,12 @@ def within_window(moment: str, start: datetime, end: datetime) -> bool:
 def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutcome:
     source = "query_logs"
     started = time.monotonic()
+    # The wrapper always resolves a window before run_check is called
+    # (tool_wrappers.resolve_effective_window) -- this is never None in
+    # practice, but the argument model's own fields are typed Optional so
+    # the model can omit them, so mypy needs this stated, not inferred.
+    assert arguments.window_start is not None
+    assert arguments.window_end is not None
     log_file = paths.logs / f"{arguments.service}.jsonl"
     if not log_file.is_file():
         return failed_check(
@@ -262,6 +268,12 @@ def run_changes_check(
 ) -> CheckOutcome:
     source = "list_recent_changes"
     started = time.monotonic()
+    # The wrapper always resolves a window before run_check is called
+    # (tool_wrappers.resolve_effective_window) -- this is never None in
+    # practice, but the argument model's own fields are typed Optional so
+    # the model can omit them, so mypy needs this stated, not inferred.
+    assert arguments.window_start is not None
+    assert arguments.window_end is not None
     loaded = read_json_file(paths.changes_file)
     if not isinstance(loaded, list):
         return failed_check(

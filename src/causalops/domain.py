@@ -146,6 +146,15 @@ class ReasonCode(StrEnum):
     CROSS_INCIDENT_REQUEST = "CROSS_INCIDENT_REQUEST"
     UNKNOWN_SERVICE = "UNKNOWN_SERVICE"
     OUTSIDE_INCIDENT_WINDOW = "OUTSIDE_INCIDENT_WINDOW"
+    # Lab-defect-fix Unit 3, W1. `policy.authorize` denies with this code
+    # when it is handed a proposal whose window has not been resolved
+    # (`window_start`/`window_end` is `None`) -- the ordinary wrapper path
+    # (`tool_wrappers.ToolWrapper.dispatch`) always resolves the window
+    # first via `resolve_effective_window`, so this only fires for a direct
+    # or future caller of `authorize` that skips that step. A denial, not a
+    # crash: the same "make errors actionable" reasoning every other
+    # malformed-input branch in `authorize` already follows.
+    UNRESOLVED_WINDOW = "UNRESOLVED_WINDOW"
     RESULT_LIMIT_EXCEEDED = "RESULT_LIMIT_EXCEEDED"
     DUPLICATE_PROPOSAL = "DUPLICATE_PROPOSAL"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
@@ -493,6 +502,14 @@ class ToolReceipt(BaseModel):
     change here. No `SCHEMA_VERSION` bump: an added optional field breaks no
     reader, the same reasoning `state`'s own addition and `GraphState.model_
     name`'s addition both already used.
+
+    Lab-defect-fix Unit 3, W1: on a denial, this is the wrapper's
+    *resolved* attempt to authorize -- the value it tried to check the
+    model's request against -- not necessarily the value the model wrote
+    verbatim; the as-proposed (raw) window is separately recorded on
+    `investigate`'s own `proposal_recorded` event (lab-defect-fix Unit 1,
+    W11) for the same `proposal_turn`, joinable via `dispatch_tool`'s
+    `proposal_denied` event's own `proposal_turn`/`receipt_id`.
     """
 
     model_config = ConfigDict(frozen=True)

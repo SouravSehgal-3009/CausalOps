@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ from causalops.domain import (
     ToolProposal,
     ToolReceipt,
 )
+from causalops.policy import authorize
 from causalops.prometheus import run_metric_check
 from causalops.telemetry import (
     RunPaths,
@@ -53,6 +55,7 @@ from causalops.tool_wrappers import (
     list_recent_changes_wrapper,
     query_logs_wrapper,
     query_metric_wrapper,
+    resolve_effective_window,
 )
 from causalops.tools import (
     GetTopologyArguments,
@@ -61,6 +64,8 @@ from causalops.tools import (
     MetricTemplate,
     QueryLogsArguments,
     QueryMetricArguments,
+    RunbookTopic,
+    SearchRunbooksArguments,
     ToolName,
 )
 
@@ -170,6 +175,138 @@ def test_a_second_dispatch_past_budget_is_denied_by_authorize_before_reservation
     assert first.receipt.policy_result is PolicyResult.ALLOWED
     assert second.receipt.policy_result is PolicyResult.DENIED
     assert second.receipt.reason_code is ReasonCode.BUDGET_EXHAUSTED
+    assert len(backend.calls) == 1
+
+
+# Lab-defect-fix Unit 3, W1: `resolve_effective_window` itself.
+
+
+def test_a_fully_omitted_window_resolves_to_the_full_scope() -> None:
+    scope = incident_scope()
+    omitted = QueryLogsArguments(
+        log_filter=LogFilter.ERRORS_ONLY, service="orders", row_limit=20
+    )
+
+    resolved = resolve_effective_window(omitted, scope)
+
+    assert resolved.window_start == scope.started_at
+    assert resolved.window_end == scope.ended_at
+
+
+def test_a_window_extending_past_the_end_clamps_only_that_bound() -> None:
+    scope = incident_scope()
+    extends_past_the_end = ListRecentChangesArguments(
+        service="orders",
+        window_start=scope.started_at,
+        window_end=scope.ended_at + timedelta(minutes=5),
+    )
+
+    resolved = resolve_effective_window(extends_past_the_end, scope)
+
+    # The start was already inside scope, and clamping never widens -- only
+    # the end, the bound that was actually out of scope, moves.
+    assert resolved.window_start == scope.started_at
+    assert resolved.window_end == scope.ended_at
+
+
+def test_a_window_entirely_outside_scope_still_denies_after_clamping() -> None:
+    """Clamping only narrows -- it cannot repair a window that never
+    touched the incident at all. Both bounds land on the same scope
+    boundary they were clamped toward, or worse (the end clamps down to
+    `ended_at`, at or before the already-late `started_at` the start
+    clamps up to), producing an inverted effective window that still
+    reaches `authorize`'s existing "ends before it starts" denial -- proof
+    that clamping cannot silently manufacture a valid check out of a
+    proposal that was never in scope."""
+    scope = incident_scope()
+    entirely_after_scope = ListRecentChangesArguments(
+        service="orders",
+        window_start=scope.ended_at + timedelta(hours=1),
+        window_end=scope.ended_at + timedelta(hours=2),
+    )
+
+    resolved = resolve_effective_window(entirely_after_scope, scope)
+
+    assert resolved.window_end <= resolved.window_start
+    decision = authorize(
+        ToolProposal(
+            arguments=resolved,
+            evidence_gap="whether orders changed",
+            expected_observation="nothing, this is out of scope",
+        ),
+        scope,
+        set(),
+        Budgets(),
+        tools_remaining=2,
+    )
+    assert decision.result is PolicyResult.DENIED
+    assert decision.reason_code is ReasonCode.OUTSIDE_INCIDENT_WINDOW
+
+
+def test_resolve_effective_window_is_a_no_op_for_windowless_tools() -> None:
+    """`GetTopologyArguments`/`SearchRunbooksArguments` carry no window at
+    all -- `resolve_effective_window` must return the identical argument
+    object's field values unchanged, not raise or invent one."""
+    scope = incident_scope()
+    topology = GetTopologyArguments(incident_id=scope.incident_id)
+    runbooks = SearchRunbooksArguments(topic=RunbookTopic.GATEWAY_ERRORS, limit=3)
+
+    resolved_topology = resolve_effective_window(topology, scope)
+    resolved_runbooks = resolve_effective_window(runbooks, scope)
+
+    # `is`, not `==`: the no-op branch returns the exact same object,
+    # unchanged -- a stronger proof than value equality that nothing was
+    # rebuilt or copied for a tool with no window to resolve.
+    assert resolved_topology is topology
+    assert resolved_runbooks is runbooks
+
+
+def test_differently_rounded_windows_collide_as_duplicates_once_clamped() -> None:
+    """Lab-defect-fix Unit 3, W1: `authorize` fingerprints the *effective*
+    proposal, computed after `resolve_effective_window` clamps it -- so two
+    raw requests that differ only in a window bound that gets clamped away
+    now correctly collide as the same check, even though their raw
+    arguments are not byte-identical. Before this unit, the fingerprint was
+    computed on the raw (unclamped) arguments and these two would NOT have
+    collided."""
+    scope = incident_scope()
+    backend = RecordingLogsBackend()
+    wrapper = query_logs_wrapper(backend)
+    ledger = ReservationLedger(executed_tools_budget=2)
+    seen: set[str] = set()
+    generously_rounded = ToolProposal(
+        arguments=QueryLogsArguments(
+            log_filter=LogFilter.ERRORS_ONLY,
+            service="orders",
+            window_start=scope.started_at - timedelta(hours=1),
+            window_end=scope.ended_at,
+            row_limit=20,
+        ),
+        evidence_gap="whether orders logged errors",
+        expected_observation="error rows",
+    )
+    differently_rounded = ToolProposal(
+        arguments=QueryLogsArguments(
+            log_filter=LogFilter.ERRORS_ONLY,
+            service="orders",
+            window_start=scope.started_at - timedelta(hours=2),
+            window_end=scope.ended_at,
+            row_limit=20,
+        ),
+        evidence_gap="whether orders logged errors",
+        expected_observation="error rows",
+    )
+
+    first = wrapper.dispatch(
+        generously_rounded, scope, seen, Budgets(), ledger, StepClock()
+    )
+    second = wrapper.dispatch(
+        differently_rounded, scope, seen, Budgets(), ledger, StepClock()
+    )
+
+    assert first.receipt.policy_result is PolicyResult.ALLOWED
+    assert second.receipt.policy_result is PolicyResult.DENIED
+    assert second.receipt.reason_code is ReasonCode.DUPLICATE_PROPOSAL
     assert len(backend.calls) == 1
 
 

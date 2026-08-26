@@ -25,7 +25,7 @@ from causalops.tools import (
     fingerprint,
 )
 
-POLICY_VERSION = "2"
+POLICY_VERSION = "3"
 
 
 class PolicyDecision(BaseModel):
@@ -52,6 +52,19 @@ def authorize(
     budgets: Budgets,
     tools_remaining: int,
 ) -> PolicyDecision:
+    """Decide whether a proposed check may run.
+
+    Lab-defect-fix Unit 3, W1: the ordinary path here is always
+    `tool_wrappers.ToolWrapper.dispatch`, which resolves an omitted or
+    out-of-scope window into the incident's own bounds
+    (`resolve_effective_window`) before ever calling this function -- no
+    call reached through that path can hand this function a `None` window.
+    A caller that bypasses the wrapper (today, only this module's own
+    direct-call unit tests) can still hand this function an unresolved
+    window; that case is refused explicitly with `UNRESOLVED_WINDOW` below,
+    as a denial rather than a crash, so a direct or future caller that skips
+    normalization fails as a policy decision, not a `TypeError`.
+    """
     mark = fingerprint(proposal.arguments)
     # The loop skips a check it cannot afford, so this denial is the boundary
     # guarantee the Investigator tools and policy section asks for, rather than a
@@ -92,14 +105,23 @@ def authorize(
 
     if arguments.service not in scope.services:
         return deny(mark, ReasonCode.UNKNOWN_SERVICE, "that service is out of scope")
-    if (
-        arguments.window_start < scope.started_at
-        or arguments.window_end > scope.ended_at
-    ):
+    window_start = arguments.window_start
+    window_end = arguments.window_end
+    # Lab-defect-fix Unit 3, W1. See this function's own docstring above --
+    # the ordinary (wrapper) path never reaches here with either bound
+    # unresolved; only a direct or future caller that skips normalization
+    # can.
+    if window_start is None or window_end is None:
+        return deny(
+            mark,
+            ReasonCode.UNRESOLVED_WINDOW,
+            "a direct caller must resolve the window before calling authorize",
+        )
+    if window_start < scope.started_at or window_end > scope.ended_at:
         return deny(
             mark, ReasonCode.OUTSIDE_INCIDENT_WINDOW, "that window leaves the incident"
         )
-    if arguments.window_end <= arguments.window_start:
+    if window_end <= window_start:
         return deny(
             mark,
             ReasonCode.OUTSIDE_INCIDENT_WINDOW,

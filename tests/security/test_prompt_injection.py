@@ -225,6 +225,15 @@ def test_policy_denies_an_action_urged_by_a_retrieved_runbook_passage(
     Policy must deny it the same way it denies an injection carried in
     evidence -- retrieval is a second channel for untrusted text into the
     model's context, not a second trust boundary.
+
+    Lab-defect-fix Unit 3/Q2: turn 0's `search_runbooks` call spends a
+    slot, but turn 1's denied `billing_proposal` does not, so with the
+    `model_turn < 2` cap removed one slot and enough model-call headroom
+    both remain after turn 1 and the graph asks a third `HYPOTHESIS_UPDATE`
+    turn. The second scripted `hypothesis_update` response gives a stop
+    reason instead of a further proposal -- irrelevant to what this test
+    checks, which is only that the injected `billing` request itself was
+    denied.
     """
     scope = incident_scope()
     packet = alert_packet()
@@ -236,7 +245,10 @@ def test_policy_denies_an_action_urged_by_a_retrieved_runbook_passage(
             tmp_path,
             {
                 "initial_plan": [plan_json(runbooks_proposal())],
-                "hypothesis_update": [update_json(billing_proposal)],
+                "hypothesis_update": [
+                    update_json(billing_proposal),
+                    update_json(stop_reason="no further check would help"),
+                ],
                 "final_assessment": [assessment_json()],
             },
         )

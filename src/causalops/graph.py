@@ -1491,24 +1491,43 @@ def _make_route_after_normalize(
         if state["failure_reason"] is not None:
             return "final_report"
         receipts = _rebuild_receipts(state)
-        # `workflow.py`'s retired loop called `plan_second_check()` at most
-        # once, from `run()` -- never a third time, regardless of whether the
-        # second proposal was allowed or denied. A denial does not spend a
-        # slot (`ReservationLedger.slots_left()`), so `tools_left()` alone
-        # cannot bound the turn count the way it did in the loop, where there
-        # was structurally no third ask. `investigate` maps every turn past 0
-        # to `HYPOTHESIS_UPDATE` (`graph.py`'s stage mapping), and there is no
-        # third planning stage in the model contract at all -- a phantom
-        # third turn would ask a stage the contract cannot express, not
-        # merely one the loop skipped. `model_turn` is 1 once turn 0's
-        # dispatch has run and 2 once turn 1's has; capping at `< 2`
-        # reproduces the loop's own former bound instead of the budget's
-        # incidental one.
+        # Lab-defect-fix Unit 3, W1/Q2. This router used to cap at
+        # `state["model_turn"] < 2`, reproducing `workflow.py`'s retired loop,
+        # which called `plan_second_check()` at most once regardless of
+        # whether the second proposal was allowed or denied. That bound made
+        # a denial cost a turn permanently: `eda0135b…`'s real incident asked
+        # for `list_recent_changes` first, was denied on a strict window
+        # comparison, and never got a second chance at any check at all. With
+        # Unit 3's window clamp making that class of denial rare rather than
+        # frequent, a denial should no longer be able to consume a run's last
+        # opportunity, so the `< 2` term is dropped.
+        #
+        # `_tools_left(...) > 0` (at most two *executed* checks -- a denial
+        # never spends a slot) and `_model_calls_left(...) >= 2` (at most
+        # four model calls total, with one always reserved for
+        # `final_assessment`: one more for the next `INVESTIGATE` turn, one
+        # for the assessment that must follow it) are both unchanged and
+        # still do all the real bounding -- `>= 2`, not `> 0`, is load-
+        # bearing: a repaired turn consumes two of the four calls
+        # (`_StageCounters.record_call` increments on every attempt,
+        # `_ask_with_repair` calls `ask_once` a second time on a repair), so
+        # weakening it to `> 0` would let a run spend its last call on a
+        # proposal and reach `final_assessment` with nothing left,
+        # `MODEL_CALL_BUDGET_EXHAUSTED` instead of a real disposition.
+        #
+        # `state["model_turn"] < budgets.model_calls` is a new hard backstop,
+        # not a rewritten rule: with the `< 2` term gone, nothing else in
+        # this condition bounds `model_turn` by construction (every
+        # `INVESTIGATE` turn past 0 maps to the same `HYPOTHESIS_UPDATE`
+        # stage, so the model contract itself no longer limits it to two
+        # turns) -- this backstop guarantees the loop still terminates even
+        # if a future budget change ever let `_model_calls_left(...) >= 2`
+        # stay true for more turns than `model_calls` alone would allow.
         if (
-            state["model_turn"] < 2
-            and _tools_left(receipts, budgets) > 0
+            _tools_left(receipts, budgets) > 0
             and _model_calls_left(state["model_calls_used"], budgets) >= 2
             and not _expired(state["started_at"], budgets, clock)
+            and state["model_turn"] < budgets.model_calls
         ):
             return "investigate"
         return "final_assessment"

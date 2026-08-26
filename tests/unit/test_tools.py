@@ -133,3 +133,43 @@ def test_a_different_service_changes_the_fingerprint() -> None:
     assert fingerprint(metric_proposal("gateway").arguments) != fingerprint(
         metric_proposal("orders").arguments
     )
+
+
+def test_an_omitted_window_defaults_to_none_and_round_trips() -> None:
+    """Lab-defect-fix Unit 3, W1. `window_start`/`window_end` became
+    optional so the model can ask for "the incident" without retyping its
+    window verbatim -- `tool_wrappers.resolve_effective_window` is what
+    turns an omitted bound into a real one before dispatch, not this
+    schema. This only proves the schema itself: omitting both fields
+    leaves them `None`, and that `None` survives a JSON round trip rather
+    than being silently coerced into something else."""
+    for arguments in (
+        QueryMetricArguments(
+            template=MetricTemplate.GATEWAY_ERROR_RATE, service="gateway"
+        ),
+        QueryLogsArguments(
+            log_filter=LogFilter.ERRORS_ONLY, service="orders", row_limit=20
+        ),
+        ListRecentChangesArguments(service="orders"),
+    ):
+        assert arguments.window_start is None
+        assert arguments.window_end is None
+        restored = arguments_adapter.validate_json(arguments.model_dump_json())
+        assert restored.window_start is None  # type: ignore[union-attr]
+        assert restored.window_end is None  # type: ignore[union-attr]
+
+
+def test_extra_forbid_still_rejects_an_unknown_field() -> None:
+    """The new optional window fields must not have loosened `extra="forbid"`
+    -- an unrecognized field is still a validation error, not silently
+    dropped, so a model's argument that fails to land is reported as a
+    named repair rather than a quiet partial acceptance (see
+    `QueryMetricArguments`'s own `extra="forbid"` rationale comment)."""
+    with pytest.raises(ValidationError):
+        QueryMetricArguments(
+            template=MetricTemplate.GATEWAY_ERROR_RATE,
+            service="gateway",
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            unknown_field="whatever",  # type: ignore[call-arg]
+        )

@@ -64,6 +64,14 @@ def test_another_incident_is_denied() -> None:
 
 
 def test_a_window_outside_the_incident_is_denied() -> None:
+    """Lab-defect-fix Unit 3, W1: this calls `authorize` directly, the way
+    only this module's own tests and a future caller that skips
+    `tool_wrappers.resolve_effective_window` would -- the ordinary wrapper
+    path always resolves/clamps a window first, so a raw window entirely
+    outside scope like this one never reaches `authorize` that way. This
+    tests `authorize`'s own direct-call contract: a raw, unresolved window
+    it is handed is still denied on its own merits, not a forgery/replay
+    scenario."""
     before = ToolProposal(
         arguments=QueryMetricArguments(
             template=metric_proposal().arguments.template,  # type: ignore[union-attr]
@@ -82,6 +90,10 @@ def test_a_window_outside_the_incident_is_denied() -> None:
 
 
 def test_a_window_that_extends_past_the_incident_is_denied() -> None:
+    """Lab-defect-fix Unit 3, W1: same direct-call contract as the test
+    above -- reached only by bypassing `tool_wrappers.resolve_effective_
+    window`, which would have clamped this window to the incident before
+    `authorize` ever saw it."""
     past_the_end = ToolProposal(
         arguments=QueryMetricArguments(
             template=metric_proposal().arguments.template,  # type: ignore[union-attr]
@@ -100,6 +112,13 @@ def test_a_window_that_extends_past_the_incident_is_denied() -> None:
 
 
 def test_a_backwards_window_is_denied() -> None:
+    """Lab-defect-fix Unit 3, W1: same direct-call contract as the two
+    tests above. Unlike them, a backwards window stays reachable through
+    the ordinary wrapper path too -- clamping narrows but cannot un-invert
+    a window, see `test_a_window_entirely_outside_scope_still_denies_
+    after_clamping` in `test_tool_wrappers.py` -- so this
+    denial is not exclusively a direct-call concern, just tested directly
+    here like its neighbours."""
     backwards = ToolProposal(
         arguments=QueryMetricArguments(
             template=metric_proposal().arguments.template,  # type: ignore[union-attr]
@@ -114,6 +133,49 @@ def test_a_backwards_window_is_denied() -> None:
     assert decide(backwards) == (
         PolicyResult.DENIED,
         ReasonCode.OUTSIDE_INCIDENT_WINDOW,
+    )
+
+
+def test_an_unresolved_start_is_denied_not_raised() -> None:
+    """Lab-defect-fix Unit 3, W1/Q16(i). A direct caller (today, only this
+    module's own tests) can hand `authorize` a proposal whose window was
+    never resolved -- the ordinary `tool_wrappers.ToolWrapper.dispatch`
+    path always resolves both bounds first. `authorize` must refuse this
+    with `UNRESOLVED_WINDOW`, a denial, never a `TypeError` from comparing
+    `None` against a real datetime."""
+    unresolved_start = ToolProposal(
+        arguments=QueryMetricArguments(
+            template=metric_proposal().arguments.template,  # type: ignore[union-attr]
+            service="gateway",
+            window_start=None,
+            window_end=WINDOW_END,
+        ),
+        evidence_gap="latency during the window",
+        expected_observation="a latency rise",
+    )
+
+    assert decide(unresolved_start) == (
+        PolicyResult.DENIED,
+        ReasonCode.UNRESOLVED_WINDOW,
+    )
+
+
+def test_an_unresolved_end_is_denied_not_raised() -> None:
+    """Same contract as the test above, the other bound."""
+    unresolved_end = ToolProposal(
+        arguments=QueryMetricArguments(
+            template=metric_proposal().arguments.template,  # type: ignore[union-attr]
+            service="gateway",
+            window_start=WINDOW_START,
+            window_end=None,
+        ),
+        evidence_gap="latency during the window",
+        expected_observation="a latency rise",
+    )
+
+    assert decide(unresolved_end) == (
+        PolicyResult.DENIED,
+        ReasonCode.UNRESOLVED_WINDOW,
     )
 
 

@@ -259,6 +259,12 @@ def fetch_metric_samples(
     Returns the parsed samples on success, or the failed check outcome to
     return as-is.
     """
+    # The wrapper always resolves a window before run_check is called
+    # (tool_wrappers.resolve_effective_window) -- this is never None in
+    # practice, but the argument model's own fields are typed Optional so
+    # the model can omit them, so mypy needs this stated, not inferred.
+    assert arguments.window_start is not None
+    assert arguments.window_end is not None
     start, end, step = aligned_metric_window(
         arguments.window_start, arguments.window_end
     )

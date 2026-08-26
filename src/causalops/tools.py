@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "2"
+TOOL_REGISTRY_VERSION = "3"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -85,8 +85,23 @@ class QueryMetricArguments(BaseModel):
     tool: Literal[ToolName.QUERY_METRIC] = ToolName.QUERY_METRIC
     template: MetricTemplate
     service: str
-    window_start: UtcDatetime
-    window_end: UtcDatetime
+    # Lab-defect-fix Unit 3, W1. Optional, not required: the model that just
+    # wants "the incident" -- every observed case -- no longer has to
+    # retype the window verbatim. `tool_wrappers.resolve_effective_window`
+    # resolves an omitted bound to the matching scope boundary and narrows
+    # (never widens) a supplied one before dispatch, so a backend or
+    # `authorize()` reached through the ordinary wrapper path never sees
+    # `None` here -- see `policy.authorize`'s own docstring for the direct
+    # (non-wrapper) call contract this optionality also has to cover.
+    window_start: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the start of the incident window when omitted.",
+    )
+    window_end: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the end of the incident window when omitted. "
+        "A window outside the incident is narrowed to fit it.",
+    )
 
 
 class QueryLogsArguments(BaseModel):
@@ -96,8 +111,17 @@ class QueryLogsArguments(BaseModel):
     tool: Literal[ToolName.QUERY_LOGS] = ToolName.QUERY_LOGS
     log_filter: LogFilter
     service: str
-    window_start: UtcDatetime
-    window_end: UtcDatetime
+    # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
+    # above for the full rationale -- identical here.
+    window_start: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the start of the incident window when omitted.",
+    )
+    window_end: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the end of the incident window when omitted. "
+        "A window outside the incident is narrowed to fit it.",
+    )
     # The schema allows a wider range than the budget so that an oversized request
     # is a policy decision with a reason code, not a silent schema rejection.
     row_limit: int = Field(ge=1, le=200)
@@ -109,8 +133,17 @@ class ListRecentChangesArguments(BaseModel):
 
     tool: Literal[ToolName.LIST_RECENT_CHANGES] = ToolName.LIST_RECENT_CHANGES
     service: str
-    window_start: UtcDatetime
-    window_end: UtcDatetime
+    # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
+    # above for the full rationale -- identical here.
+    window_start: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the start of the incident window when omitted.",
+    )
+    window_end: UtcDatetime | None = Field(
+        default=None,
+        description="Defaults to the end of the incident window when omitted. "
+        "A window outside the incident is narrowed to fit it.",
+    )
 
 
 class GetTopologyArguments(BaseModel):

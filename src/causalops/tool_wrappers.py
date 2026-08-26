@@ -34,7 +34,7 @@ is Milestone 2's job, once graph state is checkpointed to SQLite.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Self
+from typing import Self, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -319,6 +319,60 @@ class ToolWrapper:
             )
 
 
+def resolve_effective_window[ArgsT: BaseModel](
+    arguments: ArgsT, scope: IncidentScope
+) -> ArgsT:
+    """Clamp a proposed window into the incident's own scope, defaulting an
+    omitted bound to the corresponding scope boundary.
+
+    A no-op for `GetTopologyArguments`/`SearchRunbooksArguments`, which carry
+    no window at all -- `policy.py`'s own branches for both return before
+    ever reading a window field, for the same reason.
+
+    Clamping only ever *narrows*: `max()` on the start, `min()` on the end,
+    so it cannot escape `scope`. A window entirely outside `scope`, or one
+    that inverts once clamped, still reaches `authorize`'s existing
+    `OUTSIDE_INCIDENT_WINDOW` denial -- clamping cannot repair either shape,
+    only narrow a window that was already inside or overlapping scope.
+
+    Generic over `ArgsT`, matching `_make_wrapper`'s own type parameter:
+    `dispatch` below must assign this function's result to a local variable
+    and pass *that* to `run_check`, never re-read it off a `model_copy`'d
+    `ToolProposal` -- `ToolProposal.arguments` is statically typed as the
+    `ToolArguments` union, so a value read back through it has lost this
+    function's own `ArgsT` narrowing even though the object underneath is
+    unchanged.
+
+    The `cast` on the final return is a real, deliberate mypy workaround,
+    not a suppressed error: after the `isinstance` check below, `arguments`
+    is narrowed to the *union* of the three window-carrying argument
+    classes, not preserved as the caller's own `ArgsT` -- `model_copy()`
+    (via pydantic's `Self`) then returns that narrowed union type, which
+    mypy will not accept back as `ArgsT` even though every member of the
+    union both satisfies `ArgsT`'s bound and is exactly the type `arguments`
+    already was on entry. Confirmed by removing the `cast` and running
+    `mypy --strict` directly: it fails with exactly this return-type
+    mismatch, not a false alarm.
+    """
+    if not isinstance(
+        arguments,
+        (QueryMetricArguments, QueryLogsArguments, ListRecentChangesArguments),
+    ):
+        return arguments
+    effective_start = max(arguments.window_start or scope.started_at, scope.started_at)
+    effective_end = min(arguments.window_end or scope.ended_at, scope.ended_at)
+    # model_copy bypasses validation, unlike normal construction -- safe
+    # here only because both bounds are already-validated UtcDatetime
+    # values being reassigned unchanged in shape, never re-parsed from a
+    # new source.
+    return cast(
+        ArgsT,
+        arguments.model_copy(
+            update={"window_start": effective_start, "window_end": effective_end}
+        ),
+    )
+
+
 def _denied_receipt(
     proposal: ToolProposal,
     scope: IncidentScope,
@@ -366,18 +420,21 @@ def _make_wrapper[ArgsT: BaseModel](
 
     `arguments_type` narrows `proposal.arguments` -- a `ToolArguments` union
     member -- down to `ArgsT` for the `isinstance` check below, and that
-    narrowing is what lets `run_check(proposal.arguments, scope)` type-check
-    under `mypy --strict`: `ArgsT` is inferred once, consistently, from both
-    `arguments_type` and `run_check`'s own parameter type, so a factory call
-    that pairs the wrong backend with the wrong argument type is a `mypy`
-    error, not a runtime one. That binding is only between `arguments_type`
-    and `run_check` -- `tool` is a plain `ToolName` with no type relationship
-    to either, so mypy cannot catch a factory call where `tool` itself
-    disagrees with `arguments_type` (`_make_wrapper(ToolName.GET_TOPOLOGY,
-    QueryLogsArguments, run_logs)` type-checks fine). The error message below
-    names what this wrapper instance actually expects and actually got,
-    never `tool`, so it stays informative even under that kind of
-    construction-time mismatch.
+    narrowing is what lets `resolve_effective_window(proposal.arguments,
+    scope)` type-check under `mypy --strict`, assigning its result to the
+    local `effective_arguments` that `run_check` is actually given (see
+    `resolve_effective_window`'s own docstring for why it must be that local
+    variable, not `effective_proposal.arguments`): `ArgsT` is inferred once,
+    consistently, from both `arguments_type` and `run_check`'s own parameter
+    type, so a factory call that pairs the wrong backend with the wrong
+    argument type is a `mypy` error, not a runtime one. That binding is only
+    between `arguments_type` and `run_check` -- `tool` is a plain `ToolName`
+    with no type relationship to either, so mypy cannot catch a factory call
+    where `tool` itself disagrees with `arguments_type`
+    (`_make_wrapper(ToolName.GET_TOPOLOGY, QueryLogsArguments, run_logs)`
+    type-checks fine). The error message below names what this wrapper
+    instance actually expects and actually got, never `tool`, so it stays
+    informative even under that kind of construction-time mismatch.
 
     Unit 3a widens `run_check`'s return type to `CheckOutcome |
     RunbookCheckOutcome` -- this factory is shared by all five registered
@@ -412,16 +469,32 @@ def _make_wrapper[ArgsT: BaseModel](
                 f"{tool.value} wrapper expects {arguments_type.__name__}, "
                 f"got {type(proposal.arguments).__name__}"
             )
+        # Lab-defect-fix Unit 3, W1. `effective_arguments` stays the local,
+        # `ArgsT`-narrowed variable `resolve_effective_window` returned --
+        # `effective_proposal.arguments` below is the same value but
+        # statically widened back to the `ToolArguments` union by
+        # `ToolProposal`'s own field type, so `run_check` and
+        # `ledger.reserve` are given the local variable, never read back off
+        # `effective_proposal`. See `resolve_effective_window`'s own
+        # docstring.
+        effective_arguments = resolve_effective_window(proposal.arguments, scope)
+        effective_proposal = proposal.model_copy(
+            update={"arguments": effective_arguments}
+        )
         decision = authorize(
-            proposal, scope, seen_fingerprints, budgets, ledger.slots_left()
+            effective_proposal, scope, seen_fingerprints, budgets, ledger.slots_left()
         )
         # A fingerprint is marked seen whether the decision allows or denies
         # it, matching the retired loop's own order: a denial is not a reason
-        # to let the same proposal be retried.
+        # to let the same proposal be retried. `authorize` fingerprints the
+        # *effective* proposal, so two differently-rounded raw requests for
+        # the same effective window now correctly collide as
+        # `DUPLICATE_PROPOSAL` -- a semantic change from before this unit,
+        # covered by its own test.
         seen_fingerprints.add(decision.fingerprint)
         if decision.result is PolicyResult.DENIED:
             result = _denied_receipt(
-                proposal,
+                effective_proposal,
                 scope,
                 decision.fingerprint,
                 decision.reason_code,
@@ -433,10 +506,10 @@ def _make_wrapper[ArgsT: BaseModel](
 
         reserved = ledger.reserve(
             incident_id=scope.incident_id,
-            tool=proposal.tool,
+            tool=effective_proposal.tool,
             fingerprint=decision.fingerprint,
             requested_at=clock(),
-            arguments=proposal.arguments,
+            arguments=effective_arguments,
         )
         if reserved is None:
             # authorize() was fed ledger.slots_left() directly above, so the
@@ -450,7 +523,7 @@ def _make_wrapper[ArgsT: BaseModel](
             )
 
         outcome = run_check(  # not caught -- see module docstring
-            proposal.arguments, scope
+            effective_arguments, scope
         )
 
         if isinstance(outcome, RunbookCheckOutcome):

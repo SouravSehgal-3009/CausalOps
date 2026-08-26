@@ -128,6 +128,37 @@ six `dispatch_events(...)` literals moved, gaining `proposal_turn`/
 `receipt_id` on their `proposal_denied`/`check_finished` entries, with
 values read directly off each scenario's own already-deterministic id
 sequence (`_install_counting_ids` below) rather than guessed.
+
+**Lab-defect-fix Unit 3 (W1/Q2) moves every `final_context_digest` literal
+below a fourth time, moves the hardcoded `Versions` literal in
+`assert_report_matches_frozen`, and changes the stage sequence and
+`model_calls_used` for two of the five scenarios.** `SYSTEM_TEXT`
+(`prompts.py`) gained one sentence on the window-clamp contract, so
+`system_text` -- identical across every stage in every scenario here and
+feeding directly into `_render_stage_request`'s digest -- shifts every
+digest in this file again, the same mechanism as the three notes above.
+`TOOL_REGISTRY_VERSION` and `POLICY_VERSION` both bumped too (`tools.py`'s
+window fields became optional; `policy.py` gained the `UNRESOLVED_WINDOW`
+guard), so `assert_report_matches_frozen`'s hardcoded `Versions(...)`
+literal now reads `"3"`/`"3"`/`"3"` instead of `"2"`/`"2"`/`"2"`.
+
+Separately, and not a digest effect: `route_after_normalize` dropped its
+`model_turn < 2` term (Q2), so a denial that spends no check slot no longer
+caps an investigation at two `INVESTIGATE` turns by itself -- only running
+out of check slots, model-call headroom, wall clock, or `budgets.
+model_calls` turns does. Two of the five scenarios below (`after_a_first_
+turn_denial`, `after_a_repeated_proposal`) reach turn 1 with a check slot
+and model-call headroom still free (turn 1's own proposal is `ALLOWED` but
+comes back `TOOL_UNAVAILABLE`/is a duplicate denial -- neither spends the
+one slot the OTHER of the pair already used), so the graph now asks a real
+third `HYPOTHESIS_UPDATE` turn where it previously stopped; both scripts
+gained a second `hypothesis_update` response (a stop reason, so no new
+dispatch event) to answer it, `model_calls_used` moved from 3 to 4 for
+both, and their `[request.stage.value for ...]` literal gained a second
+`"hypothesis_update"` entry. Confirmed by running the suite before and
+after: `receipt_ids`/`evidence_ids`/`dispatch_events(...)` are unaffected
+for both -- the added turn produces no proposal, so it mints no receipt or
+evidence id and stamps no new dispatch event.
 """
 
 from pathlib import Path
@@ -473,9 +504,9 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="2",
-        policy_version="2",
-        tool_registry_version="2",
+        prompt_version="3",
+        policy_version="3",
+        tool_registry_version="3",
     )
 
 
@@ -510,7 +541,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "22b26c0e134a42d239391bf3d3bade7a077a6bcaf69b0165f02e5f2fb122c6e3"
+            "37c62323d4ef7c73b8a9ee9b4a60168542f1a0ad448c7076229865fe85afa363"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -548,11 +579,23 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
     """P1-1's regression, pinned at the orchestrator level: an out-of-scope
     proposal on turn 0, denied, still permits a second turn --
     `plan_second_check()`'s graph equivalent gates on whether turn 0
-    *proposed* something, not on whether it was *allowed*."""
+    *proposed* something, not on whether it was *allowed*.
+
+    Lab-defect-fix Unit 3/Q2: turn 1's proposal is `ALLOWED` (it spends a
+    slot even though its outcome comes back `TOOL_UNAVAILABLE`, since
+    `ReservationLedger.slots_left()` counts by `policy_result`, not
+    `outcome`), but a slot and model-call headroom both still remain
+    afterward with `model_turn < 2` gone, so the graph now asks a third
+    `HYPOTHESIS_UPDATE` turn. The added response gives a stop reason, which
+    adds a fourth model call but no new dispatch event (no proposal to
+    dispatch that turn)."""
     paths = RunPaths(root=tmp_path)
     script = {
         "initial_plan": [plan_json(proposal=out_of_scope_logs_proposal())],
-        "hypothesis_update": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [
+            plan_json(proposal=logs_proposal()),
+            plan_json(stop_reason="nothing safe left to check"),
+        ],
         "final_assessment": [assessment_json()],
     }
     graph_model = ReplayToolCallingModel(replay_model(tmp_path, script))
@@ -562,6 +605,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
     assert [request.stage.value for request in graph_model.requests] == [
         "initial_plan",
         "hypothesis_update",
+        "hypothesis_update",
         "final_assessment",
     ]
     assert_report_matches_frozen(
@@ -569,11 +613,11 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         disposition=Disposition.DIAGNOSED,
         root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
         tools_executed=1,
-        model_calls_used=3,
+        model_calls_used=4,
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
+            "8b076bed78e3d1ad50d21d623ebeb6b322cccc15202861d4358b833f09dd287f"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -615,13 +659,24 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
 ) -> None:
     """P1-1's other regression, pinned at the orchestrator level: the same
     proposal scripted verbatim for both turns. Turn 0 executes; turn 1's
-    proposal fingerprints identically and is denied as a duplicate rather
-    than the router asking a phantom third turn."""
+    proposal fingerprints identically and is denied as a duplicate.
+
+    Lab-defect-fix Unit 3/Q2: with `model_turn < 2` gone, one duplicate
+    denial (no slot spent) no longer stops the run at two turns as long as
+    a slot and model-call headroom remain -- the router asks a third
+    `HYPOTHESIS_UPDATE` turn rather than the phantom-third-turn concern this
+    test's own name once referred to (`route_after_normalize`'s job now is
+    to bound genuine additional turns, not to forbid a third ask outright).
+    The added response gives a stop reason, adding a fourth model call but
+    no new dispatch event."""
     paths = RunPaths(root=tmp_path)
     repeated = logs_proposal()
     script = {
         "initial_plan": [plan_json(proposal=repeated)],
-        "hypothesis_update": [plan_json(proposal=repeated)],
+        "hypothesis_update": [
+            plan_json(proposal=repeated),
+            plan_json(stop_reason="nothing safe left to check"),
+        ],
         "final_assessment": [assessment_json()],
     }
     graph_model = ReplayToolCallingModel(replay_model(tmp_path, script))
@@ -631,6 +686,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
     assert [request.stage.value for request in graph_model.requests] == [
         "initial_plan",
         "hypothesis_update",
+        "hypothesis_update",
         "final_assessment",
     ]
     assert_report_matches_frozen(
@@ -638,11 +694,11 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         disposition=Disposition.DIAGNOSED,
         root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
         tools_executed=1,
-        model_calls_used=3,
+        model_calls_used=4,
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "68703b6b40ec851914ea1c09257d2aaf92d4f1e710a5b74e0f8514fe45cb8716"
+            "8b076bed78e3d1ad50d21d623ebeb6b322cccc15202861d4358b833f09dd287f"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -712,7 +768,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "b244c408007a5e5c90880fc64ea3e322619f7cdb481cec12bcba8d25767c44fa"
+            "998b9a567cd70f10c41617b7e73e3cae67d6ba336f3a445e7e50765a93227c4e"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -769,7 +825,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
+            "c86f559b02a0e47292a9e17ce87b27c1ae754f3c55b71ab8bca9a59f8917edc3"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -870,7 +926,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "eb00b02b0f997b5e5debdd71847c901786f709b885513ec75284670d5a942c83"
+            "c86f559b02a0e47292a9e17ce87b27c1ae754f3c55b71ab8bca9a59f8917edc3"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

@@ -1,4 +1,5 @@
 import dataclasses
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -8,6 +9,7 @@ from fake_incident import (
     SYMPTOM_EVIDENCE_ID,
     WINDOW_END,
     WINDOW_START,
+    RecordingChangesBackend,
     RecordingLogsBackend,
     RecordingMetricBackend,
     RecordingRunbooksBackend,
@@ -15,6 +17,7 @@ from fake_incident import (
     UsageReportingModel,
     alert_packet,
     assessment_json,
+    changes_proposal,
     incident_scope,
     logs_only_registry,
     logs_proposal,
@@ -80,7 +83,12 @@ from causalops.run_records import RunRecorder
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.tool_calls import NativeToolCall
 from causalops.tool_wrappers import ToolWrapper, query_logs_wrapper
-from causalops.tools import LogFilter, QueryLogsArguments, ToolName
+from causalops.tools import (
+    ListRecentChangesArguments,
+    LogFilter,
+    QueryLogsArguments,
+    ToolName,
+)
 from network_guard import NetworkAccessRefused
 
 GRAPH_FIXTURE = FIXTURE_DIR / "graph_single_check.json"
@@ -414,23 +422,37 @@ def test_a_denied_proposal_never_reaches_the_backend_through_the_graph(
     assert backend.calls == []
 
 
-def test_the_graph_does_not_ask_a_third_investigate_turn_after_a_denial(
+def test_a_duplicate_denial_still_leaves_the_investigation_its_second_check(
     tmp_path: Path,
 ) -> None:
-    """P1-1's regression test. The now-retired `workflow.py`'s loop called
-    `plan_second_check()` at most once, from `run()`, regardless of whether
-    the second proposal was allowed or denied -- there was no third ask,
-    because `investigate()`'s own stage mapping has no third stage to ask
-    (turn >= 1 always means `HYPOTHESIS_UPDATE`). A denial does not spend a
-    slot (`ReservationLedger.slots_left()`), so a router bounded only by
-    `tools_left()`/`model_calls_left()` would loop for a phantom third turn
-    here, exhausting this fixture's single scripted `hypothesis_update`
-    response. `model_turn < 2` in `route_after_normalize` is what prevents
-    that."""
+    """P1-1's original regression test, superseded by lab-defect-fix Unit 3
+    (W1/Q2): the now-retired `workflow.py`'s loop called `plan_second_check()`
+    at most once, from `run()`, regardless of whether the second proposal
+    was allowed or denied -- there was no third ask. `route_after_normalize`
+    reproduced that with a `model_turn < 2` cap, which meant a *denied*
+    second turn permanently cost the investigation its only remaining
+    check -- exactly what happened in the real incident `eda0135b…`, whose
+    first-ever proposal was denied and which never got another chance at
+    any evidence at all.
+
+    Unit 3 drops the `< 2` term (Q2): a denial does not spend a check slot
+    (`ReservationLedger.slots_left()`), so as long as budget remains the
+    graph now asks a further `HYPOTHESIS_UPDATE` turn after a denial rather
+    than stopping. This test's own point flips with it: instead of proving
+    a denial truncates the investigation, it now proves a denial does NOT --
+    turn 0 is allowed, turn 1 repeats the same proposal and is denied as a
+    duplicate (no slot spent), and turn 2 -- the investigation's real second
+    check -- gets a fresh, distinct proposal that is allowed. Four model
+    requests, not three; three receipts (allowed, denied, allowed), not
+    two."""
     repeated = logs_proposal()
+    fresh = another_logs_proposal()
     script = {
         "initial_plan": [plan_json(proposal=repeated)],
-        "hypothesis_update": [plan_json(proposal=repeated)],
+        "hypothesis_update": [
+            plan_json(proposal=repeated),
+            plan_json(proposal=fresh),
+        ],
         "final_assessment": [assessment_json()],
     }
     model = ReplayToolCallingModel(replay_model(tmp_path, script))
@@ -440,13 +462,131 @@ def test_the_graph_does_not_ask_a_third_investigate_turn_after_a_denial(
     assert [request.stage.value for request in model.requests] == [
         "initial_plan",
         "hypothesis_update",
+        "hypothesis_update",
         "final_assessment",
     ]
     assert result.report.disposition is Disposition.DIAGNOSED
-    first, second = result.receipts
+    first, second, third = result.receipts
     assert first.policy_result is PolicyResult.ALLOWED
     assert second.policy_result is PolicyResult.DENIED
     assert second.reason_code is ReasonCode.DUPLICATE_PROPOSAL
+    assert third.policy_result is PolicyResult.ALLOWED
+
+
+def test_two_denied_first_proposals_still_leave_the_model_a_third_chance_to_check(
+    tmp_path: Path,
+) -> None:
+    """Reproduces the shape of the real incident `eda0135b…`: a proposal
+    denied on its very first turn must not be the investigation's last word.
+    Two DISTINCT proposals are denied in a row -- turns 0 and 1, windows
+    entirely outside the incident on opposite sides of it, so neither
+    collides with the other as a `DUPLICATE_PROPOSAL` -- and a genuinely
+    in-scope third proposal at turn 2 is still allowed and executed. Neither
+    denial spends a check slot, so only 1 of the default 2 `executed_tools`
+    slots is ever spent; the run still reaches a real disposition, not
+    `FAILED_SAFE`."""
+    scope = incident_scope()
+    before_scope = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="orders",
+            window_start=scope.started_at - timedelta(hours=1),
+            window_end=scope.started_at - timedelta(minutes=30),
+        ),
+        evidence_gap="whether orders changed before the incident window",
+        expected_observation="no change, this window predates the incident",
+    )
+    after_scope = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="inventory",
+            window_start=scope.ended_at + timedelta(minutes=30),
+            window_end=scope.ended_at + timedelta(hours=1),
+        ),
+        evidence_gap="whether inventory changed after the incident window",
+        expected_observation="no change, this window postdates the incident",
+    )
+    script = {
+        "initial_plan": [plan_json(proposal=before_scope)],
+        "hypothesis_update": [
+            plan_json(proposal=after_scope),
+            plan_json(proposal=changes_proposal()),
+        ],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_changes=RecordingChangesBackend())
+
+    result, _ = investigate_via_graph(model, registry=registry)
+
+    assert [request.stage.value for request in model.requests] == [
+        "initial_plan",
+        "hypothesis_update",
+        "hypothesis_update",
+        "final_assessment",
+    ]
+    first, second, third = result.receipts
+    assert first.policy_result is PolicyResult.DENIED
+    assert first.reason_code is ReasonCode.OUTSIDE_INCIDENT_WINDOW
+    assert second.policy_result is PolicyResult.DENIED
+    assert second.reason_code is ReasonCode.OUTSIDE_INCIDENT_WINDOW
+    assert third.policy_result is PolicyResult.ALLOWED
+    assert result.report.disposition is Disposition.DIAGNOSED
+    assert result.report.tools_executed == 1
+
+
+def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
+    tmp_path: Path,
+) -> None:
+    """Builds on the fixture above: two denials plus one allowed check
+    consume 3 of the default 4 model calls before `FINAL_ASSESSMENT` is
+    even asked, leaving that stage exactly one call and zero repair
+    headroom (`_StageCounters.may_repair` requires
+    `_model_calls_left(...) > 0` AFTER the attempt that already failed is
+    counted, which it is not once the fourth call itself has run). A
+    malformed `FINAL_ASSESSMENT` response must still terminate cleanly
+    through the existing `REPAIR_EXHAUSTED` path, not crash and not attempt
+    a fifth (repair) call it has no budget left to make."""
+    scope = incident_scope()
+    before_scope = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="orders",
+            window_start=scope.started_at - timedelta(hours=1),
+            window_end=scope.started_at - timedelta(minutes=30),
+        ),
+        evidence_gap="whether orders changed before the incident window",
+        expected_observation="no change, this window predates the incident",
+    )
+    after_scope = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="inventory",
+            window_start=scope.ended_at + timedelta(minutes=30),
+            window_end=scope.ended_at + timedelta(hours=1),
+        ),
+        evidence_gap="whether inventory changed after the incident window",
+        expected_observation="no change, this window postdates the incident",
+    )
+    malformed_assessment = assessment_json()
+    del malformed_assessment["disposition"]
+    script = {
+        "initial_plan": [plan_json(proposal=before_scope)],
+        "hypothesis_update": [
+            plan_json(proposal=after_scope),
+            plan_json(proposal=changes_proposal()),
+        ],
+        "final_assessment": [malformed_assessment],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with(run_changes=RecordingChangesBackend())
+
+    result, _ = investigate_via_graph(model, registry=registry)
+
+    assert [request.stage.value for request in model.requests] == [
+        "initial_plan",
+        "hypothesis_update",
+        "hypothesis_update",
+        "final_assessment",
+    ]
+    assert result.report.reason_code is ReasonCode.REPAIR_EXHAUSTED
+    assert result.report.model_calls_used == 4
 
 
 def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) -> None:
@@ -1885,10 +2025,23 @@ def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
     that is set (`route_after_investigate`/`route_after_normalize`/
     `route_after_final_assessment`'s shared `if state["failure_reason"] is
     not None: return "final_report"` guard). Forcing that state here would
-    mean fabricating a receipt shape the graph itself cannot produce."""
+    mean fabricating a receipt shape the graph itself cannot produce.
+
+    Lab-defect-fix Unit 3/Q2: turn 0's denial spends no check slot, so with
+    the `model_turn < 2` cap removed, one allowed check at turn 1 still
+    leaves both a check slot and model-call headroom, and the graph asks a
+    third `HYPOTHESIS_UPDATE` turn rather than going straight to
+    `FINAL_ASSESSMENT`. The second scripted `hypothesis_update` response
+    gives a stop reason instead of a third proposal -- the investigation has
+    what it needs -- which is what this test's own point (a denial must not
+    manufacture an escalation) already required regardless of how many
+    turns it takes to reach `FINAL_ASSESSMENT`."""
     script = {
         "initial_plan": [plan_json(proposal=runbooks_proposal(limit=6))],
-        "hypothesis_update": [update_json(proposal=logs_proposal())],
+        "hypothesis_update": [
+            update_json(proposal=logs_proposal()),
+            update_json(stop_reason="one check was enough"),
+        ],
         "final_assessment": [assessment_json()],
     }
     model = ReplayToolCallingModel(replay_model(tmp_path, script))

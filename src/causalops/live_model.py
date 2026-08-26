@@ -209,7 +209,7 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     The provider tool name selects the internal argument variant, so the
     duplicate internal `tool` discriminator is deliberately not exposed.
 
-    This is the mechanical reason the emitted schema payload is 12,011
+    This is the mechanical reason the emitted schema payload is 12,824
     tokens (`_send`'s own comment pins the exact figure): Anthropic tool
     schemas are self-contained, with no cross-tool `$ref`, so each of the
     five loop iterations below embeds its own full copy of
@@ -543,7 +543,7 @@ class LiveClaudeModel:
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
         # binds `_stop_tool_definition()` plus the five `_domain_tool_
-        # definitions()`, 12,011 tokens in the current emitted schema;
+        # definitions()`, 12,824 tokens in the current emitted schema;
         # `respond()` binds only `_final_assessment_tool_definition()`,
         # 2,292 tokens in the current emitted schema.
         # `test_live_model.py` pins both figures separately, so this

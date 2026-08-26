@@ -241,12 +241,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the current ~12,011-token tool schema `bind_tools`
+    against prose alone, never the current ~12,824-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~12,011" restates
+    the pinned, directly-measured figure this comment's "~12,824" restates
     in prose."""
     model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
@@ -333,11 +333,17 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 12_011
+    # Lab-defect-fix Unit 3, W1: `QueryMetricArguments`/`QueryLogsArguments`/
+    # `ListRecentChangesArguments` each gained two optional window fields
+    # with their own descriptions, so the emitted schema grew from 12,011 to
+    # 12,824 bytes -- not a drift, the mechanical cost of Q1's window
+    # contract, five-fold-duplicated the same way `_domain_tool_definitions`'s
+    # own docstring already explains for `HypothesesRecord`'s schema.
+    assert len(payload) == 12_824
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 12_011
+    assert estimate_input_tokens(payload) == 12_824
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
@@ -429,10 +435,14 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
 
-    assert len(total) == 1_392
+    # Lab-defect-fix Unit 3, W1: `SYSTEM_TEXT` gained one sentence stating
+    # the window default/clamp contract, so this prose figure moved from
+    # 1,392 to 1,561 -- the same mechanism `test_graph_frozen_reports.py`'s
+    # own module docstring already documents for `final_context_digest`.
+    assert len(total) == 1_561
     # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 1_392
+    assert estimate_input_tokens(total) == 1_561
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
