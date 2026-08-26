@@ -3506,16 +3506,23 @@ W12 makes `scenario_control.py::write_json` atomic (temp file + `Path.replace`, 
 pattern `run_records.py::write_jsonl` already uses) and widens
 `lab/services/service.py::read_lab_config`'s `try` to catch a malformed parse alongside a
 missing file. Both harden against a torn read on `lab/config.json` while a live request
-reads it concurrently with a scenario-start write — reproduced under induced contention
-(65% torn reads out of ~31,000), not observed under the shipped sequential
-`drive_traffic`, which never has a request in flight while the config swap happens.
+reads it concurrently with a scenario-start write — reproduced reliably by this unit's
+own `test_write_json_never_exposes_a_torn_read_under_concurrent_reads` test, not
+observed under the shipped sequential `drive_traffic`, which never has a request in
+flight while the config swap happens.
 
 W15 (metric/pool state accumulating across incidents) stays a documented operational
-step, not a code change: restart the lab services between evaluation batches to clear
-each service's in-process Prometheus registry and `LeakyPool` state — `causalops lab
-down` followed by `causalops lab up` (or `docker compose -f lab/docker-compose.yml
-restart`) accomplishes this; Prometheus itself keeps everything already scraped, so a
-restart does not lose stored history, only the exporter's own in-process state.
+step, not a code change: restart the three application services between evaluation
+batches to clear each service's in-process Prometheus registry and `LeakyPool` state —
+`docker compose -f lab/docker-compose.yml restart gateway orders inventory` accomplishes
+this without touching the `prometheus` container. This scoping is deliberate, not
+incidental: `prometheus`'s own TSDB has no volume mount in `lab/docker-compose.yml`
+(only its config file is mounted, read-only), so its scraped history lives entirely in
+that container's writable layer — restarting or recreating *that* container (a bare
+`causalops lab down`/`lab up`, or a `restart` naming it) would discard everything
+already scraped, defeating W13's own retention work. Restarting only the three
+application services clears exactly the state W15 targets while leaving Prometheus's
+container, and its history, untouched.
 
 ## Superseded v1 evaluation design
 
