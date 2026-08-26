@@ -412,11 +412,12 @@ class EvaluationSummary(BaseModel):
     # `TECHNICAL_SPEC.md` §10 lists "citation validity and citation
     # sufficiency against required-evidence predicates" as its own required
     # mechanical score, alongside diagnosis/disposition -- these were
-    # missing entirely before this fix. Counted the same way as
-    # `diagnosis_correct_count`/`disposition_correct_count` above: each is a
-    # per-record boolean (`MechanicalScores.citations_valid`/
-    # `citations_sufficient`), so a batch total is the same kind of number,
-    # not a min/max range.
+    # missing entirely before this fix. `citations_valid_count` is counted
+    # the same way as `diagnosis_correct_count`/`disposition_correct_count`
+    # above: a simple per-record boolean sum of `MechanicalScores.
+    # citations_valid`, so a batch total is the same kind of number, not a
+    # min/max range. `citations_sufficient_count` below is not counted the
+    # same way -- see its own comment.
     citations_valid_count: int
     # `citations_sufficient_count` is how many records had a predicate to
     # check (`record.expected.predicates` non-empty) AND scored `True`.
