@@ -174,6 +174,21 @@ proposes `list_recent_changes` or reaches `FINAL_ASSESSMENT` with a
 `CONFIG_CHANGE` root cause other than the two already-`CONFIG_CHANGE`
 scenarios' existing frozen output, so stage sequence, ids, disposition,
 receipt shapes, evidence kinds, and event vocabulary are all unaffected.
+
+**A Codex review round on Unit 4 found the sentence above still let a
+resource-pool or downstream-timeout condition triggered by a
+configuration change be mislabeled `CONFIG_CHANGE`, since "proximate
+reason requests are failing" alone did not say which of two competing
+readings wins when a config change caused a still-live pool/timeout
+condition.** `SYSTEM_TEXT` was rewritten to state the priority
+explicitly: the more specific label wins whenever its own evidence is
+present, and `CONFIG_CHANGE` applies only when no more specific label
+fits. This moves every `final_context_digest` literal below a sixth
+time and `assert_report_matches_frozen`'s `prompt_version="4"` (now
+`"5"`), and nothing else -- confirmed the same way as every prior round:
+`POLICY_VERSION`/`TOOL_REGISTRY_VERSION` stay `"3"`/`"3"`, and no
+scenario below changes stage sequence, ids, disposition, receipt shapes,
+evidence kinds, or event vocabulary.
 """
 
 from pathlib import Path
@@ -519,7 +534,7 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="4",
+        prompt_version="5",
         policy_version="3",
         tool_registry_version="3",
     )
@@ -556,7 +571,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "8355fcf2e872886717658c8386bdf1f9e3d410c27c7f60ac4de827190036fe33"
+            "bc0d229be4f04e14a6a735879f0c257882b72fe799ba34d16c48ab3ee5da255f"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -632,7 +647,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "7b77e0c2fcb83f4b2a5d3b4e1b0ee3a7da1571dd619f7cf7c8dd927d66f6f1e4"
+            "f057cde86d48a70e53d182d17cb9b5c7e6b40e5371637e80bf55d53bb86e38d6"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -713,7 +728,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "7b77e0c2fcb83f4b2a5d3b4e1b0ee3a7da1571dd619f7cf7c8dd927d66f6f1e4"
+            "f057cde86d48a70e53d182d17cb9b5c7e6b40e5371637e80bf55d53bb86e38d6"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -783,7 +798,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "7eb066dc0340bfd80f00106b753a4d0da963dcc90166aca2810e8e472ad18566"
+            "66751c77d0ff62b0480ad3857e4bf5d8382dd27195c46e7e9f7735f0d5df96a3"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -840,7 +855,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4d6dc2f0464f1767b91382ba7586f03c5c8c06e4b8e1d699f89c18c502b2d933"
+            "cd113fafea822d8e09caca9f141ddb92758a2bf80cf2e523d3a3243a5cb951b8"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -941,7 +956,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4d6dc2f0464f1767b91382ba7586f03c5c8c06e4b8e1d699f89c18c502b2d933"
+            "cd113fafea822d8e09caca9f141ddb92758a2bf80cf2e523d3a3243a5cb951b8"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

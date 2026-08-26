@@ -3472,6 +3472,34 @@ wrong answers, which would be strictly worse than the current result.
 `final_context_digest` literal in `tests/unit/test_graph_frozen_reports.py`
 by the same mechanism every prior prompt change in this project has.
 
+A Codex review round found the sentence above didn't actually accomplish
+its own stated goal: "the configuration change is itself the proximate
+reason requests are failing" does not exclude `RESOURCE_POOL_SATURATION` or
+`DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION` either, since in both scenarios a
+config change genuinely *is* the proximate cause of the mechanism that
+follows — a model reading only the original sentence had no textual reason
+to prefer the more specific label. `SYSTEM_TEXT` now states an explicit
+label-priority rule instead of a proximate-cause test: use the specific
+resource-pool or downstream-timeout label whenever the evidence supports
+that condition, even when a recent configuration change triggered it, and
+reserve `CONFIG_CHANGE` for the case where no more specific label fits.
+`PROMPT_VERSION` moved again, from `4` to `5`, moving every
+`final_context_digest` literal a second time by the same mechanism.
+
+The same round fixed two more corpus-validity gaps. `_resolved_change_
+summary` (`scenario_control.py`, W9) now raises `LabError(LabReasonCode.
+UNKNOWN_CONFIG_KEY, ...)` when a change entry declares a `config_key` absent
+from the scenario's own resolved `faulted_config`, instead of silently
+falling back to static prose — a declared-but-unmatched key is almost
+certainly a scenario-authoring typo, and falling back quietly would
+reproduce the exact stale-summary defect W9 exists to fix, just triggered a
+different way. And W8's integration test
+(`test_ambiguous_telemetry_shows_both_fault_signals_under_the_evaluation_
+seed`) now asserts the exact `5`/`5` `pool_exhausted`/`upstream_timeout`
+split under the evaluation seed, not just that each event appears at least
+once — proving the genuine even split W8's `pool_capacity` retune intends,
+not merely that both signals fire somewhere in the run.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

@@ -288,24 +288,62 @@ def test_w9_a_change_entry_with_no_config_key_keeps_its_static_summary(
     assert inventory_change["summary"] == "image rebuild: dependency bump to 2.4.1"
 
 
-def test_a_change_entry_naming_an_unknown_config_key_keeps_its_static_summary() -> None:
-    """Lab-defect-fix Unit 4, W9. `_resolved_change_summary`'s `config_key
-    not in faulted_config` branch is a defensive guard against a future
-    scenario-authoring typo -- no checked-in scenario file's `config_key`
-    is ever actually missing from its own `faulted_config`, so this
-    branch is unreachable through `start_scenario`/`write_manifests` and
-    needs its own direct call. A mistyped key must degrade to the entry's
-    honest static `summary` text, never raise `KeyError` and crash
-    scenario startup over what is ultimately a cosmetic prose mismatch."""
+def test_a_change_entry_naming_an_unknown_config_key_raises() -> None:
+    """Lab-defect-fix Unit 4, Codex round. `_resolved_change_summary`'s
+    `config_key not in faulted_config` branch used to degrade silently to
+    the entry's static `summary` text -- but that silent fallback can
+    recreate the exact stale-summary defect this unit exists to fix, just
+    triggered by a scenario-authoring typo instead of a missing
+    resolution step. A declared-but-unmatched `config_key` must now raise
+    `LabError(UNKNOWN_CONFIG_KEY, ...)` instead, so a typo fails scenario
+    startup loudly. No checked-in scenario file's `config_key` is ever
+    actually missing from its own `faulted_config` (see
+    `test_every_declared_config_key_resolves_in_its_own_faulted_config`
+    below, which proves this for the whole corpus), so this branch is
+    unreachable through `start_scenario`/`write_manifests` today and
+    needs its own direct call to exercise."""
     entry = {
+        "service": "orders",
         "config_key": "typo_d_key_name",
         "summary": "configuration update: static fallback prose",
     }
     faulted_config = {"pool_capacity": 7}
 
-    resolved = scenario_control._resolved_change_summary(entry, faulted_config)
+    with pytest.raises(LabError) as excinfo:
+        scenario_control._resolved_change_summary(entry, faulted_config)
 
-    assert resolved == "configuration update: static fallback prose"
+    assert excinfo.value.reason_code is LabReasonCode.UNKNOWN_CONFIG_KEY
+    assert "typo_d_key_name" in str(excinfo.value)
+    assert "orders" in str(excinfo.value)
+
+
+def test_every_declared_config_key_resolves_in_its_own_faulted_config() -> None:
+    """Lab-defect-fix Unit 4, Codex round. A corpus-wide self-check: for
+    every checked-in scenario file, under its base (un-seeded) config and
+    every declared `seed_variants` entry, every change entry's declared
+    `config_key` (when present) must actually resolve in the resulting
+    `faulted_config`. This is exactly the typo class
+    `_resolved_change_summary` now raises on at scenario-start time --
+    this test catches it in CI, before any scenario ever runs, instead of
+    only when someone happens to start the specific faulted family/seed
+    combination that exercises the typo."""
+    scenarios_dir = REPOSITORY / "lab" / "scenarios"
+    for path in sorted(scenarios_dir.glob("*.json")):
+        definition = json.loads(path.read_text(encoding="utf-8"))
+        resolutions = {"<base>": definition} | {
+            seed: apply_seed_variant(definition, seed)
+            for seed in definition.get("seed_variants", {})
+        }
+        for label, resolved in resolutions.items():
+            faulted_config = resolved["faulted_config"]
+            for entry in resolved["changes"]:
+                config_key = entry.get("config_key")
+                if config_key is not None:
+                    assert config_key in faulted_config, (
+                        f"{path.name} seed={label!r} service={entry['service']!r} "
+                        f"declares config_key={config_key!r}, absent from "
+                        "faulted_config"
+                    )
 
 
 def test_w10_alert_total_requests_covers_the_whole_window(

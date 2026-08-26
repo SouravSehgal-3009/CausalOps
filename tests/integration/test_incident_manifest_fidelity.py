@@ -9,6 +9,7 @@ seed the paired evaluation actually runs under.
 """
 
 import json
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -121,9 +122,17 @@ def test_ambiguous_telemetry_shows_both_fault_signals_under_the_evaluation_seed(
 
     try:
         rows = read_jsonl(runs_root(REPOSITORY) / incident_id / "logs" / "orders.jsonl")
-        events = {row.get("event") for row in rows}
-        assert "pool_exhausted" in events
-        assert "upstream_timeout" in events
+        event_counts = Counter(row.get("event") for row in rows)
+        # Exact counts, not just membership: this evaluation seed's fault
+        # phase runs a fixed request count through single-threaded counter
+        # arithmetic (never live timing), so the 5/5 split is deterministic,
+        # not a race -- pinning it exactly proves both signals genuinely
+        # appear at the split this fix intends, not merely that at least one
+        # of each fired. A deliberate future `pool_capacity` retune for this
+        # family should update these two numbers consciously, the same way
+        # this project pins other deterministic literals elsewhere.
+        assert event_counts["pool_exhausted"] == 5
+        assert event_counts["upstream_timeout"] == 5
     finally:
         reset_scenario(REPOSITORY, incident_id)
         assert not (runs_root(REPOSITORY) / incident_id).exists()

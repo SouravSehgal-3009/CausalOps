@@ -81,6 +81,10 @@ class LabReasonCode(StrEnum):
     LAB_NOT_HEALTHY = "LAB_NOT_HEALTHY"
     SCENARIO_ALREADY_ACTIVE = "SCENARIO_ALREADY_ACTIVE"
     UNKNOWN_FAMILY = "UNKNOWN_FAMILY"
+    # A declared `config_key` absent from `faulted_config` -- see
+    # `_resolved_change_summary`'s docstring for why this raises rather
+    # than falls back.
+    UNKNOWN_CONFIG_KEY = "UNKNOWN_CONFIG_KEY"
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     BASELINE_NOT_HEALTHY = "BASELINE_NOT_HEALTHY"
     FAULT_NOT_OBSERVED = "FAULT_NOT_OBSERVED"
@@ -346,15 +350,34 @@ def _resolved_change_summary(
 ) -> str:
     """Render a config-carrying change entry's summary from the value the
     lab actually applied (`faulted_config`, after `apply_seed_variant`'s
-    overrides) -- Lab-defect-fix Unit 4, W9. An entry naming no
-    `config_key`, or one that names a key not present in `faulted_config`
-    (defensive: a scenario-authoring mistake should fall back to honest
-    static prose, never raise `KeyError` mid-scenario-start), keeps its
-    own static `summary` text -- true for image rebuilds and dependency
-    bumps, which have no config value to resolve against."""
+    overrides) -- Lab-defect-fix Unit 4, W9.
+
+    Two distinct cases now diverge, where an earlier round of this fix
+    conflated them into one silent fallback:
+
+    - An entry naming no `config_key` at all keeps its own static
+      `summary` text unchanged -- true for image rebuilds and dependency
+      bumps, which have no config value to resolve against. This is the
+      legitimate, expected case.
+    - An entry naming a `config_key` that is absent from `faulted_config`
+      is almost certainly a scenario-authoring typo, not a legitimate
+      no-config-value case -- falling back to static prose here would
+      silently recreate the exact stale-summary defect this unit exists
+      to fix, just triggered by a misspelled key instead of a missing
+      resolution step. This raises `LabError(UNKNOWN_CONFIG_KEY, ...)`
+      instead, so a typo fails scenario startup loudly rather than
+      shipping a quietly wrong summary.
+    """
     config_key = entry.get("config_key")
-    if config_key is None or config_key not in faulted_config:
+    if config_key is None:
         return str(entry["summary"])
+    if config_key not in faulted_config:
+        raise LabError(
+            LabReasonCode.UNKNOWN_CONFIG_KEY,
+            f"{entry['service']}'s change entry declares "
+            f"config_key={config_key!r}, absent from faulted_config -- "
+            "fix the scenario definition",
+        )
     return f"configuration update: {config_key} set to {faulted_config[config_key]}"
 
 

@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from causalops.domain import Evidence, IncidentScope, InitialAlertPacket, RunbookPassage
 from causalops.models import Stage
 
-PROMPT_VERSION = "4"
+PROMPT_VERSION = "5"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -32,10 +32,11 @@ local service lab. Keep two or three possible causes and say what evidence would
 support or rule each one out.
 
 Allowed causes: CONFIG_CHANGE, DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
-RESOURCE_POOL_SATURATION, UNDETERMINED. Label CONFIG_CHANGE only when a
-recent configuration change is itself the proximate reason requests are
-failing, not merely a change that happened before an unrelated failure
-took over.
+RESOURCE_POOL_SATURATION, UNDETERMINED. When evidence supports a resource-pool
+condition or a downstream timeout/retry condition, use that specific label even
+if a recent configuration change triggered it. Label CONFIG_CHANGE only when no
+more specific label fits -- when the change itself, not a resulting condition it
+caused, is the proximate reason requests are failing.
 
 You may ask for registered read-only checks by name and typed arguments. You cannot
 run commands, write queries, change scope, add tools, or change policy and budgets.

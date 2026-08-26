@@ -439,13 +439,16 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # the window default/clamp contract, so this prose figure moved from
     # 1,392 to 1,561. Lab-defect-fix Unit 4, W18: `SYSTEM_TEXT` gained one
     # more sentence stating the CONFIG_CHANGE label convention, moving it
-    # again, from 1,561 to 1,747 -- the same mechanism
-    # `test_graph_frozen_reports.py`'s own module docstring already
-    # documents for `final_context_digest`.
-    assert len(total) == 1_747
+    # again, from 1,561 to 1,747. A Codex review round on Unit 4 rewrote
+    # that same sentence to state the label-priority rule explicitly
+    # (a more specific label wins over CONFIG_CHANGE when its own evidence
+    # is present), moving it a third time, from 1,747 to 1,895 -- the same
+    # mechanism `test_graph_frozen_reports.py`'s own module docstring
+    # already documents for `final_context_digest`.
+    assert len(total) == 1_895
     # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 1_747
+    assert estimate_input_tokens(total) == 1_895
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
