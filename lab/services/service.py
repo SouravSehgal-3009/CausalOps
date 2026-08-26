@@ -212,7 +212,9 @@ def read_lab_config(incident_id: str) -> dict[str, Any]:
         text = (RUNS_ROOT / incident_id / "lab" / "config.json").read_text(
             encoding="utf-8"
         )
-    except OSError:
+        loaded: dict[str, Any] = json.loads(text)
+    except (OSError, ValueError):
+        # `JSONDecodeError` and `UnicodeDecodeError` both subclass ValueError,
+        # so this also covers a torn or non-UTF-8 read, not just malformed JSON.
         return {}
-    loaded: dict[str, Any] = json.loads(text)
     return loaded

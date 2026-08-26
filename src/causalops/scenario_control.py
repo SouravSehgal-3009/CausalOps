@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import JsonValue
 
@@ -174,8 +175,28 @@ def compose_file(root: Path) -> Path:
 
 
 def write_json(path: Path, value: object) -> None:
+    """Writes `value` to `path` in one atomic replace, never a
+    truncate-then-write in place.
+
+    Lab-defect-fix Unit 5, W12. `path.write_text` truncates before writing a
+    byte of the new content -- a concurrent reader (every lab service reads
+    this same file on every request, each from its own thread) can observe a
+    torn file: empty, or old bytes followed by new bytes, neither valid JSON.
+    Reproduced by this file's own concurrency test below. Mirrors
+    `run_records.py`'s `write_jsonl`: build the complete content in a sibling
+    temporary file first, then atomically rename it onto `path`
+    (`Path.replace`, atomic on POSIX). A reader always sees either the
+    complete old file or the complete new one, never a mixture.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    content = json.dumps(value, indent=2)
+    tmp_path = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def compose(root: Path, arguments: list[str], timeout: int) -> None:

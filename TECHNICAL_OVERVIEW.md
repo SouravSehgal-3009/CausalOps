@@ -3500,6 +3500,23 @@ split under the evaluation seed, not just that each event appears at least
 once — proving the genuine even split W8's `pool_capacity` retune intends,
 not merely that both signals fire somewhere in the run.
 
+## Lab defect remediation — Unit 5, lab hardening
+
+W12 makes `scenario_control.py::write_json` atomic (temp file + `Path.replace`, the same
+pattern `run_records.py::write_jsonl` already uses) and widens
+`lab/services/service.py::read_lab_config`'s `try` to catch a malformed parse alongside a
+missing file. Both harden against a torn read on `lab/config.json` while a live request
+reads it concurrently with a scenario-start write — reproduced under induced contention
+(65% torn reads out of ~31,000), not observed under the shipped sequential
+`drive_traffic`, which never has a request in flight while the config swap happens.
+
+W15 (metric/pool state accumulating across incidents) stays a documented operational
+step, not a code change: restart the lab services between evaluation batches to clear
+each service's in-process Prometheus registry and `LeakyPool` state — `causalops lab
+down` followed by `causalops lab up` (or `docker compose -f lab/docker-compose.yml
+restart`) accomplishes this; Prometheus itself keeps everything already scraped, so a
+restart does not lose stored history, only the exporter's own in-process state.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

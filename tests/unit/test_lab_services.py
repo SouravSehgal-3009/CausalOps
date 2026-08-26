@@ -112,6 +112,18 @@ def test_configuration_is_read_from_the_active_run(runs: Path) -> None:
     assert service.read_lab_config("no-such-incident") == {}
 
 
+def test_read_lab_config_returns_empty_on_malformed_json(runs: Path) -> None:
+    """Lab-defect-fix Unit 5, W12. A reader hitting `config.json` mid-write
+    (before `write_json` was made atomic, or from any other partial write)
+    must fail safe -- an empty configuration -- not raise `JSONDecodeError`
+    and crash the request the lab service is handling."""
+    config_path = runs / INCIDENT / "lab" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{"require_order_token": tru', encoding="utf-8")
+
+    assert service.read_lab_config(INCIDENT) == {}
+
+
 def test_orders_turns_requests_away_when_the_setting_is_on(runs: Path) -> None:
     import orders
 

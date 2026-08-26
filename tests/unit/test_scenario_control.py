@@ -20,6 +20,7 @@ from causalops.scenario_control import (
     runs_root,
     start_scenario,
     validated_run_paths,
+    write_json,
 )
 from causalops.telemetry import RunPaths
 
@@ -663,3 +664,53 @@ def test_apply_seed_variant_requires_matching_offset_and_change_counts() -> None
 
     with pytest.raises(ValueError):
         apply_seed_variant(definition, "development")
+
+
+def test_write_json_never_exposes_a_torn_read_under_concurrent_reads(
+    tmp_path: Path,
+) -> None:
+    """Lab-defect-fix Unit 5, W12. Real threads, no mocked timing: a
+    concurrent reader must never observe a torn `write_json` -- neither an
+    empty file, invalid JSON, nor a value that is not exactly one of the two
+    payloads being written. Measured against the pre-fix `write_text`-based
+    implementation, this fails reliably (thousands of errors); against the
+    fixed atomic-replace implementation, it passes with zero.
+    """
+    target = tmp_path / "lab" / "config.json"
+    # 5000 chars: large enough to keep `write_text` from completing in a
+    # single syscall on a typical filesystem, so a reader has a real chance
+    # to observe a torn write.
+    payload_a = {"require_order_token": True, "padding": "a" * 5000}
+    payload_b = {"require_order_token": False, "padding": "b" * 5000}
+    stop = threading.Event()
+    errors: list[Exception] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                text = target.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as error:
+                errors.append(error)
+                continue
+            if value not in (payload_a, payload_b):
+                errors.append(RuntimeError(f"corrupted value: {value!r}"))
+
+    write_json(target, payload_a)
+    # 4 reader threads, 500 write-pairs: enough concurrent readers and
+    # iterations to reliably hit the race, not tuned precisely -- if this
+    # ever flakes, increase iterations first.
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    for thread in readers:
+        thread.start()
+    for _ in range(500):
+        write_json(target, payload_a)
+        write_json(target, payload_b)
+    stop.set()
+    for thread in readers:
+        thread.join()
+
+    assert errors == []
