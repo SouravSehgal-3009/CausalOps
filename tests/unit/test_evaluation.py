@@ -273,6 +273,41 @@ def test_a_predicate_matched_only_by_contrary_evidence_is_insufficient() -> None
     assert not scores.citations_sufficient
 
 
+def test_no_predicate_family_is_not_applicable_on_a_correct_diagnosis() -> None:
+    """The fix this test exists for: `all(())` is `True` in Python, so a
+    family declaring no required-evidence predicate (`ambiguous_telemetry`
+    is the one such family in this corpus today) used to score
+    `citations_sufficient=True` unconditionally -- `None` is the honest
+    value instead: there was no predicate to satisfy, so this is not a
+    signal about the citations at all."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    expected = expected_diagnosis().model_copy(update={"predicates": ()})
+
+    scores = score_run(report, [evidence], [receipt()], expected)
+
+    assert scores.diagnosis_correct
+    assert scores.citations_sufficient is None
+
+
+def test_no_predicate_family_is_not_applicable_on_a_wrong_diagnosis() -> None:
+    """The exact defect shape from the real saved run this fix responds to:
+    a wrong diagnosis against a no-predicate family must NOT score
+    `citations_sufficient=True` just because there was nothing to fail --
+    that is the vacuous-truth bug. It must also not score `False`, which
+    would penalize the family for a requirement it was never given."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    expected = expected_diagnosis().model_copy(
+        update={"root_cause": RootCauseCode.CONFIG_CHANGE, "predicates": ()}
+    )
+
+    scores = score_run(report, [evidence], [receipt()], expected)
+
+    assert not scores.diagnosis_correct
+    assert scores.citations_sufficient is None
+
+
 def test_a_wrong_cause_or_disposition_scores_false() -> None:
     evidence = timeout_evidence()
     report = diagnosed_report((evidence.evidence_id,))
@@ -581,6 +616,26 @@ def test_a_genuine_abstention_with_a_real_assessment_still_scores_correctly() ->
     assert scores.disposition_correct
 
 
+def test_mechanical_scores_reads_the_old_bool_only_citations_sufficient() -> None:
+    """Read-compatibility: `citations_sufficient` widened from `bool` to
+    `bool | None` in this fix. A literal JSON string matching the OLD
+    on-disk shape -- not a round-tripped Python object, which would prove
+    nothing about a record already saved to disk before this change --
+    must still validate under the widened model and read back as `True`."""
+    payload = (
+        '{"diagnosis_correct": true, "disposition_correct": true, '
+        '"citations_valid": true, "citations_sufficient": true, '
+        '"control": {"denied": 0, "duplicate": 0, "out_of_scope": 0, '
+        '"invalid_responses": 0, "unsettled": 0}, '
+        '"efficiency": {"latency_ms": 100, "model_calls": 1, '
+        '"tools_executed": 0, "input_tokens": null, "output_tokens": null}}'
+    )
+
+    scores = MechanicalScores.model_validate_json(payload)
+
+    assert scores.citations_sufficient is True
+
+
 def test_a_run_with_no_assessment_cites_nothing() -> None:
     evidence = timeout_evidence()
     failed = diagnosed_report((evidence.evidence_id,)).model_copy(
@@ -610,7 +665,7 @@ def _summary_record(
     reserved_usd: float,
     actual_usd: float | None,
     citations_valid: bool = True,
-    citations_sufficient: bool = True,
+    citations_sufficient: bool | None = True,
     control: ControlCounts | None = None,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_evaluation` tests --
@@ -723,6 +778,7 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
     # present and unchecked.
     assert summary.citations_valid_count == 3
     assert summary.citations_sufficient_count == 3
+    assert summary.citations_sufficient_applicable_count == 3
     assert (summary.denied_min, summary.denied_max) == (0, 0)
     assert (summary.duplicate_min, summary.duplicate_max) == (0, 0)
     assert (summary.out_of_scope_min, summary.out_of_scope_max) == (0, 0)
@@ -777,11 +833,78 @@ def test_summarize_evaluation_reports_citation_and_control_aggregates() -> None:
 
     assert summary.citations_valid_count == 1
     assert summary.citations_sufficient_count == 1
+    assert summary.citations_sufficient_applicable_count == 2
     assert (summary.denied_min, summary.denied_max) == (1, 3)
     assert (summary.duplicate_min, summary.duplicate_max) == (0, 1)
     assert (summary.out_of_scope_min, summary.out_of_scope_max) == (0, 1)
     assert (summary.invalid_responses_min, summary.invalid_responses_max) == (0, 2)
     assert (summary.unsettled_min, summary.unsettled_max) == (0, 1)
+
+
+def test_summarize_evaluation_counts_true_false_and_not_applicable_apart() -> None:
+    """The fix this test exists for: `citations_sufficient_count` (how many
+    scored `True`) and `citations_sufficient_applicable_count` (how many
+    had any predicate to score at all) must be distinguishable -- a batch
+    of 2 applicable-and-true, 1 applicable-and-false, and 1 not-applicable
+    (no predicate declared) record must report count=2, applicable_count=3,
+    against a total of 4, not conflate "not applicable" with either
+    boolean outcome."""
+    records = [
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=True,
+        ),
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=True,
+        ),
+        _summary_record(
+            diagnosis_correct=False,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=False,
+        ),
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=None,
+        ),
+    ]
+
+    summary = summarize_evaluation(records)
+
+    assert summary.total_records == 4
+    assert summary.citations_sufficient_count == 2
+    assert summary.citations_sufficient_applicable_count == 3
 
 
 def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
@@ -792,6 +915,7 @@ def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
     assert summary.disposition_correct_count == 0
     assert summary.citations_valid_count == 0
     assert summary.citations_sufficient_count == 0
+    assert summary.citations_sufficient_applicable_count == 0
     assert summary.latency_ms_min is None
     assert summary.latency_ms_max is None
     assert summary.denied_min is None

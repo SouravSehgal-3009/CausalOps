@@ -3524,6 +3524,42 @@ already scraped, defeating W13's own retention work. Restarting only the three
 application services clears exactly the state W15 targets while leaving Prometheus's
 container, and its history, untouched.
 
+## Unit 6 follow-up — F4, vacuous `citations_sufficient` scoring
+
+`evaluation.py::score_run` computed `citations_sufficient=all(... for predicate in
+expected.predicates)`. `all(())` is `True` in Python, so any family declaring no
+required-evidence predicate at all — `ambiguous_telemetry` is the one such family in
+this corpus — scored `citations_sufficient=True` unconditionally, including on a wrong
+diagnosis with nothing cited. Confirmed in the real Unit 6 evaluation artifact
+(`results/evaluations/2cc9dabb139b4946bb78dbd12fc4f3a7/records.jsonl`): the
+`ambiguous_telemetry`/`tool_enabled` record carries `diagnosis_correct: false` and
+`citations_sufficient: true` side by side.
+
+`MechanicalScores.citations_sufficient` widens from `bool` to `bool | None`.
+`score_run` now returns `None` when `expected.predicates` is empty — "this family
+declares no required-evidence predicate, not applicable," a different fact from both
+`True` (the predicates it declared were satisfied) and `False` (they were not).
+`EvaluationSummary` gains `citations_sufficient_applicable_count` alongside the
+existing `citations_sufficient_count`, so a batch report can distinguish "how many
+scored true" from "how many had anything to score" — `summarize_paired_evaluation`
+needed no change, since it already delegates every group's counting to
+`summarize_evaluation`. `render_evaluation_summary`'s line changes from
+`citations_sufficient:N/total` to `citations_sufficient:N/applicable (applicable/total
+applicable)`.
+
+`SCORER_VERSION` moves `"2"` → `"3"`: a run scored under the old code and a run scored
+under this fix can disagree on `citations_sufficient` for the identical `(report,
+evidence, expected)` input whenever `expected.predicates` is empty. The closest
+precedent for how this project decides a version bump is the earlier call to hold
+`SCORER_VERSION` at `"1"` ("Known gaps" above, Unit 2c): that decision's stated reason
+to hold off was not that the change was non-behavioural, but that no evaluation record
+had ever been produced yet for a later one to disagree with — nothing to migrate. This
+bump meets the inverse of that condition: real evaluation records already exist under
+`SCORER_VERSION == "2"` for a `"3"` record to disagree with, so there is a concrete
+migration to signal here. `SCHEMA_VERSION` is unchanged: this is a read-compatible type
+widening, not a wire schema change — a JSON file with the old literal
+`"citations_sufficient": true` still validates and reads back as `True`.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

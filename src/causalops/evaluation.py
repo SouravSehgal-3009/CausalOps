@@ -25,7 +25,7 @@ from causalops.domain import (
     Versions,
 )
 
-SCORER_VERSION = "2"
+SCORER_VERSION = "3"
 
 OUT_OF_SCOPE_REASONS = frozenset(
     {
@@ -100,7 +100,21 @@ class MechanicalScores(BaseModel):
     diagnosis_correct: bool
     disposition_correct: bool
     citations_valid: bool
-    citations_sufficient: bool
+    # Unlike `diagnosis_correct` above, this question is not always
+    # well-posed. `diagnosis_correct` always has a definite answer because
+    # every `ExpectedOutcome` names exactly one `root_cause` to compare
+    # against. `citations_sufficient` asks whether the cited evidence
+    # satisfies every predicate in `expected.predicates` -- and a family
+    # can legitimately declare none (`ambiguous_telemetry`, the one family
+    # in this corpus with no required-evidence predicate at all). `all(())`
+    # is `True` in Python, so a bare `bool` here silently scored every such
+    # run `citations_sufficient=True`, including a run with a wrong
+    # diagnosis and nothing cited -- there was no predicate to fail. `None`
+    # is the honest third value: "this family declares no required-evidence
+    # predicate, not applicable" is a different fact from "the predicates it
+    # declared were satisfied" (`True`) or "were not" (`False`), and
+    # collapsing it into either would misreport which one actually happened.
+    citations_sufficient: bool | None
     control: ControlCounts
     efficiency: Efficiency
 
@@ -345,9 +359,18 @@ def score_run(
         diagnosis_correct=diagnosis_correct,
         disposition_correct=report.disposition is expected.disposition and not rejected,
         citations_valid=citations_are_valid(report, evidence),
-        citations_sufficient=all(
-            any(satisfies(predicate, record) for record in supported)
-            for predicate in expected.predicates
+        # `None` when the family declares no required-evidence predicate at
+        # all -- see `MechanicalScores.citations_sufficient`'s own comment
+        # for why `all(())` being `True` made this the exact vacuous-truth
+        # bug being fixed here (an empty `expected.predicates` tuple used to
+        # score `True` unconditionally, including on a wrong diagnosis).
+        citations_sufficient=(
+            None
+            if not expected.predicates
+            else all(
+                any(satisfies(predicate, record) for record in supported)
+                for predicate in expected.predicates
+            )
         ),
         control=count_control(report, receipts),
         efficiency=Efficiency(
@@ -395,7 +418,17 @@ class EvaluationSummary(BaseModel):
     # `citations_sufficient`), so a batch total is the same kind of number,
     # not a min/max range.
     citations_valid_count: int
+    # `citations_sufficient_count` is how many records scored `True` --
+    # unchanged in meaning from before this fix. `citations_sufficient_
+    # applicable_count` is new: how many records had ANY predicate to score
+    # in the first place (`MechanicalScores.citations_sufficient is not
+    # None`). Reporting `citations_sufficient_count` against `total_records`
+    # alone would silently credit a family with no predicate as if it had
+    # been checked and passed -- `applicable_count` lets a reader see the
+    # real denominator, the same way `input_tokens_known_count` already
+    # separates "no data" from "zero-width range" for a different field.
     citations_sufficient_count: int
+    citations_sufficient_applicable_count: int
 
     latency_ms_min: int | None = None
     latency_ms_max: int | None = None
@@ -505,8 +538,18 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
         citations_valid_count=sum(
             1 for record in records if record.scores.citations_valid
         ),
+        # Explicit `is True`/`is not None` rather than bare truthiness, to
+        # state plainly which of the two questions each count answers. If
+        # this field could have held `None` before this fix, bare
+        # truthiness would have treated `None` and `False` the same (both
+        # are falsy) -- so switching to `is True`/`is not None` here
+        # doesn't change the resulting count, only makes the two questions
+        # explicit.
         citations_sufficient_count=sum(
-            1 for record in records if record.scores.citations_sufficient
+            1 for record in records if record.scores.citations_sufficient is True
+        ),
+        citations_sufficient_applicable_count=sum(
+            1 for record in records if record.scores.citations_sufficient is not None
         ),
         latency_ms_min=latency_min,
         latency_ms_max=latency_max,

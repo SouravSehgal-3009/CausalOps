@@ -441,7 +441,9 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
         f"  diagnosis_correct:   {summary.diagnosis_correct_count}/{total}",
         f"  disposition_correct: {summary.disposition_correct_count}/{total}",
         f"  citations_valid:     {summary.citations_valid_count}/{total}",
-        f"  citations_sufficient:{summary.citations_sufficient_count}/{total}",
+        f"  citations_sufficient:{summary.citations_sufficient_count}/"
+        f"{summary.citations_sufficient_applicable_count} "
+        f"({summary.citations_sufficient_applicable_count}/{total} applicable)",
         "  latency_ms:      "
         f"{_range_str(summary.latency_ms_min, summary.latency_ms_max)}",
         "  model_calls:     "

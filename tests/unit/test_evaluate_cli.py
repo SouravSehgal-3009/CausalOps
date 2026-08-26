@@ -619,6 +619,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
         disposition_correct_count=2,
         citations_valid_count=2,
         citations_sufficient_count=1,
+        citations_sufficient_applicable_count=2,
         latency_ms_min=100,
         latency_ms_max=900,
         model_calls_min=1,
@@ -654,7 +655,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     assert "diagnosis_correct:   1/2" in rendered
     assert "disposition_correct: 2/2" in rendered
     assert "citations_valid:     2/2" in rendered
-    assert "citations_sufficient:1/2" in rendered
+    assert "citations_sufficient:1/2 (2/2 applicable)" in rendered
     assert "latency_ms:      100-900" in rendered
     assert "model_calls:     1-4" in rendered
     assert "tools_executed:  0-2" in rendered
@@ -669,6 +670,30 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     assert "actual_usd:      0.0080-0.0080 (1/2 known)" in rendered
     assert "p95" not in rendered.lower()
     assert "percentile" not in rendered.lower()
+
+
+def test_render_evaluation_summary_shows_the_applicable_denominator_apart() -> None:
+    """When a batch mixes records with and without a required-evidence
+    predicate (e.g. `ambiguous_telemetry` alongside families that do
+    declare one), the rendered line must show the applicable denominator
+    (how many records had any predicate to score) distinctly from the
+    batch total -- not silently equate "not applicable" with the total
+    record count."""
+    summary = EvaluationSummary(
+        total_records=3,
+        diagnosis_correct_count=3,
+        disposition_correct_count=3,
+        citations_valid_count=3,
+        citations_sufficient_count=1,
+        citations_sufficient_applicable_count=2,
+        input_tokens_known_count=0,
+        output_tokens_known_count=0,
+        actual_usd_known_count=0,
+    )
+
+    rendered = render_evaluation_summary(summary)
+
+    assert "citations_sufficient:1/2 (2/3 applicable)" in rendered
 
 
 def test_render_evaluation_summary_of_an_empty_batch_says_no_data() -> None:
@@ -936,12 +961,13 @@ def _paired_record(
     run_key: str,
     diagnosis_correct: bool,
     retrieval_mode: RetrievalMode = RetrievalMode.DISABLED,
+    citations_sufficient: bool | None = True,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_paired_evaluation`/
     `render_paired_evaluation_summary` tests -- only `run_key` (which arm
-    encodes the mode as its final `/`-segment), `diagnosis_correct`, and
-    `retrieval_mode` vary across the records these tests build; everything
-    else is fixed, plausible filler."""
+    encodes the mode as its final `/`-segment), `diagnosis_correct`,
+    `retrieval_mode`, and `citations_sufficient` vary across the records
+    these tests build; everything else is fixed, plausible filler."""
     return EvaluationRecord(
         run_key=run_key,
         investigation_id="inv-1",
@@ -954,7 +980,7 @@ def _paired_record(
             diagnosis_correct=diagnosis_correct,
             disposition_correct=True,
             citations_valid=True,
-            citations_sufficient=True,
+            citations_sufficient=citations_sufficient,
             control=ControlCounts(),
             efficiency=Efficiency(latency_ms=100, model_calls=1, tools_executed=0),
         ),
@@ -1130,6 +1156,70 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     # this batch.
     assert "diagnosis_correct:   2/3" not in rendered
     assert "total_records (all arms and retrieval modes): 3" in rendered
+
+
+def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() -> None:
+    """Proves `EvaluationGroupSummary.summary.citations_sufficient_count`/
+    `citations_sufficient_applicable_count` are correct per group, not just
+    structurally present -- the fix's item 7 claim was that
+    `summarize_paired_evaluation` needs no change because it delegates
+    entirely to `summarize_evaluation` per `(arm, retrieval_mode)` group.
+    This test proves that claim directly: each group's counts are compared
+    against calling `summarize_evaluation` on that exact subset of records
+    directly, not merely asserted to be plausible numbers."""
+    baseline_records = [
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
+            diagnosis_correct=True,
+            citations_sufficient=True,
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/{MODE_NO_TOOL_BASELINE}",
+            diagnosis_correct=False,
+            citations_sufficient=None,
+        ),
+    ]
+    tool_enabled_records = [
+        _paired_record(
+            run_key=f"incident-a/model/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=True,
+            citations_sufficient=False,
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=True,
+            citations_sufficient=True,
+        ),
+    ]
+    records = baseline_records + tool_enabled_records
+
+    paired = summarize_paired_evaluation(records)
+
+    baseline_group = _group(paired, MODE_NO_TOOL_BASELINE, RetrievalMode.DISABLED)
+    tool_enabled_group = _group(paired, MODE_TOOL_ENABLED, RetrievalMode.DISABLED)
+    expected_baseline = summarize_evaluation(baseline_records)
+    expected_tool_enabled = summarize_evaluation(tool_enabled_records)
+
+    assert (
+        baseline_group.summary.citations_sufficient_count
+        == expected_baseline.citations_sufficient_count
+        == 1
+    )
+    assert (
+        baseline_group.summary.citations_sufficient_applicable_count
+        == expected_baseline.citations_sufficient_applicable_count
+        == 1
+    )
+    assert (
+        tool_enabled_group.summary.citations_sufficient_count
+        == expected_tool_enabled.citations_sufficient_count
+        == 1
+    )
+    assert (
+        tool_enabled_group.summary.citations_sufficient_applicable_count
+        == expected_tool_enabled.citations_sufficient_applicable_count
+        == 2
+    )
 
 
 def test_summarize_paired_evaluation_rejects_an_unrecognized_run_key_mode() -> None:
