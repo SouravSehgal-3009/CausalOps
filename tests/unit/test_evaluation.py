@@ -667,17 +667,25 @@ def _summary_record(
     citations_valid: bool = True,
     citations_sufficient: bool | None = True,
     control: ControlCounts | None = None,
+    expected: ExpectedOutcome | None = None,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_evaluation` tests --
     `summarize_evaluation` only ever reads `scores.diagnosis_correct`,
     `scores.disposition_correct`, `scores.citations_valid`,
     `scores.citations_sufficient`, `scores.control`, `scores.efficiency`,
-    `reserved_usd`, and `actual_usd`, so this builds
+    `expected.predicates`, `reserved_usd`, and `actual_usd`, so this builds
     `MechanicalScores`/`Efficiency` directly rather than driving a full
     report through `score_run`. `citations_valid`/`citations_sufficient`/
     `control` default to the same "nothing wrong" values every test before
     Item 3 already assumed, so only the tests that actually vary them need
-    to pass something else."""
+    to pass something else. `expected` defaults to `expected_diagnosis()`
+    (a predicate-bearing outcome, matching every caller before the F4
+    applicability fix); a caller building a not-applicable record must pass
+    an `ExpectedOutcome` with empty `predicates` explicitly, since real
+    `score_run` output can never pair a non-empty `expected.predicates`
+    with `citations_sufficient=None` -- the F4 fix derives applicability
+    from `expected.predicates` itself, so a fixture that claims otherwise
+    would not exercise a shape any real record can have."""
     kwargs = reproducibility_manifest_kwargs()
     kwargs["actual_usd"] = actual_usd
     kwargs["reserved_usd"] = reserved_usd
@@ -685,7 +693,7 @@ def _summary_record(
         run_key="incident-1/causalops/1",
         investigation_id="inv-1",
         incident_id="incident-1",
-        expected=expected_diagnosis(),
+        expected=expected if expected is not None else expected_diagnosis(),
         scores=MechanicalScores(
             diagnosis_correct=diagnosis_correct,
             disposition_correct=disposition_correct,
@@ -848,7 +856,16 @@ def test_summarize_evaluation_counts_true_false_and_not_applicable_apart() -> No
     of 2 applicable-and-true, 1 applicable-and-false, and 1 not-applicable
     (no predicate declared) record must report count=2, applicable_count=3,
     against a total of 4, not conflate "not applicable" with either
-    boolean outcome."""
+    boolean outcome. The not-applicable record's `expected` carries an
+    empty `predicates` tuple, not just a `citations_sufficient=None` score
+    -- the F4 applicability fix derives "not applicable" from
+    `expected.predicates` itself, so an empty-predicate `expected` paired
+    with `citations_sufficient=None` is the only combination a real
+    `score_run` call could ever produce for the not-applicable case."""
+    not_applicable_expected = ExpectedOutcome(
+        root_cause=RootCauseCode.UNDETERMINED,
+        disposition=Disposition.INSUFFICIENT_EVIDENCE,
+    )
     records = [
         _summary_record(
             diagnosis_correct=True,
@@ -897,6 +914,7 @@ def test_summarize_evaluation_counts_true_false_and_not_applicable_apart() -> No
             reserved_usd=0.01,
             actual_usd=0.008,
             citations_sufficient=None,
+            expected=not_applicable_expected,
         ),
     ]
 
@@ -921,3 +939,219 @@ def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
     assert summary.denied_min is None
     assert summary.denied_max is None
     assert summary.actual_usd_known_count == 0
+    assert summary.scorer_versions == ()
+
+
+def test_a_stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable() -> None:
+    """The F4 follow-up fix this test exists for: a HISTORICAL record saved
+    under the pre-F4 scorer (`SCORER_VERSION == "2"`) can still carry a
+    stale `citations_sufficient: true` on an empty-predicate family --
+    `score_run` never produces that combination today, but a record saved
+    to disk before this fix ran does. Two real saved artifacts in this
+    repo have exactly this shape (`results/evaluations/2cc9dabb.../
+    records.jsonl` and `.../a4044fb5.../records.jsonl`, both gitignored,
+    not copied here). A literal JSON string -- not a round-tripped Python
+    object, which would prove nothing about a record already on disk --
+    matching that OLD shape must still validate under the current model,
+    and summarizing it must correct the vacuous `True` back to
+    not-applicable rather than reproducing it."""
+    stale_v2_record = (
+        '{"schema_version": "1", "scorer_version": "2", '
+        '"run_key": "incident-1/causalops/tool_enabled", '
+        '"investigation_id": "inv-1", "incident_id": "incident-1", '
+        '"expected": {"root_cause": "UNDETERMINED", '
+        '"disposition": "INSUFFICIENT_EVIDENCE", "predicates": []}, '
+        '"scores": {"diagnosis_correct": false, "disposition_correct": true, '
+        '"citations_valid": true, "citations_sufficient": true, '
+        '"control": {"denied": 0, "duplicate": 0, "out_of_scope": 0, '
+        '"invalid_responses": 0, "unsettled": 0}, '
+        '"efficiency": {"latency_ms": 100, "model_calls": 1, '
+        '"tools_executed": 0, "input_tokens": null, "output_tokens": null}}, '
+        '"git_sha": "' + "0" * 40 + '", "git_dirty": false, '
+        '"versions": {"schema_version": "1", "prompt_version": "1", '
+        '"policy_version": "1", "tool_registry_version": "1"}, '
+        '"retrieval_mode": "disabled", "runbook_corpus_version": "1", '
+        '"fixture_sha256": "' + "a" * 64 + '", '
+        '"model_name": "claude-sonnet-5", '
+        '"pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing", '
+        '"pricing_verified_on": "2026-08-24", "configured_ceiling_usd": 5.0, '
+        '"reserved_usd": 0.01, "actual_usd": 0.008}'
+    )
+
+    record = EvaluationRecord.model_validate_json(stale_v2_record)
+    # The record still validates and still literally carries the stale
+    # `True` -- read-compatibility, not a migration on load.
+    assert record.scores.citations_sufficient is True
+    assert record.scorer_version == "2"
+
+    summary = summarize_evaluation([record])
+
+    assert summary.citations_sufficient_count == 0
+    assert summary.citations_sufficient_applicable_count == 0
+    assert summary.scorer_versions == ("2",)
+
+
+def test_citations_sufficient_numerator_never_exceeds_the_denominator() -> None:
+    """Guards against a "denominator-only" half-fix: both
+    `citations_sufficient_count` and `citations_sufficient_applicable_count`
+    must be gated on the SAME `expected.predicates` condition. A batch
+    mixing one stale-`true` empty-predicate record (which must be excluded
+    from BOTH) with genuine predicate-bearing `True`/`False` records proves
+    the counts stay coherent, not just individually plausible."""
+    stale_not_applicable = _summary_record(
+        diagnosis_correct=False,
+        disposition_correct=True,
+        latency_ms=100,
+        model_calls=1,
+        tools_executed=0,
+        input_tokens=None,
+        output_tokens=None,
+        reserved_usd=0.01,
+        actual_usd=0.008,
+        citations_sufficient=True,
+        expected=ExpectedOutcome(
+            root_cause=RootCauseCode.UNDETERMINED,
+            disposition=Disposition.INSUFFICIENT_EVIDENCE,
+        ),
+    )
+    applicable_true = _summary_record(
+        diagnosis_correct=True,
+        disposition_correct=True,
+        latency_ms=100,
+        model_calls=1,
+        tools_executed=0,
+        input_tokens=None,
+        output_tokens=None,
+        reserved_usd=0.01,
+        actual_usd=0.008,
+        citations_sufficient=True,
+    )
+    applicable_false = _summary_record(
+        diagnosis_correct=True,
+        disposition_correct=True,
+        latency_ms=100,
+        model_calls=1,
+        tools_executed=0,
+        input_tokens=None,
+        output_tokens=None,
+        reserved_usd=0.01,
+        actual_usd=0.008,
+        citations_sufficient=False,
+    )
+    records = [stale_not_applicable, applicable_true, applicable_false]
+
+    summary = summarize_evaluation(records)
+
+    assert (
+        summary.citations_sufficient_count
+        <= summary.citations_sufficient_applicable_count
+    )
+    assert summary.citations_sufficient_count == 1
+    assert summary.citations_sufficient_applicable_count == 2
+
+
+def test_summarize_evaluation_matches_the_old_gate_for_score_run_output() -> None:
+    """The applicability fix changes nothing for a record that came from a
+    real `score_run` call: `score_run` already sets
+    `citations_sufficient=None` exactly when `expected.predicates` is
+    empty, so `record.expected.predicates` (the new gate) and
+    `record.scores.citations_sufficient is not None` (the old gate) pick
+    out the identical records for any input `score_run` can actually
+    produce. Builds one record from a real `score_run` call against a
+    predicate-bearing `expected` and one against a predicate-free
+    `expected`, and confirms the new derivation agrees with the old one on
+    both, not just plausible-looking totals."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    receipts = [receipt()]
+    no_predicate_expected = ExpectedOutcome(
+        root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
+        disposition=Disposition.DIAGNOSED,
+    )
+
+    with_predicate_scores = score_run(
+        report, [evidence], receipts, expected_diagnosis()
+    )
+    no_predicate_scores = score_run(report, [evidence], receipts, no_predicate_expected)
+
+    records = [
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=1,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=with_predicate_scores.citations_sufficient,
+            expected=expected_diagnosis(),
+        ),
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=1,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+            citations_sufficient=no_predicate_scores.citations_sufficient,
+            expected=no_predicate_expected,
+        ),
+    ]
+
+    summary = summarize_evaluation(records)
+
+    old_gate_count = sum(
+        1 for record in records if record.scores.citations_sufficient is True
+    )
+    old_gate_applicable_count = sum(
+        1 for record in records if record.scores.citations_sufficient is not None
+    )
+    assert summary.citations_sufficient_count == old_gate_count == 1
+    assert (
+        summary.citations_sufficient_applicable_count == old_gate_applicable_count == 1
+    )
+
+
+def test_summarize_evaluation_reports_the_distinct_scorer_versions_present() -> None:
+    """`scorer_versions` is reported, not enforced -- a mixed-version batch
+    must summarize without raising, and a uniform batch reports a single
+    value."""
+    mixed = [
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+        ).model_copy(update={"scorer_version": "2"}),
+        _summary_record(
+            diagnosis_correct=True,
+            disposition_correct=True,
+            latency_ms=100,
+            model_calls=1,
+            tools_executed=0,
+            input_tokens=None,
+            output_tokens=None,
+            reserved_usd=0.01,
+            actual_usd=0.008,
+        ).model_copy(update={"scorer_version": "3"}),
+    ]
+
+    mixed_summary = summarize_evaluation(mixed)
+
+    assert mixed_summary.scorer_versions == ("2", "3")
+
+    uniform = [record.model_copy(update={"scorer_version": "3"}) for record in mixed]
+
+    uniform_summary = summarize_evaluation(uniform)
+
+    assert uniform_summary.scorer_versions == ("3",)

@@ -37,6 +37,7 @@ import causalops.evaluate_cli as evaluate_cli
 from causalops.domain import (
     Budgets,
     Disposition,
+    EvidenceKind,
     IncidentScope,
     ReasonCode,
     RetrievalMode,
@@ -68,6 +69,8 @@ from causalops.evaluation import (
     EvaluationSummary,
     ExpectedOutcome,
     MechanicalScores,
+    PredicateOperator,
+    RequiredEvidencePredicate,
     summarize_evaluation,
 )
 from causalops.evidence import new_opaque_id
@@ -620,6 +623,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
         citations_valid_count=2,
         citations_sufficient_count=1,
         citations_sufficient_applicable_count=2,
+        scorer_versions=("3",),
         latency_ms_min=100,
         latency_ms_max=900,
         model_calls_min=1,
@@ -656,6 +660,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     assert "disposition_correct: 2/2" in rendered
     assert "citations_valid:     2/2" in rendered
     assert "citations_sufficient:1/2 (2/2 applicable)" in rendered
+    assert "scorer_versions: 3" in rendered
     assert "latency_ms:      100-900" in rendered
     assert "model_calls:     1-4" in rendered
     assert "tools_executed:  0-2" in rendered
@@ -686,6 +691,7 @@ def test_render_evaluation_summary_shows_the_applicable_denominator_apart() -> N
         citations_valid_count=3,
         citations_sufficient_count=1,
         citations_sufficient_applicable_count=2,
+        scorer_versions=("3",),
         input_tokens_known_count=0,
         output_tokens_known_count=0,
         actual_usd_known_count=0,
@@ -962,12 +968,23 @@ def _paired_record(
     diagnosis_correct: bool,
     retrieval_mode: RetrievalMode = RetrievalMode.DISABLED,
     citations_sufficient: bool | None = True,
+    has_predicate: bool = True,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_paired_evaluation`/
     `render_paired_evaluation_summary` tests -- only `run_key` (which arm
     encodes the mode as its final `/`-segment), `diagnosis_correct`,
-    `retrieval_mode`, and `citations_sufficient` vary across the records
-    these tests build; everything else is fixed, plausible filler."""
+    `retrieval_mode`, `citations_sufficient`, and `has_predicate` vary
+    across the records these tests build; everything else is fixed,
+    plausible filler.
+
+    `has_predicate` controls whether `expected.predicates` is non-empty.
+    Defaults to `True` (a predicate-bearing outcome), matching every caller
+    that predates the F4 applicability fix. A caller building a
+    not-applicable `citations_sufficient=None` record must pass
+    `has_predicate=False` explicitly: after that fix, applicability is
+    derived from `expected.predicates` itself, and real `score_run` output
+    can never pair a non-empty `expected.predicates` with
+    `citations_sufficient=None`."""
     return EvaluationRecord(
         run_key=run_key,
         investigation_id="inv-1",
@@ -975,6 +992,20 @@ def _paired_record(
         expected=ExpectedOutcome(
             root_cause=RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION,
             disposition=Disposition.DIAGNOSED,
+            predicates=(
+                (
+                    RequiredEvidencePredicate(
+                        source="query_metric",
+                        kind=EvidenceKind.METRIC,
+                        template="downstream_timeout_rate",
+                        field="timeouts_per_minute",
+                        operator=PredicateOperator.AT_LEAST,
+                        value=10,
+                    ),
+                )
+                if has_predicate
+                else ()
+            ),
         ),
         scores=MechanicalScores(
             diagnosis_correct=diagnosis_correct,
@@ -1166,17 +1197,27 @@ def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() ->
     entirely to `summarize_evaluation` per `(arm, retrieval_mode)` group.
     This test proves that claim directly: each group's counts are compared
     against calling `summarize_evaluation` on that exact subset of records
-    directly, not merely asserted to be plausible numbers."""
+    directly, not merely asserted to be plausible numbers.
+
+    A real mix of applicable-true, applicable-false, and not-applicable
+    records is required to exercise this meaningfully -- `has_predicate` is
+    wired consistently with each record's own `citations_sufficient` value
+    so the F4 applicability fix (deriving "not applicable" from
+    `expected.predicates`, not from `citations_sufficient is None` alone)
+    cannot collapse every record in this batch to not-applicable and make
+    the counts below vacuously `0 == 0`."""
     baseline_records = [
         _paired_record(
             run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
             diagnosis_correct=True,
             citations_sufficient=True,
+            has_predicate=True,
         ),
         _paired_record(
             run_key=f"incident-b/model/{MODE_NO_TOOL_BASELINE}",
             diagnosis_correct=False,
             citations_sufficient=None,
+            has_predicate=False,
         ),
     ]
     tool_enabled_records = [
@@ -1184,11 +1225,13 @@ def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() ->
             run_key=f"incident-a/model/{MODE_TOOL_ENABLED}",
             diagnosis_correct=True,
             citations_sufficient=False,
+            has_predicate=True,
         ),
         _paired_record(
             run_key=f"incident-b/model/{MODE_TOOL_ENABLED}",
             diagnosis_correct=True,
             citations_sufficient=True,
+            has_predicate=True,
         ),
     ]
     records = baseline_records + tool_enabled_records

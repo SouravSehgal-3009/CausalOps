@@ -444,6 +444,7 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
         f"  citations_sufficient:{summary.citations_sufficient_count}/"
         f"{summary.citations_sufficient_applicable_count} "
         f"({summary.citations_sufficient_applicable_count}/{total} applicable)",
+        f"  scorer_versions: {', '.join(summary.scorer_versions)}",
         "  latency_ms:      "
         f"{_range_str(summary.latency_ms_min, summary.latency_ms_max)}",
         "  model_calls:     "

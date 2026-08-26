@@ -418,17 +418,30 @@ class EvaluationSummary(BaseModel):
     # `citations_sufficient`), so a batch total is the same kind of number,
     # not a min/max range.
     citations_valid_count: int
-    # `citations_sufficient_count` is how many records scored `True` --
-    # unchanged in meaning from before this fix. `citations_sufficient_
-    # applicable_count` is new: how many records had ANY predicate to score
-    # in the first place (`MechanicalScores.citations_sufficient is not
-    # None`). Reporting `citations_sufficient_count` against `total_records`
-    # alone would silently credit a family with no predicate as if it had
-    # been checked and passed -- `applicable_count` lets a reader see the
-    # real denominator, the same way `input_tokens_known_count` already
-    # separates "no data" from "zero-width range" for a different field.
+    # `citations_sufficient_count` is how many records had a predicate to
+    # check (`record.expected.predicates` non-empty) AND scored `True`.
+    # `citations_sufficient_applicable_count` is the real denominator: how
+    # many records had a predicate to check at all. Both counts are gated on
+    # the same `expected.predicates` condition so the numerator can never
+    # exceed the denominator -- see `summarize_evaluation`'s own comment on
+    # this computation for why a record's `scores.citations_sufficient is
+    # not None` alone isn't used instead. Reporting `citations_sufficient_
+    # count` against `total_records` alone would silently credit a
+    # no-predicate family as checked and passed; `applicable_count` lets a
+    # reader see the real denominator, the same way `input_tokens_known_
+    # count` separates "no data" from "zero-width range" for a different
+    # field.
     citations_sufficient_count: int
     citations_sufficient_applicable_count: int
+
+    # The distinct `EvaluationRecord.scorer_version` values present in this
+    # batch, sorted for a deterministic rendering order. Not a validity
+    # check: this project deliberately reports a mixed-version batch rather
+    # than rejecting it (see `summarize_evaluation`'s own comment on this
+    # field for why), so a reader can see at a glance whether every record
+    # was scored under the same scorer, without the batch itself being
+    # unsummarizable when it wasn't.
+    scorer_versions: tuple[str, ...]
 
     latency_ms_min: int | None = None
     latency_ms_max: int | None = None
@@ -538,19 +551,37 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
         citations_valid_count=sum(
             1 for record in records if record.scores.citations_valid
         ),
-        # Explicit `is True`/`is not None` rather than bare truthiness, to
-        # state plainly which of the two questions each count answers. If
-        # this field could have held `None` before this fix, bare
-        # truthiness would have treated `None` and `False` the same (both
-        # are falsy) -- so switching to `is True`/`is not None` here
-        # doesn't change the resulting count, only makes the two questions
-        # explicit.
+        # Applicability is derived from `record.expected.predicates` itself,
+        # not from `record.scores.citations_sufficient is not None`. For any
+        # record this pipeline produces today, the two conditions agree:
+        # `score_run` already sets `citations_sufficient=None` exactly when
+        # `expected.predicates` is empty, so `is not None` and
+        # `bool(expected.predicates)` pick out the same records. The
+        # difference only matters for a HISTORICAL record saved under the
+        # pre-F4 scorer (`SCORER_VERSION == "2"`), which could still carry a
+        # stale `citations_sufficient=True` on an empty-predicate family --
+        # deriving applicability from the record's own `expected.predicates`
+        # instead re-applies F4's fix on read, so summarizing an old record
+        # doesn't reproduce the exact vacuous-truth bug F4 exists to close.
+        # Both counts are gated on the SAME condition deliberately: gating
+        # only the denominator would let a stale `True` still inflate the
+        # numerator while the record is excluded from the denominator,
+        # producing a numerator that can exceed it.
         citations_sufficient_count=sum(
-            1 for record in records if record.scores.citations_sufficient is True
+            1
+            for record in records
+            if record.expected.predicates and record.scores.citations_sufficient is True
         ),
         citations_sufficient_applicable_count=sum(
-            1 for record in records if record.scores.citations_sufficient is not None
+            1 for record in records if record.expected.predicates
         ),
+        # Reported, not enforced -- see `EvaluationSummary.scorer_versions`'s
+        # own comment. After the fix above, a v2 and a v3 record differ only
+        # in how a stale `citations_sufficient=True` on an empty-predicate
+        # record is *counted*, not in any field they carry, so mixing them
+        # in one batch is no longer a correctness hazard the way it would
+        # have been before this fix.
+        scorer_versions=tuple(sorted({record.scorer_version for record in records})),
         latency_ms_min=latency_min,
         latency_ms_max=latency_max,
         model_calls_min=calls_min,

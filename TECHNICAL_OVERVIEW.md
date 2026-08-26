@@ -3343,8 +3343,10 @@ reservation.
 
 ### Paired evaluation review fixes
 
-`SCORER_VERSION` is `"2"`: evaluation records include the graph failure reason, so scorer output
-and batch-abort interpretation changed. Paired live evaluation requires `ANTHROPIC_API_KEY` before
+These review fixes moved `SCORER_VERSION` to `"2"`: evaluation records include the graph failure
+reason, so scorer output and batch-abort interpretation changed. (It is `"3"` today -- see "Unit 6
+follow-up -- F4, vacuous `citations_sufficient` scoring" below for the later bump.) Paired live
+evaluation requires `ANTHROPIC_API_KEY` before
 any scenario starts. Each completed run persists its record; the batch then stops only for
 `COST_CEILING_EXCEEDED`, `INPUT_TOKEN_CAP_EXCEEDED`, `AMBIGUOUS_MODEL_REQUEST`,
 `WALL_CLOCK_EXPIRED`, or `INTERNAL_ERROR`. Malformed output, exhausted repair budget, and forged
