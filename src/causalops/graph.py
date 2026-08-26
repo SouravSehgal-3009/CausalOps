@@ -105,6 +105,8 @@ from causalops.prompts import (
     PROMPT_VERSION,
     STAGE_INSTRUCTIONS,
     SYSTEM_TEXT,
+    DeniedCheckNote,
+    denial_guidance,
     render_context,
 )
 from causalops.run_records import RunEvent, RunRecorder
@@ -320,6 +322,41 @@ def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
 
 def _model_calls_left(model_calls_used: int, budgets: Budgets) -> int:
     return budgets.model_calls - model_calls_used
+
+
+def _denied_check_notes(
+    receipts: Sequence[ToolReceipt], budgets: Budgets
+) -> tuple[DeniedCheckNote, ...]:
+    """Fix F2. Every denied receipt accumulated so far, rendered into a
+    `DeniedCheckNote` the model can actually read -- filtered over *all*
+    receipts, not just the most recent one, because each context render is
+    a stateless re-render with no conversation history: a turn-0 denial
+    must still appear in `final_assessment`'s own context if the model
+    never got a later turn to address it."""
+    notes = []
+    for receipt in receipts:
+        if receipt.policy_result is not PolicyResult.DENIED:
+            continue
+        assert receipt.reason_code is not None, (
+            "a DENIED receipt always carries a reason_code -- "
+            "tool_wrappers._denied_receipt is the only production site that "
+            "builds one, and it copies reason_code straight from a "
+            "PolicyDecision whose own check_reason_code validator already "
+            "refused to construct a DENIED decision without one. ToolReceipt "
+            "has no such validator of its own, and _rebuild_receipts "
+            "rehydrates receipts from checkpoint state, so this stays a real "
+            "tripwire against a corrupted checkpoint rather than a "
+            "restatement of a type guarantee -- same posture as W16's own "
+            "identity check."
+        )
+        notes.append(
+            DeniedCheckNote(
+                tool=receipt.tool,
+                reason_code=receipt.reason_code,
+                guidance=denial_guidance(receipt.tool, receipt.reason_code, budgets),
+            )
+        )
+    return tuple(notes)
 
 
 def _money_refusal_reason_code(
@@ -623,6 +660,7 @@ def _render_stage_request(
         _model_calls_left(model_calls_used, budgets),
         _tools_left(receipts, budgets),
         passages,
+        _denied_check_notes(receipts, budgets),
     )
     system_text = SYSTEM_TEXT
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}"

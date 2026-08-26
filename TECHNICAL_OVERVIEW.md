@@ -2519,7 +2519,7 @@ from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
 the original figure and survived the rewrite to the new one. The valid
 example is a HYPOTHESIS_UPDATE after runbook retrieval: one check remains,
 it can retain all five `Budgets.runbook_passages`, and its proposal-tool
-binding is 12,824 characters/tokens. By
+binding is 12,829 characters/tokens. By
 contrast, FINAL_ASSESSMENT binds its 2,292-token schema, and its
 5,577-character full-runbook context fits the resulting 7,308-token folded
 headroom. `test_live_model.py`'s
@@ -2530,7 +2530,7 @@ prose plus tools does not, and proves the fake transport is still sent. Unit
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 12,824, which is already larger than the 9,600-token prose cap. Folding
+is 12,829, which is already larger than the 9,600-token prose cap. Folding
 proposal schemas into that cap would therefore refuse even an empty proposal
 request; final-assessment schemas do not have that problem. The test derives
 the proposal-stage folded headroom from emitted definitions instead of
@@ -2864,7 +2864,7 @@ round.
   payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
   unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
   assumes`, pinned the final schema at **2,261 characters/tokens** at that
-  historical point. The current single-call proposal measurement is 12,824 for
+  historical point. The current single-call proposal measurement is 12,829 for
   proposals and 2,292 for final assessments; `_send` names them separately.
 - **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
   mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
@@ -3140,7 +3140,7 @@ line is intentionally skipped individually so valid log rows still produce evide
 `settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
 caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
 
-**Post-review single-call schema update.** Current proposal tool schemas are 12,824 serialized
+**Post-review single-call schema update.** Current proposal tool schemas are 12,829 serialized
 characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
 schema is 2,292. The gap between the two is mechanical, not five independently large tools:
 Anthropic tool schemas are self-contained, with no cross-tool `$ref`, so each of the five
@@ -3561,6 +3561,83 @@ bump meets the inverse of that condition: real evaluation records already exist 
 migration to signal here. `SCHEMA_VERSION` is unchanged: this is a read-compatible type
 widening, not a wire schema change — a JSON file with the old literal
 `"citations_sufficient": true` still validates and reads back as `True`.
+
+## Unit A — F1/F2/F3, instrumentation and feedback truthfulness
+
+Three lab-defect-remediation fixes, implemented and reviewed together as one unit,
+each gate-clean on its own before the next: F2 first, then F3, then F1.
+
+**F2 — a policy denial never reached the model.** `render_context` rendered only
+the running budget counters and gathered evidence; a proposal `policy.authorize()`
+denied was recorded to `events.jsonl` but never appeared anywhere the model could
+read it, so a denied proposal cost a turn with no way for the model to learn why.
+`prompts.py` gains a `DeniedCheckNote` (`tool`, `reason_code`, `guidance`) and a
+`denial_guidance()` function mapping every one of the seven reason codes
+`authorize()` can return to one actionable sentence — six static, one
+(`RESULT_LIMIT_EXCEEDED`) tool-aware, since it is shared by `query_logs` (against
+`Budgets.log_rows`) and `search_runbooks` (against `Budgets.runbook_passages`)
+with two different ceilings. `render_context` gains an optional `denied_checks`
+parameter, defaulting to `()` for full backward compatibility with every existing
+call site; when non-empty it renders a `## Denied checks` section between
+`## Status` and `## Evidence`, outside the untrusted-telemetry fence — a denial is
+this application's own decision, not recorded telemetry. Each line is
+deliberately prefixed `"denied: "`, not `"- "`: `models.py`'s
+`ReplayReasoningModel.evidence_from_last_check` scans rendered context text for a
+leading `"- "` to extract an evidence id for replay-fixture substitution, and a
+`"- "`-prefixed denial line would be misread as an evidence line by that scan.
+`graph.py`'s new `_denied_check_notes` helper rebuilds the note list fresh from
+every denied receipt accumulated so far, not just the most recent one, on every
+render — each context render is stateless, with no conversation history, so a
+turn-0 denial must still be visible on `final_assessment`'s own render if the
+model never got a later turn to address it. `PROMPT_VERSION` moves `"5"` →
+`"6"`.
+
+**F3 — the row/passage-limit denial message named no numbers.** `policy.py`'s two
+`RESULT_LIMIT_EXCEEDED` denials said only "that row limit is above the budget" —
+an owner reading `events.jsonl`'s `proposal_denied.message` had to cross-reference
+`Budgets` source to see how far over the requested value was, or what the real
+ceiling was. Both messages now interpolate the requested and budget values
+directly. This is chiefly an audit-log readability fix, not what makes the model
+see the number: F2's `denial_guidance()` already supplies the correct ceiling to
+the model independently of this fix, reading `Budgets` directly rather than this
+message text. `POLICY_VERSION` moves `"3"` → `"4"`.
+
+**F1 — the pool metric measured requests, not pool occupancy.**
+`causalops_pool_in_use` was `LeakyPool`'s own raw, monotonically growing
+per-incident request counter (`pool.acquire()` ran unconditionally on every
+request and never released), not a measure of how full the pool actually was —
+observably indistinguishable from a plain request counter. Renamed end to end:
+the lab's `causalops_pool_in_use` gauge becomes `causalops_pool_utilization`,
+publishing `in_use / capacity` (a ratio) instead of the raw count, guarded
+against `pool_capacity: 0` (unreachable by any of the four scenario files today,
+but a real gap in an unguarded division — the guard covers only the publish, not
+the pre-existing exhaustion check, which is unchanged); `MetricTemplate.
+RESOURCE_POOL_IN_USE` becomes `RESOURCE_POOL_UTILIZATION`; `prometheus.py`'s
+query template follows. The old raw-counter template is not kept as a second
+registered tool — that would preserve the exact trap this fix exists to close.
+`configuration_change` and `downstream_timeout_retry_amplification` both gain
+`pool_capacity: 50` in their base `faulted_config` (well above their real
+evaluation-seed peak in-use counts of 20 and 18 — verified inert, no new fault
+behaviour), closing a corpus-partition risk: without it, only two of the four
+families had `pool_capacity` configured at all, and bare presence/absence of the
+new utilization metric could solve the whole corpus by elimination in two calls,
+without ever needing `list_recent_changes`. Neither scenario's `changes` array
+declares a `config_key` for this new entry, so it stays invisible to
+`list_recent_changes`'s own summaries. `run_metric_check` also gains five
+receipt-internal audit fields (resolved PromQL, resolved window start and end,
+step, grid-point count) recorded alongside the existing payload, for an owner reading
+`evidence.jsonl` back — never rendered to the model, since `render_context`
+reads only `Evidence.summary`. `TOOL_REGISTRY_VERSION` moves `"3"` → `"4"`; the
+rename also adds 5 bytes to `query_metric`'s own embedded schema (12,824 →
+12,829), mechanically bumping the pinned tool-payload-size tests in
+`test_live_model.py`.
+
+**Frozen-report impact.** `tests/unit/test_graph_frozen_reports.py`'s shared
+`Versions(...)` literal moves all three fields at once. Only the two scenarios
+whose script contains a real `DENIED` receipt move their own
+`final_context_digest` (F2's new section renders only when a denial has actually
+occurred); the other four scenarios, and F1/F3 alone, move no digest — confirmed
+by running the suite before and after each fix.
 
 ## Superseded v1 evaluation design
 

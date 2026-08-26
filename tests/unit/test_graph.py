@@ -533,6 +533,54 @@ def test_two_denied_first_proposals_still_leave_the_model_a_third_chance_to_chec
     assert result.report.tools_executed == 1
 
 
+def test_a_turn_0_denial_s_guidance_still_appears_in_a_later_turn(
+    tmp_path: Path,
+) -> None:
+    """Fix F2. Every context render is stateless, with no conversation
+    history -- a proposal denied on turn 0 must still show up as a
+    `## Denied checks` note on turn 1's own render, or the model has no
+    way to learn why its own first proposal produced no evidence.
+    Deliberately scripts turn 1 as a stop (no further proposal), the
+    minimal shape that still reaches a second, distinct context render."""
+    scope = incident_scope()
+    out_of_scope = ToolProposal(
+        arguments=ListRecentChangesArguments(
+            service="orders",
+            window_start=scope.started_at - timedelta(hours=1),
+            window_end=scope.started_at - timedelta(minutes=30),
+        ),
+        evidence_gap="whether orders changed before the incident window",
+        expected_observation="no change, this window predates the incident",
+    )
+    script = {
+        "initial_plan": [plan_json(proposal=out_of_scope)],
+        "hypothesis_update": [plan_json(stop_reason="nothing safe left to check")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+
+    result, _ = investigate_via_graph(model)
+
+    assert [request.stage.value for request in model.requests] == [
+        "initial_plan",
+        "hypothesis_update",
+        "final_assessment",
+    ]
+    (only_receipt,) = result.receipts
+    assert only_receipt.policy_result is PolicyResult.DENIED
+    assert only_receipt.reason_code is ReasonCode.OUTSIDE_INCIDENT_WINDOW
+    denial_line = (
+        f"denied: {only_receipt.tool.value} "
+        f"({ReasonCode.OUTSIDE_INCIDENT_WINDOW.value})"
+    )
+    # Not just the very next turn -- every later render too, including
+    # FINAL_ASSESSMENT's, since the model never got another chance to
+    # address it.
+    for request in model.requests[1:]:
+        assert "## Denied checks" in request.context_text
+        assert denial_line in request.context_text
+
+
 def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
     tmp_path: Path,
 ) -> None:

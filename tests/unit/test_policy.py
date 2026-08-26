@@ -258,6 +258,63 @@ def test_an_allowed_decision_with_a_reason_code_is_rejected() -> None:
         )
 
 
+def test_a_row_limit_denial_states_the_requested_and_budget_numbers() -> None:
+    """Fix F3. `PolicyDecision.message` reaches `events.jsonl`'s
+    `proposal_denied.message` verbatim -- an owner reading that audit log
+    needs to see the real numbers, not a bare "above the budget," without
+    cross-referencing `Budgets` source. Asserted on the numbers themselves,
+    not exact sentence wording, so a future rewording does not break this
+    test for no reason."""
+    over_limit = BUDGETS.log_rows + 7
+    decision = authorize(
+        logs_proposal(row_limit=over_limit), incident_scope(), set(), BUDGETS, 2
+    )
+
+    assert decision.reason_code is ReasonCode.RESULT_LIMIT_EXCEEDED
+    assert str(over_limit) in decision.message
+    assert str(BUDGETS.log_rows) in decision.message
+
+
+def test_a_passage_limit_denial_states_the_requested_and_budget_numbers() -> None:
+    """Fix F3, the `search_runbooks` sibling of the test above."""
+    over_limit = BUDGETS.runbook_passages + 3
+    decision = authorize(
+        runbooks_proposal(limit=over_limit), incident_scope(), set(), BUDGETS, 2
+    )
+
+    assert decision.reason_code is ReasonCode.RESULT_LIMIT_EXCEEDED
+    assert str(over_limit) in decision.message
+    assert str(BUDGETS.runbook_passages) in decision.message
+
+
+def test_a_corrected_row_limit_retry_is_allowed_and_the_original_stays_denied() -> None:
+    """Fix F3's corrected-retry proof: proposing an over-limit `row_limit`
+    is denied; proposing the corrected limit is `ALLOWED`; proposing the
+    original over-limit value again afterward is still `DUPLICATE_
+    PROPOSAL`, not re-evaluated against the budget -- proving F3's
+    message-text fix left the fingerprint invariant `tool_wrappers.py`
+    depends on (a denied proposal's fingerprint is marked seen too, so it
+    cannot be silently retried) undisturbed."""
+    over_limit = BUDGETS.log_rows + 5
+    seen: set[str] = set()
+
+    over = logs_proposal(row_limit=over_limit)
+    first = authorize(over, incident_scope(), seen, BUDGETS, 2)
+    assert first.result is PolicyResult.DENIED
+    # Mirrors `tool_wrappers.ToolWrapper.dispatch`'s own rule: a
+    # fingerprint is marked seen whether the decision allows or denies it.
+    seen.add(first.fingerprint)
+
+    corrected = logs_proposal(row_limit=BUDGETS.log_rows)
+    second = authorize(corrected, incident_scope(), seen, BUDGETS, 2)
+    assert second.result is PolicyResult.ALLOWED
+    seen.add(second.fingerprint)
+
+    third = authorize(over, incident_scope(), seen, BUDGETS, 2)
+    assert third.result is PolicyResult.DENIED
+    assert third.reason_code is ReasonCode.DUPLICATE_PROPOSAL
+
+
 @pytest.mark.parametrize("service", ["../../etc/passwd", "orders/../../secret"])
 def test_a_path_traversal_shaped_service_is_denied_before_any_backend_path_join(
     service: str,

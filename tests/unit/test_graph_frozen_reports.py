@@ -189,6 +189,54 @@ time and `assert_report_matches_frozen`'s `prompt_version="4"` (now
 `POLICY_VERSION`/`TOOL_REGISTRY_VERSION` stay `"3"`/`"3"`, and no
 scenario below changes stage sequence, ids, disposition, receipt shapes,
 evidence kinds, or event vocabulary.
+
+**Instrumentation/feedback-truthfulness Unit A (F1/F2/F3) bumps all
+three versions at once, but moves `final_context_digest` for only two
+of the six scenarios below.** F2 (`prompts.py`) adds an optional
+`## Denied checks` section to `render_context`, rendered only when at
+least one denied receipt has accumulated so far -- with the default
+empty sequence every other call site still passes, rendered output is
+byte-identical to before, so a scenario that never denies a proposal
+renders no differently and its digest does not move. Only `after_a_
+first_turn_denial` and `after_a_repeated_proposal` -- the two scenarios
+below whose script contains a real `DENIED` receipt -- pick up the new
+section on every turn after the denial, moving their own
+`final_context_digest` literal (confirmed by running the suite before
+and after: exactly these two, and no others, failed on
+`final_context_digest`). `assert_report_matches_frozen`'s
+`prompt_version="5"` becomes `"6"`. F3 (`policy.py`) only changes
+`PolicyDecision.message` text, which reaches `events.jsonl`, never
+`render_context` -- confirmed no digest moves from F3 alone.
+`policy_version="3"` becomes `"4"`. F1 (`tools.py`/`prometheus.py`)
+renames `MetricTemplate.RESOURCE_POOL_IN_USE` to `RESOURCE_POOL_
+UTILIZATION`, which appears only in `QueryMetricArguments`'s own tool
+schema (pinned separately, in `test_live_model.py`), never in this
+file's rendered context text or any replay fixture (grep-confirmed) --
+`tool_registry_version="3"` becomes `"4"` with no digest movement of
+its own. Net effect on this file: `assert_report_matches_frozen`'s
+`Versions(...)` literal moves all three fields at once
+(`prompt_version="6"`, `policy_version="4"`, `tool_registry_version=
+"4"`), while only the two denial scenarios' `final_context_digest`
+literals move -- the other four scenarios' literals, and every stage
+sequence/id/disposition/receipt-shape/evidence-kind/event-vocabulary
+assertion in the file, are unaffected.
+
+**A planning-subagent review round on this same unit added a corrective
+action to `UNKNOWN_SERVICE`'s denial-guidance sentence** (`prompts.py`'s
+`_STATIC_DENIAL_GUIDANCE`, "use one of the services already named
+above") -- safe to add since the service list is already rendered in
+`render_context`'s own `## Incident` section above where this text
+appears, but it moves `after_a_first_turn_denial`'s `final_context_
+digest` a SECOND time within this same unit (that scenario's denial is
+`UNKNOWN_SERVICE`; `after_a_repeated_proposal`'s is `DUPLICATE_
+PROPOSAL`, untouched by this wording change, so its digest does not
+move again). No further version bump: this unit's existing `prompt_
+version="6"` already accounts for it, since it is one more edit to the
+same `prompts.py` module already bumped above. Confirmed the same way
+as every prior round: running the suite before and after this specific
+wording change showed exactly one new failure
+(`after_a_first_turn_denial`, `final_context_digest` only), and every
+other field/scenario in the file is unaffected.
 """
 
 from pathlib import Path
@@ -534,9 +582,9 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="5",
-        policy_version="3",
-        tool_registry_version="3",
+        prompt_version="6",
+        policy_version="4",
+        tool_registry_version="4",
     )
 
 
@@ -647,7 +695,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "f057cde86d48a70e53d182d17cb9b5c7e6b40e5371637e80bf55d53bb86e38d6"
+            "32e4c97f72244ee52722358c2282c111405f3e970a3ffd6dc17adf356b70af62"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -728,7 +776,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "f057cde86d48a70e53d182d17cb9b5c7e6b40e5371637e80bf55d53bb86e38d6"
+            "76b6d21a16c7a42570ca9db0b81fc85dffd1049cfd98b2246f7d528ef76e31a6"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(

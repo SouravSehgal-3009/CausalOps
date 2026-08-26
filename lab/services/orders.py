@@ -59,8 +59,20 @@ def handle(request_id: str) -> RouteResult:
         settings_loaded=len(configuration),
     )
     in_use = pool.acquire(incident_id)
-    orders.set_pool_in_use(in_use)
     capacity = configuration.get(POOL_CAPACITY_SETTING)
+    # Fix F1. Publish utilization (a ratio), not the raw cumulative slot
+    # count `LeakyPool` hands out -- the raw count only ever grows across an
+    # incident's whole lifetime (baseline requests included, since
+    # `pool.acquire` above runs unconditionally on every request), so it
+    # was observably indistinguishable from a plain request counter and
+    # never actually measured pool occupancy. Guarded by `int(capacity) >
+    # 0`: no scenario today configures `pool_capacity: 0`, but an
+    # unguarded division would raise `ZeroDivisionError` on one if it ever
+    # did. This guard is on the *publish* only -- the exhaustion check
+    # below is unchanged, so a `pool_capacity: 0` config still exhausts
+    # immediately, exactly as it does today.
+    if capacity is not None and int(capacity) > 0:
+        orders.set_pool_utilization(in_use / int(capacity))
     if capacity is not None and in_use > int(capacity):
         orders.log(
             "error",

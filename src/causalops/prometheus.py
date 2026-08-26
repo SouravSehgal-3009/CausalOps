@@ -64,8 +64,14 @@ METRIC_QUERIES: dict[MetricTemplate, str] = {
         'sum(rate(causalops_requests_total{{service="{service}",'
         'incident="{incident}",outcome="timeout"}}[30s]))'
     ),
-    MetricTemplate.RESOURCE_POOL_IN_USE: (
-        'max(causalops_pool_in_use{{service="{service}",incident="{incident}"}})'
+    # Fix F1. Queries the renamed `causalops_pool_utilization` gauge -- a
+    # ratio (`in_use / capacity`), not the raw cumulative slot count the
+    # old `causalops_pool_in_use` published. The old metric is deliberately
+    # not kept as a second registered template: that would preserve the
+    # exact trap this fix exists to close (a model reading a monotonically
+    # growing counter and mistaking it for pool occupancy).
+    MetricTemplate.RESOURCE_POOL_UTILIZATION: (
+        'max(causalops_pool_utilization{{service="{service}",incident="{incident}"}})'
     ),
 }
 
@@ -382,6 +388,32 @@ def run_metric_check(
         "readings_discarded": readings_discarded,
         "status": status.value,
     }
+    # Q7 addendum. Receipt-internal audit data only: `render_context`
+    # (`prompts.py`) puts only `Evidence.summary` in front of the model,
+    # never `Evidence.payload`, so these five fields change nothing the
+    # model sees -- they exist for an owner reading `evidence.jsonl` back,
+    # recording exactly what was queried and against what resolved grid.
+    # They are added before `trim_to_bytes` and so share the same byte
+    # budget as everything else in the payload; at roughly 285 bytes
+    # against `MAX_RESULT_BYTES`, they never approach it (a full
+    # `MAX_METRIC_SAMPLES`-sample metric payload measures well under the
+    # cap), and any trim that did reach them would set `truncated` like
+    # every other path -- never silent.
+    # `window_start`/`window_end` are asserted (not re-checked) because
+    # `fetch_metric_samples` above already asserted the same and only
+    # returned `ParsedSamples`, never `CheckOutcome`, once they held --
+    # this is the same non-`None` guarantee restated for mypy at this
+    # function's own scope, not a new runtime condition.
+    assert arguments.window_start is not None
+    assert arguments.window_end is not None
+    start, end, step = aligned_metric_window(
+        arguments.window_start, arguments.window_end
+    )
+    payload["promql"] = promql
+    payload["query_window_start"] = start.isoformat()
+    payload["query_window_end"] = end.isoformat()
+    payload["query_step_seconds"] = int(step.total_seconds())
+    payload["grid_points"] = int((end - start) // step) + 1
     payload = trim_to_bytes(payload, "samples", rows, "sample_count")
     # Post-freeze review. `count_key="sample_count"` was added in this
     # same round to keep the PAYLOAD honest post-trim (Unit 3b-4 addendum,

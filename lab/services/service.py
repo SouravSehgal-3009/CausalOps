@@ -101,9 +101,10 @@ class LabService:
             registry=self.registry,
             buckets=LATENCY_BUCKETS_SECONDS,
         )
-        self.pool_in_use = Gauge(
-            "causalops_pool_in_use",
-            "Slots in use in the bounded resource pool.",
+        self.pool_utilization = Gauge(
+            "causalops_pool_utilization",
+            "Fraction of the bounded resource pool's capacity in use "
+            "(in_use / capacity), not the raw cumulative slot count.",
             ["service", "incident"],
             registry=self.registry,
         )
@@ -146,8 +147,8 @@ class LabService:
         self.requests.labels(self.name, incident, outcome).inc()
         self.latency.labels(self.name, incident).observe(seconds)
 
-    def set_pool_in_use(self, count: int) -> None:
-        self.pool_in_use.labels(self.name, self.incident_id()).set(count)
+    def set_pool_utilization(self, utilization: float) -> None:
+        self.pool_utilization.labels(self.name, self.incident_id()).set(utilization)
 
     def serve(self, route: Route) -> None:
         server = ThreadingHTTPServer(("", self.port), self.handler_class(route))

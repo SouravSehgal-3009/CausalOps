@@ -4,7 +4,7 @@
   "services": ["gateway", "orders", "inventory"],
   "symptom": "ELEVATED_ERRORS_AND_LATENCY",
   "healthy_config": {},
-  "faulted_config": {"response_delay_seconds": 1.5},
+  "faulted_config": {"response_delay_seconds": 1.5, "pool_capacity": 50},
   "baseline_requests": 6,
   "fault_requests": 8,
   "changes": [

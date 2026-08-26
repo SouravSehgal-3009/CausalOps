@@ -1,12 +1,37 @@
+import pytest
 from fake_incident import alert_packet, incident_scope, packet_evidence
 
+from causalops.domain import Budgets, ReasonCode
 from causalops.prompts import (
     FENCE_CLOSE,
     FENCE_OPEN,
     SYSTEM_TEXT,
+    DeniedCheckNote,
+    denial_guidance,
     fence_safe,
     render_context,
 )
+from causalops.tools import ToolName
+
+BUDGETS = Budgets()
+
+# Fix F2. Every `(tool, reason_code)` pair `policy.authorize()` can
+# actually produce, per `policy.py`'s own `deny(...)` call sites --
+# `RESULT_LIMIT_EXCEEDED` fires from two different tools (`query_logs`,
+# `search_runbooks`), every other reason code from `query_metric`/
+# `query_logs`/`get_topology` (the exact tool does not change which
+# static sentence `denial_guidance` returns for those six, so `QUERY_
+# METRIC` stands in for all of them here).
+DENIABLE_TOOL_REASON_PAIRS = [
+    (ToolName.QUERY_METRIC, ReasonCode.BUDGET_EXHAUSTED),
+    (ToolName.QUERY_METRIC, ReasonCode.DUPLICATE_PROPOSAL),
+    (ToolName.QUERY_METRIC, ReasonCode.CROSS_INCIDENT_REQUEST),
+    (ToolName.QUERY_METRIC, ReasonCode.UNKNOWN_SERVICE),
+    (ToolName.QUERY_METRIC, ReasonCode.UNRESOLVED_WINDOW),
+    (ToolName.QUERY_METRIC, ReasonCode.OUTSIDE_INCIDENT_WINDOW),
+    (ToolName.QUERY_LOGS, ReasonCode.RESULT_LIMIT_EXCEEDED),
+    (ToolName.SEARCH_RUNBOOKS, ReasonCode.RESULT_LIMIT_EXCEEDED),
+]
 
 
 def context_with(summary: str) -> str:
@@ -80,3 +105,65 @@ def test_evidence_appears_with_its_opaque_id_inside_the_fence() -> None:
     assert symptom.evidence_id in fenced
     assert symptom.summary in fenced
     assert "[truncated: 1 more]" in fenced
+
+
+def test_no_denied_checks_renders_byte_identically_to_before_fix_f2() -> None:
+    """Fix F2. `denied_checks` defaults to `()`, the same backward-
+    compatible pattern `passages` already uses -- every call site that
+    predates this fix (every one in the existing suite) must keep working
+    unchanged. Compares the implicit default against an explicit empty
+    sequence, and asserts no `## Denied checks` heading leaks in either
+    case."""
+    args = (alert_packet(), incident_scope(), [], [], 4, 2)
+
+    implicit_default = render_context(*args)
+    explicit_empty = render_context(*args, denied_checks=())
+
+    assert implicit_default == explicit_empty
+    assert "## Denied checks" not in implicit_default
+
+
+@pytest.mark.parametrize("tool,reason_code", DENIABLE_TOOL_REASON_PAIRS)
+def test_denial_guidance_covers_every_real_denial_without_a_bare_value_fallback(
+    tool: ToolName, reason_code: ReasonCode
+) -> None:
+    """Fix F2. `denial_guidance` must never raise and must never fall back
+    to a bare `reason_code.value` for any `(tool, reason_code)` pair
+    `policy.authorize()` can actually produce -- a raised `KeyError` would
+    crash the investigation, and a bare enum name (e.g. `"BUDGET_
+    EXHAUSTED"`) is not the actionable sentence this fix exists to give
+    the model."""
+    guidance = denial_guidance(tool, reason_code, BUDGETS)
+
+    assert guidance
+    assert guidance != reason_code.value
+
+
+def test_a_denied_check_renders_outside_the_fence_between_status_and_evidence() -> None:
+    """Fix F2. The denial line must be model-visible application text, not
+    recorded telemetry -- it sits between `## Status` and `## Evidence`,
+    outside `FENCE_OPEN`/`FENCE_CLOSE`, and is prefixed `"denied: "`, never
+    `"- "` (see `render_context`'s own docstring for why: `models.py`'s
+    `ReplayReasoningModel.evidence_from_last_check` scans for a leading
+    `"- "` to extract an evidence id, and a `"- "`-prefixed denial line
+    would be misread as one)."""
+    note = DeniedCheckNote(
+        tool=ToolName.QUERY_LOGS,
+        reason_code=ReasonCode.RESULT_LIMIT_EXCEEDED,
+        guidance=denial_guidance(
+            ToolName.QUERY_LOGS, ReasonCode.RESULT_LIMIT_EXCEEDED, BUDGETS
+        ),
+    )
+
+    context = render_context(
+        alert_packet(), incident_scope(), [], [], 4, 2, denied_checks=(note,)
+    )
+
+    assert context.count(FENCE_CLOSE) == 1
+    before_fence = context.split(FENCE_OPEN)[0]
+    assert "## Denied checks" in before_fence
+    denial_line = f"denied: {ToolName.QUERY_LOGS.value} "
+    assert denial_line in before_fence
+    for line in before_fence.splitlines():
+        if line.startswith("denied:"):
+            assert not line.startswith("- ")

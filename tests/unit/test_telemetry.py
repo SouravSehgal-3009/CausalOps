@@ -401,6 +401,38 @@ def test_fetch_metric_samples_emits_a_plain_integer_second_step() -> None:
     assert (end - start) % timedelta(seconds=METRIC_STEP_SECONDS) == timedelta(0)
 
 
+def test_the_metric_payload_records_what_was_actually_queried(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    """Q7's audit fields. Deliberately uses a window whose span is NOT a
+    whole multiple of METRIC_STEP_SECONDS: with the default 30-minute
+    fixture window (1800s, an exact multiple of 15s) `aligned_metric_window`
+    is a no-op and `query_window_start` would equal the raw `window_start`,
+    so this test could not tell the resolved grid apart from the requested
+    window. Offsetting the start by 7s makes them differ, which is the
+    whole point of recording it."""
+    arguments = QueryMetricArguments(
+        template=MetricTemplate.GATEWAY_ERROR_RATE,
+        service="gateway",
+        window_start=WINDOW_START + timedelta(seconds=7),
+        window_end=WINDOW_END,
+    )
+
+    outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
+
+    payload = outcome.payload
+    assert payload["promql"] == (
+        'sum(rate(causalops_requests_total{service="gateway",'
+        f'incident="{INCIDENT_ID}",outcome="error"}}[30s]))'
+    )
+    assert payload["query_window_start"] == (
+        (WINDOW_START + timedelta(seconds=15)).isoformat()
+    )
+    assert payload["query_window_end"] == WINDOW_END.isoformat()
+    assert payload["query_step_seconds"] == METRIC_STEP_SECONDS
+    assert payload["grid_points"] == 120
+
+
 def test_a_metric_query_against_nothing_is_unavailable() -> None:
     outcome = run_metric_check(
         metric_arguments(), incident_scope(), "http://127.0.0.1:1", 1
@@ -1452,15 +1484,15 @@ def test_the_downstream_timeout_rate_template_executes(
     assert outcome.payload["template"] == MetricTemplate.DOWNSTREAM_TIMEOUT_RATE.value
 
 
-def test_the_resource_pool_in_use_template_executes(
+def test_the_resource_pool_utilization_template_executes(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    arguments = metric_arguments(template=MetricTemplate.RESOURCE_POOL_IN_USE)
+    arguments = metric_arguments(template=MetricTemplate.RESOURCE_POOL_UTILIZATION)
 
     outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
 
     assert outcome.outcome is ToolOutcome.EXECUTED
-    assert outcome.payload["template"] == MetricTemplate.RESOURCE_POOL_IN_USE.value
+    assert outcome.payload["template"] == MetricTemplate.RESOURCE_POOL_UTILIZATION.value
 
 
 def test_the_gateway_latency_p95_template_executes(

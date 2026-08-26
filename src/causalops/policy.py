@@ -25,7 +25,7 @@ from causalops.tools import (
     fingerprint,
 )
 
-POLICY_VERSION = "3"
+POLICY_VERSION = "4"
 
 
 class PolicyDecision(BaseModel):
@@ -99,7 +99,9 @@ def authorize(
             return deny(
                 mark,
                 ReasonCode.RESULT_LIMIT_EXCEEDED,
-                "that passage limit is above the budget",
+                f"limit {arguments.limit} is above the budget of "
+                f"{budgets.runbook_passages}; propose limit "
+                f"{budgets.runbook_passages} or less",
             )
         return PolicyDecision(result=PolicyResult.ALLOWED, fingerprint=mark)
 
@@ -132,7 +134,10 @@ def authorize(
         and arguments.row_limit > budgets.log_rows
     ):
         return deny(
-            mark, ReasonCode.RESULT_LIMIT_EXCEEDED, "that row limit is above the budget"
+            mark,
+            ReasonCode.RESULT_LIMIT_EXCEEDED,
+            f"row_limit {arguments.row_limit} is above the budget of "
+            f"{budgets.log_rows}; propose row_limit {budgets.log_rows} or less",
         )
     return PolicyDecision(result=PolicyResult.ALLOWED, fingerprint=mark)
 

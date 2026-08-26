@@ -7,11 +7,20 @@ names, seeds, and expected causes have no place to appear in either.
 """
 
 from collections.abc import Sequence
+from typing import NamedTuple
 
-from causalops.domain import Evidence, IncidentScope, InitialAlertPacket, RunbookPassage
+from causalops.domain import (
+    Budgets,
+    Evidence,
+    IncidentScope,
+    InitialAlertPacket,
+    ReasonCode,
+    RunbookPassage,
+)
 from causalops.models import Stage
+from causalops.tools import ToolName
 
-PROMPT_VERSION = "5"
+PROMPT_VERSION = "6"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -65,6 +74,68 @@ STAGE_INSTRUCTIONS: dict[Stage, str] = {
 }
 
 
+class DeniedCheckNote(NamedTuple):
+    """A render-time-only view of one denied proposal, for the model's own
+    context. Never persisted -- `graph.py`'s `_denied_check_notes` rebuilds
+    this fresh from `ToolReceipt`/`Budgets` on every render, the same way
+    `checks_left`/`model_calls_left` are recomputed rather than stored. No
+    `GraphState` field, no `SCHEMA_VERSION` bump."""
+
+    tool: ToolName
+    reason_code: ReasonCode
+    guidance: str
+
+
+# Fix F2. Static guidance for every `policy.authorize()` denial reason
+# except `RESULT_LIMIT_EXCEEDED`, which is shared by two tools against two
+# different budget ceilings (`query_logs` against `Budgets.log_rows`,
+# `search_runbooks` against `Budgets.runbook_passages`) and so needs the
+# tool-aware branch in `denial_guidance` below instead of a flat sentence
+# here. These six, plus that one, are the complete set `authorize()` can
+# return -- confirmed by reading every `deny(...)` call site in `policy.py`.
+_STATIC_DENIAL_GUIDANCE: dict[ReasonCode, str] = {
+    ReasonCode.BUDGET_EXHAUSTED: "no executed-check slots remain this investigation.",
+    ReasonCode.DUPLICATE_PROPOSAL: (
+        "this exact tool and arguments were already proposed; "
+        "change an argument before proposing it again."
+    ),
+    ReasonCode.CROSS_INCIDENT_REQUEST: (
+        "that request targets another incident; use this incident's own id."
+    ),
+    ReasonCode.UNKNOWN_SERVICE: (
+        "that service is not part of this incident; "
+        "use one of the services already named above."
+    ),
+    ReasonCode.UNRESOLVED_WINDOW: (
+        "the window could not be resolved; omit it to use the full incident window."
+    ),
+    ReasonCode.OUTSIDE_INCIDENT_WINDOW: (
+        "the requested window falls outside the incident window; "
+        "narrow it to fit, or omit it."
+    ),
+}
+
+
+def denial_guidance(tool: ToolName, reason_code: ReasonCode, budgets: Budgets) -> str:
+    """One human/model-readable sentence explaining a denial, safe to render
+    in front of the model: `tool`/`reason_code` are this application's own
+    enum values, and `budgets`' fields are typed `int`s the schema already
+    bounds -- never model-supplied free text, so this never opens an
+    injection path into the rendered context the way echoing back a raw
+    argument would."""
+    if reason_code is ReasonCode.RESULT_LIMIT_EXCEEDED:
+        limit = (
+            budgets.log_rows
+            if tool is ToolName.QUERY_LOGS
+            else budgets.runbook_passages
+        )
+        return (
+            f"the requested limit is above the budget of {limit}; "
+            f"propose {limit} or less."
+        )
+    return _STATIC_DENIAL_GUIDANCE[reason_code]
+
+
 def render_context(
     packet: InitialAlertPacket,
     scope: IncidentScope,
@@ -73,6 +144,7 @@ def render_context(
     model_calls_left: int,
     checks_left: int,
     passages: Sequence[RunbookPassage] = (),
+    denied_checks: Sequence[DeniedCheckNote] = (),
 ) -> str:
     """`passages` defaults to `()` so every call site that predates
     retrieval -- all three in the existing test suite -- keeps working
@@ -83,7 +155,20 @@ def render_context(
     are this application's own values, never backend-arbitrary text, the
     same treatment `record.evidence_id`/`record.kind` already get above).
     `context.count(FENCE_CLOSE) == 1` stays true whether or not any passage
-    is present."""
+    is present.
+
+    Fix F2. `denied_checks` defaults to `()` for the same backward-
+    compatible reason `passages` does -- with the default, this function's
+    output is byte-identical to before this fix. Rendered *outside* the
+    untrusted-telemetry fence, between `## Status` and `## Evidence`: a
+    denial is this application's own decision, not recorded telemetry.
+    Each line is deliberately prefixed `"denied: "`, not `"- "` -- the only
+    other place in this tree that scans rendered context text for a
+    leading `"- "` is `models.py`'s `ReplayReasoningModel.
+    evidence_from_last_check`, which extracts an evidence id for replay-
+    fixture substitution; a `"- "`-prefixed denial line would be
+    misinterpreted as an evidence line by that scan the moment a fixture
+    combined a denial with `{{evidence_from_last_check}}`."""
     lines = [
         "## Incident",
         f"incident: {packet.incident_id}",
@@ -98,10 +183,18 @@ def render_context(
         "## Status",
         f"model calls left: {model_calls_left}",
         f"checks left: {checks_left}",
-        "",
-        "## Evidence",
-        FENCE_OPEN,
     ]
+    if denied_checks:
+        lines.append("")
+        lines.append("## Denied checks")
+        for note in denied_checks:
+            lines.append(
+                f"denied: {note.tool.value} ({note.reason_code.value}) -- "
+                f"{note.guidance}"
+            )
+    lines.append("")
+    lines.append("## Evidence")
+    lines.append(FENCE_OPEN)
     for record in evidence:
         lines.append(
             f"- {record.evidence_id} [{record.kind.value}] "

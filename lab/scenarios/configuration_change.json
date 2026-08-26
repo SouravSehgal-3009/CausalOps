@@ -4,7 +4,7 @@
   "services": ["gateway", "orders", "inventory"],
   "symptom": "ELEVATED_ERRORS",
   "healthy_config": {"require_order_token": false},
-  "faulted_config": {"require_order_token": true},
+  "faulted_config": {"require_order_token": true, "pool_capacity": 50},
   "baseline_requests": 6,
   "fault_requests": 10,
   "changes": [
