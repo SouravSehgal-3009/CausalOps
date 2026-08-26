@@ -11,6 +11,7 @@
     {
       "service": "orders",
       "summary": "configuration update: require_order_token enabled",
+      "config_key": "require_order_token",
       "offset_seconds": -60
     },
     {

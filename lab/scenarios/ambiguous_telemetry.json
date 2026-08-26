@@ -11,11 +11,13 @@
     {
       "service": "orders",
       "summary": "configuration update: pool_capacity set to 9",
+      "config_key": "pool_capacity",
       "offset_seconds": -40
     },
     {
       "service": "inventory",
       "summary": "configuration update: response_delay_seconds set to 1.5",
+      "config_key": "response_delay_seconds",
       "offset_seconds": -35
     },
     {
@@ -39,7 +41,7 @@
     },
     "evaluation": {
       "change_offsets": [-65, -55, -230],
-      "faulted_config_overrides": {"pool_capacity": 7, "response_delay_seconds": 2.0}
+      "faulted_config_overrides": {"pool_capacity": 13, "response_delay_seconds": 2.0}
     }
   }
 }

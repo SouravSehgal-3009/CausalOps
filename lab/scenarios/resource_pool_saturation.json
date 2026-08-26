@@ -11,6 +11,7 @@
     {
       "service": "orders",
       "summary": "configuration update: pool_capacity set to 9",
+      "config_key": "pool_capacity",
       "offset_seconds": -45
     },
     {

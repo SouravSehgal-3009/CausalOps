@@ -3421,6 +3421,57 @@ registry or `LeakyPool` state to clear it directly) is what bounds that growth, 
 a shorter retention window. A restart clears the exporter's own in-process state
 without touching anything Prometheus already scraped and stored.
 
+## Lab defect remediation — Unit 4, evaluation corpus validity
+
+Unit 4 of `LAB_DEFECTS_FIX_PLAN.md` fixes four defects in what the evaluation
+corpus itself says, deliberately isolated from Unit 2's telemetry fixes since a
+diff that simultaneously changes how metrics are queried and what the correct
+answer is has no fixed point for a reviewer to reason from.
+
+W8 reparameterizes `ambiguous_telemetry`'s evaluation-seed `pool_capacity`
+from 7 to 13. Under the old value, every fault request short-circuited on pool
+exhaustion before `orders.py`'s retry loop — the only place
+`response_delay_seconds` could ever fire — so the family degenerated to an
+observationally-identical clone of `resource_pool_saturation` carrying the
+opposite expected label. Capacity 13 splits the ten evaluation-seed fault
+requests roughly in half: five fall through to the retry loop and time out,
+five exceed capacity and fail immediately, so both `pool_exhausted` and
+`upstream_timeout` genuinely appear, and `UNDETERMINED` becomes a defensible
+label rather than a contradictory one.
+
+W9 makes `list_recent_changes`' rendered summaries track the configuration a
+scenario actually applied, not static prose no override ever touched. A new
+`_resolved_change_summary` helper (`scenario_control.py`) reads a change
+entry's optional `config_key` against the run's own resolved
+`faulted_config` and renders `"configuration update: {key} set to {value}"`;
+an entry naming no key (an image rebuild, a dependency bump) keeps its
+original static text. `configuration_change`'s own scoring predicate
+(`CONTAINS "require_order_token"`) still matches the rendered summary either
+way, verified directly against `evaluation.py`'s real predicate evaluation
+before this landed.
+
+W10 makes the alert's `total_requests` cover the whole recorded window, not
+just the fault phase. `window_start` opens `WINDOW_LEAD_IN` (5 minutes)
+before the healthy baseline traffic even runs, so a `total_requests` count
+that excluded the baseline understated the window's real traffic by exactly
+the baseline's own request count. `build_incident`'s call site
+(`start_scenario`) now passes `healthy + served + failed`; `failed_requests`
+is unchanged, since the guard immediately above it (`if healthy == 0 or
+unhealthy > 0: raise`) already proves `unhealthy` is structurally 0 by the
+time the alert is built.
+
+W18 states the `CONFIG_CHANGE` label convention explicitly in `SYSTEM_TEXT`:
+the label means the configuration change is itself the proximate reason
+requests are failing, not merely a change that happened to precede an
+unrelated failure. Three of the four families carry a resolved
+configuration-change record after W9, but only one is the correct
+`CONFIG_CHANGE` diagnosis — without this sentence, fixing tool selection
+elsewhere in this plan could turn today's safe abstentions into confident
+wrong answers, which would be strictly worse than the current result.
+`PROMPT_VERSION` moved from `3` to `4` accordingly, moving every
+`final_context_digest` literal in `tests/unit/test_graph_frozen_reports.py`
+by the same mechanism every prior prompt change in this project has.
+
 ## Superseded v1 evaluation design
 
 The original v1 plan (formerly this document's §11 "Evaluation and scoring"

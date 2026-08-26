@@ -11,6 +11,7 @@
     {
       "service": "inventory",
       "summary": "configuration update: response_delay_seconds set to 1.5",
+      "config_key": "response_delay_seconds",
       "offset_seconds": -30
     },
     {

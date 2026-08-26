@@ -251,6 +251,85 @@ def test_start_scenario_settles_before_stamping_window_end(
     assert events == ["clock", "sleep:12", "clock"]
 
 
+def test_w9_change_summary_reflects_the_resolved_config_value(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lab-defect-fix Unit 4, W9. Under the evaluation seed's override
+    (`pool_capacity` 9 -> 7 for `resource_pool_saturation`), the rendered
+    change summary must state the value actually applied, not the
+    scenario file's static prose -- which still says `9`, this family's
+    own *development*-seed value, since `apply_seed_variant` never
+    touched `entry["summary"]` before this fix. Proves `write_manifests`
+    now reads the resolved `faulted_config`, not the static string."""
+    family = "resource_pool_saturation"
+    use_family_gateway(monkeypatch, project, family)
+
+    incident_id = start_scenario(project, family, "evaluation")
+
+    changes = json.loads(
+        (runs_root(project) / incident_id / "changes.json").read_text(encoding="utf-8")
+    )
+    orders_change = next(c for c in changes if c["service"] == "orders")
+    assert orders_change["summary"] == "configuration update: pool_capacity set to 7"
+
+
+def test_w9_a_change_entry_with_no_config_key_keeps_its_static_summary(
+    project: Path,
+) -> None:
+    """Lab-defect-fix Unit 4, W9. An entry naming no `config_key` (image
+    rebuilds, dependency bumps) has no resolved config value to render
+    from and must keep its own static prose, unaffected by the fix."""
+    incident_id = start_scenario(project, FAMILY, "development")
+
+    changes = json.loads(
+        (runs_root(project) / incident_id / "changes.json").read_text(encoding="utf-8")
+    )
+    inventory_change = next(c for c in changes if c["service"] == "inventory")
+    assert inventory_change["summary"] == "image rebuild: dependency bump to 2.4.1"
+
+
+def test_a_change_entry_naming_an_unknown_config_key_keeps_its_static_summary() -> None:
+    """Lab-defect-fix Unit 4, W9. `_resolved_change_summary`'s `config_key
+    not in faulted_config` branch is a defensive guard against a future
+    scenario-authoring typo -- no checked-in scenario file's `config_key`
+    is ever actually missing from its own `faulted_config`, so this
+    branch is unreachable through `start_scenario`/`write_manifests` and
+    needs its own direct call. A mistyped key must degrade to the entry's
+    honest static `summary` text, never raise `KeyError` and crash
+    scenario startup over what is ultimately a cosmetic prose mismatch."""
+    entry = {
+        "config_key": "typo_d_key_name",
+        "summary": "configuration update: static fallback prose",
+    }
+    faulted_config = {"pool_capacity": 7}
+
+    resolved = scenario_control._resolved_change_summary(entry, faulted_config)
+
+    assert resolved == "configuration update: static fallback prose"
+
+
+def test_w10_alert_total_requests_covers_the_whole_window(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lab-defect-fix Unit 4, W10. `window_start` opens `WINDOW_LEAD_IN`
+    before the healthy baseline phase even runs, so the alert's own
+    window covers baseline *and* fault -- `total_requests` must count
+    both, not just the fault phase `build_incident` used to be passed.
+    `configuration_change`'s baseline (6 requests, `require_order_token`
+    false) is entirely healthy under `gateway_reading_config`, and its
+    fault phase (10 requests, the setting flipped true) is entirely
+    failed, so the pre-fix bug (`total_requests = served + failed`, fault
+    phase only) reports `10 of 10` where the fix must report `10 of 16`."""
+    use_family_gateway(monkeypatch, project, FAMILY)
+
+    incident_id = start_scenario(project, FAMILY, "development")
+
+    incident = stored_incident(project, incident_id)
+    payload = dict(incident.evidence[0].payload)
+    assert payload["failed_requests"] == 10
+    assert payload["total_requests"] == 16
+
+
 def test_nothing_the_investigator_can_read_names_the_family(project: Path) -> None:
     incident_id = start_scenario(project, FAMILY, "development")
 

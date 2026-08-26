@@ -341,17 +341,35 @@ def _claim_scenario(root: Path, incident_id: str, paths: RunPaths) -> None:
         os.close(descriptor)
 
 
+def _resolved_change_summary(
+    entry: dict[str, Any], faulted_config: dict[str, Any]
+) -> str:
+    """Render a config-carrying change entry's summary from the value the
+    lab actually applied (`faulted_config`, after `apply_seed_variant`'s
+    overrides) -- Lab-defect-fix Unit 4, W9. An entry naming no
+    `config_key`, or one that names a key not present in `faulted_config`
+    (defensive: a scenario-authoring mistake should fall back to honest
+    static prose, never raise `KeyError` mid-scenario-start), keeps its
+    own static `summary` text -- true for image rebuilds and dependency
+    bumps, which have no config value to resolve against."""
+    config_key = entry.get("config_key")
+    if config_key is None or config_key not in faulted_config:
+        return str(entry["summary"])
+    return f"configuration update: {config_key} set to {faulted_config[config_key]}"
+
+
 def write_manifests(
     paths: RunPaths, definition: dict[str, Any], window_end: datetime
 ) -> None:
     """Topology and recent changes, named and worded without the family in them."""
     write_json(paths.topology_file, definition["topology"])
+    faulted_config = definition["faulted_config"]
     changes = [
         {
             "change_id": new_opaque_id()[:12],
             "at": (window_end + timedelta(seconds=entry["offset_seconds"])).isoformat(),
             "service": entry["service"],
-            "summary": entry["summary"],
+            "summary": _resolved_change_summary(entry, faulted_config),
         }
         for entry in definition["changes"]
     ]
@@ -466,8 +484,20 @@ def start_scenario(
         sleeper(SCRAPE_SETTLE_SECONDS)
         window_end = clock()
         write_manifests(paths, definition, window_end)
+        # Lab-defect-fix Unit 4, W10. `window_start` opens `WINDOW_LEAD_IN`
+        # before the baseline phase even runs, so the alert's own window
+        # covers baseline + fault, not fault alone -- `total_requests` must
+        # count both. `healthy` is not folded into `failed_requests`: the
+        # guard a few lines up (`if healthy == 0 or unhealthy > 0: raise`)
+        # already proves `unhealthy` is 0 by this point, so every baseline
+        # request counted here is a success, never a hidden failure.
         incident = build_incident(
-            definition, incident_id, window_start, window_end, failed, served + failed
+            definition,
+            incident_id,
+            window_start,
+            window_end,
+            failed,
+            healthy + served + failed,
         )
         paths.incident_file.write_text(
             incident.model_dump_json(indent=2), encoding="utf-8"
