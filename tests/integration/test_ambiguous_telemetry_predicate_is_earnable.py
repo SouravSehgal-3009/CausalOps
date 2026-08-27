@@ -55,7 +55,7 @@ def test_both_required_event_codes_are_reachable_through_the_query_logs_backend(
             service="orders",
             window_start=scope.started_at,
             window_end=scope.ended_at,
-            row_limit=200,
+            row_limit=40,
         )
         outcome = run_logs_check(arguments, paths)
 

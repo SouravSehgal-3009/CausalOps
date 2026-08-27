@@ -452,6 +452,8 @@ Mechanical scores remain:
 - diagnosis and disposition correctness against evaluator-only labels;
 - citation validity and citation sufficiency against required-evidence
   predicates;
+- a joint correct-and-grounded figure combining diagnosis correctness with
+  citation sufficiency, reported alongside the two component figures;
 - policy/control behavior, tool count, model-call count, latency, and cost.
 
 Record Git SHA, clean/dirty status, fixture/prompt/policy/tool versions,

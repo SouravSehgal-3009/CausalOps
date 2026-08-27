@@ -133,6 +133,20 @@ class MechanicalScores(BaseModel):
     # any record this old. See `test_evaluation.py`'s
     # `test_a_pre_f6_record_missing_correct_and_grounded_still_summarizes_
     # correctly` for the read-compatibility proof.
+    #
+    # A direct reader of `records.jsonl` -- one that reads this field
+    # itself rather than going through `summarize_evaluation` (which always
+    # re-derives it fresh and is unaffected by this) -- must not treat
+    # `None` here as always meaning "not applicable". A record with
+    # `scorer_version` below `"4"` and a non-empty `expected.predicates`
+    # can also read back `None`, and there it means only that this field
+    # did not exist yet when that record was scored, not that it was
+    # deliberately marked not-applicable. Such a reader should re-derive
+    # the value the same way `summarize_evaluation` does: `None if not
+    # expected.predicates else diagnosis_correct and citations_sufficient
+    # is True`. (`scorer_version` strings are compared lexically elsewhere
+    # in this module, which only stays correct through single digits -- a
+    # minor pre-existing caveat, not specific to this field.)
     correct_and_grounded: bool | None = None
     control: ControlCounts
     efficiency: Efficiency

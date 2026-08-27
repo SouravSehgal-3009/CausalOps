@@ -3562,6 +3562,23 @@ migration to signal here. `SCHEMA_VERSION` is unchanged: this is a read-compatib
 widening, not a wire schema change — a JSON file with the old literal
 `"citations_sufficient": true` still validates and reads back as `True`.
 
+### Addendum — F5/F6, `ambiguous_telemetry` gains predicates and a joint metric
+
+**On top of the F4 fix above, this same remediation arc later added F5 and F6.**
+`ambiguous_telemetry` is no longer the one family with an empty `expected.predicates`
+list described above: `lab/scenarios/ambiguous_telemetry.json` now declares two
+`CONTAINS` predicates over `event_codes` (`pool_exhausted`, `upstream_timeout`), so its
+correct `UNDETERMINED` abstention can itself be audited for citation sufficiency instead
+of scoring vacuously `True` by construction. A matching sentence was added to both
+`prompts.py`'s `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]` and `domain.py`'s
+`FinalAssessment.disposition` field description, telling the model an abstention still
+needs `supporting_evidence_ids` naming the evidence that made the case ambiguous.
+F6 added a joint `correct_and_grounded` mechanical score (`diagnosis_correct AND
+citations_sufficient`, `None` under the same no-predicate condition
+`citations_sufficient` itself uses), reported in `EvaluationSummary` alongside its two
+component counts. `PROMPT_VERSION` moves `"6"` → `"7"`; `SCORER_VERSION` moves `"3"` →
+`"4"`.
+
 ## Unit A — F1/F2/F3, instrumentation and feedback truthfulness
 
 Three lab-defect-remediation fixes, implemented and reviewed together as one unit,
