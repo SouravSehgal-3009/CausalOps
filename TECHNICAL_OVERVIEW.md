@@ -2153,16 +2153,27 @@ plus this fix, one at a time, reverted before the next):
 
 ## Milestone 3 — Local retrieval and evidence-backed portfolio release
 
-**Status:** Units 3a (curated FTS5 runbook retrieval) and 3b-1 through 3b-4
-(the live Claude adapter, its single-turn tool-calling protocol, and the
-cost-ledger reservation/idempotency guarantees underneath it) are complete
-and on `master`. Unit 3c — the fixed paired evaluation under the USD 5 cap
-(Unit 3b-3, raised from USD 2), below — is implemented and under review on
-branch `paired-live-evaluation`, not yet merged; Milestone 3 is complete once
-that branch lands. Deferred here from Milestone 2 by `TECHNICAL_SPEC.md`
-§12's *Amendment, Milestone 2*. Remaining scope: saving raw records and
-limitations, architecture and threat-model documents, verifying the clean
-source commit, and a short diagnosis plus abstention/escalation demo.
+**Status:** complete, all sub-units merged to `master`. Units 3a (curated FTS5
+runbook retrieval) and 3b-1 through 3b-4 (the live Claude adapter, its
+single-turn tool-calling protocol, and the cost-ledger reservation/idempotency
+guarantees underneath it) landed first; Unit 3c — the paired evaluation under
+the USD 5 cap (Unit 3b-3, raised from USD 2), below — merged afterward. Unlike
+every earlier milestone in this document, this one has been exercised for real,
+not just reviewed: `causalops-evaluate` has been run against the live Claude
+API five separate times with real spend, each run's records and per-arm summary
+saved under `results/evaluations/<run-id>/`: `a4044fb52a0f48a09daf344cb8937b74`
+(the first real run), `2cc9dabb139b4946bb78dbd12fc4f3a7` (the Unit 6
+re-baseline after the pool-metric/telemetry defects below were found),
+`3724876eb69845b794a7b36e3e9cae3e` (the Unit C / F7 re-run after F1-F6 landed),
+and two further re-runs made while validating later fixes,
+`50145a98d667464fb822bd547374bb2d` and `ab684630eaf7454a88798de0f3caa054`. A
+follow-up remediation arc (F1 through F9, "Unit A"/"Unit 6 follow-up" and their
+addenda, below) landed on top of Milestone 3 afterward, fixing real defects
+those live runs surfaced — see those sections for what changed and why.
+Deferred here from Milestone 2 by `TECHNICAL_SPEC.md` §12's *Amendment,
+Milestone 2*. Remaining scope: saving raw records and limitations, architecture
+and threat-model documents, verifying the clean source commit, and a short
+diagnosis plus abstention/escalation demo.
 
 ### Open gaps recorded during Unit 3b-1's review — for Unit 3b-2
 
@@ -3704,6 +3715,96 @@ a change entry is scenario-specific fault data, not fixed lab architecture — d
 it would leak evaluation ground truth into the tool schema itself. `TOOL_REGISTRY_
 VERSION` moves `"5"` → `"6"` (the byte-count mechanics of this schema growth are
 recorded in Unit A's F1 (revised) paragraph above, not repeated here).
+
+### Addendum — F7, the actual paid Unit C re-run
+
+**On top of Unit A/B above (F1-F3, F5/F6), this remediation arc's Unit C spent the
+plan's own budgeted ~$0.25 on a real re-run of `causalops-evaluate`** after F1-F6
+landed, to check whether the fixed pool metric (F1) and the widened predicate/
+scoring work (F4-F6) changed a real diagnosis. Artifact:
+`results/evaluations/3724876eb69845b794a7b36e3e9cae3e/`, real spend **$0.246264**
+(summed directly from its 8 records' own `actual_usd`). Read from the saved
+`summary.json`: the tool-enabled arm scored **3 of 4 diagnosis-correct** (up from
+2/4 pre-F1-F6), and zero confident wrong diagnoses across all 8 runs (down from
+two before this arc). `configuration_change` (tool-enabled,
+`investigation_id 9d72eff76ea64c93801e80004cdd917f`) — the exact family that
+previously produced a confident wrong `RESOURCE_POOL_SATURATION` diagnosis off the
+pre-F1 broken pool metric — now correctly abstains (`disposition:
+INSUFFICIENT_EVIDENCE`, `root_cause: UNDETERMINED`); it still scores
+`diagnosis_correct: false`, because this family's true answer is a determinable
+`CONFIG_CHANGE`, not `UNDETERMINED` — a safe abstention, not a wrong guess.
+
+**That run's own saved evidence surfaced a real defect nothing earlier had
+caught.** The same investigation's `evidence.jsonl` holds a `list_recent_changes`
+record whose `payload["summaries"]` field already contained the fact needed —
+`"configuration update: require_order_token set to True"` — while the record's
+rendered `summary` field, the only one `render_context` (`prompts.py`) ever shows
+the model, read only `"1 recent changes on orders"`, a bare count. The model's own
+`uncertainty` field states plainly it never saw change content ("no ... change
+content were retrieved to confirm CONFIG_CHANGE"), true of what it was actually
+shown, even though the tool backend had the answer the whole time. This is F8's
+trigger, immediately below. (Across this run's 4 tool-enabled investigations,
+`list_recent_changes` was called exactly once — grep-counted directly over all 4
+`evidence.jsonl` files; the other three ran `query_metric` on both available
+check slots instead, a separately tracked pattern, not new to this run.)
+
+### Addendum — F8, `list_recent_changes` content was invisible to the model
+
+**Directly caused by F7's finding above.** `run_changes_check` (`telemetry.py`)
+built its returned `.summary` from only `payload["change_count"]` and a
+truncation note — never `payload["summaries"]`, the field actually holding the
+change text. Since `render_context` renders only `Evidence.summary`, never
+`Evidence.payload`, a model that correctly called `list_recent_changes` and got
+back the right fact still could not read it.
+
+**The fix, across 3 commits and 2 rounds of internal dual review plus 2 rounds of
+external Codex review, each round catching something real:**
+
+- **`bbc8540` ("Fold config-change content into list_recent_changes summaries")**
+  — folds `payload["summaries"]`, capped at a fixed `MAX_SUMMARY_CONTENT_CHARS =
+  220`, into the returned summary string, guarded by an unconditional
+  `assert len(summary) <= 400` against `Evidence.summary`'s hard Pydantic field
+  bound (`domain.py`) — load-bearing because `build_evidence`
+  (`tool_wrappers.py`) constructs `Evidence` outside any `try`/`except`, so an
+  over-length summary would crash the investigation rather than fail safely.
+  Landed after an internal dual-review round found and fixed one
+  comment-accuracy P3.
+- **`d440b6c` ("Fix log-trim direction and unbounded service-name
+  truncation")** — external Codex review round 1 found 2 real P2s the fixed
+  220-char cap missed: (1) the kept content was the OLDEST surviving text, not
+  the newest — backwards relative to `payload["summaries"]`'s own
+  oldest-to-newest-then-front-popped ordering; (2) `arguments.service` has no
+  schema `max_length`, so a fixed content cap alone couldn't guarantee the
+  400-char bound — the "unreachable" assert wasn't truly unreachable, and even
+  if it fired it would crash rather than fail safely. Fixed with a dynamically
+  computed `content_budget = 400 - len(prefix) - len(": ")`, a tail slice
+  (`raw_content[-keep:]`) so the newest content survives, and an unconditional
+  final `summary[:397] + "..."` clamp enforcing the bound regardless of whether
+  the branch logic above it reasoned correctly. Landed after a second internal
+  dual-review round.
+- **`3cd62df` ("Correct content-budget comment and pin its boundary case")** —
+  external Codex review round 2 found 1 P3: a comment describing the
+  `keep > 0` guard's boundary case said `content_budget` of "1 or 2" when the
+  true boundary (`marker` is 3 chars) is "1, 2, or 3". Comment corrected; no
+  behavior changed.
+
+**Confirmed directly, not assumed: F8 needed no `TOOL_REGISTRY_VERSION`/
+`PROMPT_VERSION` bump.** It changes only `run_changes_check`'s backend summary
+text, never a tool schema or prompt the model sees ahead of a call —
+`TOOL_REGISTRY_VERSION` is `"6"` today, and `git log -p -- src/causalops/
+tools.py` shows exactly one `"5"` → `"6"` transition in this project's whole
+history, already attributed to F9 above, none from F8's own 3 commits.
+
+**F8's own target went unexercised in the very next paid run.** A second paid
+re-run after F8 landed (`results/evaluations/50145a98d667464fb822bd547374bb2d/`,
+real spend $0.241248) called `list_recent_changes` zero times across all 8 of its
+runs — every tool-enabled evidence source in that batch was `query_metric`
+(grep-counted directly: 16 `alert` + 8 `query_metric`, 0 of any other source).
+F8's correctness is unaffected by this null result — it was independently
+verified through the review rounds above plus direct mutation testing, not
+through this later run — but that run supplies no positive evidence either way
+that the fixed content actually reaches a real live call; only F7's own
+already-saved run, above, demonstrates the fix's target scenario for real.
 
 ## Superseded v1 evaluation design
 

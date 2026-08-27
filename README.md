@@ -15,13 +15,24 @@ policy, budgets, run records, and scoring. Milestones 1 and 2 are complete:
 end through the LangGraph `StateGraph` orchestrator, including the
 escalation interrupt and owner approval/rejection — see
 `TECHNICAL_OVERVIEW.md` Part III for what it currently supports. Milestone 3
-is in progress: FTS5 runbook retrieval and the live Claude adapter
-(`--model claude`) have landed. Only the paired evaluation remains:
-`causalops-evaluate` requires `ANTHROPIC_API_KEY`, persists each completed
-record, and is designed to stop further paid requests only after an
-infrastructure failure, leaving model-quality failures as scored results.
-It has landed on a branch, not yet merged to `master` or run for real
-against a live model.
+is complete and merged: FTS5 runbook retrieval, the live Claude adapter
+(`--model claude`), and the paired evaluation (`causalops-evaluate`) have
+all landed on `master`. `causalops-evaluate` requires `ANTHROPIC_API_KEY`,
+persists each completed record, and stops further paid requests only after
+an infrastructure failure, leaving model-quality failures as scored
+results. It has been run for real against the live Claude API multiple
+times, with each run's records and per-arm summary saved under
+`results/evaluations/`.
+
+A follow-up defect-remediation arc (`TECHNICAL_OVERVIEW.md`'s "Unit A"/"Unit
+6 follow-up" sections and their addenda) landed on top of Milestone 3
+afterward, fixing real defects those live runs surfaced — see
+`TECHNICAL_OVERVIEW.md` for what changed and why; this README doesn't
+narrate it.
+
+CausalOps remains decision support over a synthetic lab and synthetic data
+throughout — it never executes remediation, mutates the lab, or acts as an
+autonomous operator.
 
 ## Check this machine
 
