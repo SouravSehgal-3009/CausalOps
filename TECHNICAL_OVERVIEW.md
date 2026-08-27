@@ -2676,6 +2676,36 @@ the only repair before the second failure was ever offered one;
 `events.jsonl` does not distinguish "this stage burned its own repair"
 from "no budget remained when the stage began."
 
+**A real instance of this exact ambiguity landed in a later live evaluation
+batch, confirmed to be the "no model-call budget was left" case, not "a
+repair was attempted and failed."** Investigation
+`9150c4ba9a26492abdcb55dfc27677ac` (`ambiguous_telemetry`, tool-enabled arm,
+`results/evaluations/ab684630eaf7454a88798de0f3caa054/`) ended
+`FAILED_SAFE`/`REPAIR_EXHAUSTED` with `repairs_used: 0`, `model_calls_used:
+4` (its own `report.json`) -- the model's structured output at
+`final_assessment` (model call 4) added an undeclared `root_cause_
+confidence` field, rejected by `FinalAssessment`'s `extra="forbid"`, and
+`_StageCounters.may_repair` (`graph.py`) refused because no model call
+remained, never because the run's one `Budgets.repairs` slot was already
+spent. The actual mechanism that removed the repair headroom was earlier
+in the same run: its second proposal (`query_logs`, `row_limit=50`) was
+denied by policy (`RESULT_LIMIT_EXCEEDED`, the 40-row budget) and cost a
+full model call for zero evidence before the retried, correctly-sized
+proposal executed on the next turn -- leaving only one call free for
+`final_assessment`, with nothing left over once that call needed a repair.
+The sibling contrast, same batch: investigation
+`db6e934405b74d2a932e67bbcc21de4d` (`configuration_change`, tool-enabled
+arm) hit a different `invalid_response` (`uncertainty` exceeding its
+300-character bound) on model call 3, with one call still free -- its one
+repair (`repairs_used: 1`) succeeded, landing safely at
+`UNDETERMINED`/`INSUFFICIENT_EVIDENCE`. Neither `prompts.py` nor
+`domain.py` mentions "confidence" anywhere -- the extra field was
+spontaneous model behavior, not something this app's own text invited, and
+the wire schema's own `extra="forbid"` did not stop it either. Accepted as
+expected, low-frequency behavior (n=1 in this project's real-run history to
+date) after a senior-expert investigation, not treated as requiring a code
+fix at this time.
+
 ### The addendum round — correctness's own P1 and a second reviewer's findings
 
 **On top of the Unit 3b-4 freeze above, a second review pass landed one more fold-in
