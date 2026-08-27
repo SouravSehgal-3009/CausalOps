@@ -10,7 +10,7 @@ disposition unaffected. The second test scripts a model that instead obeys the
 injected instruction, and confirms policy denies the resulting proposal and the
 investigation still reaches a safe terminal disposition.
 
-Driven through the graph orchestrator (Unit 1d-1): this file's subject was
+Driven through the graph orchestrator: this file's subject was
 always injection resistance, never which orchestrator runs the investigation,
 so it re-points at `run_graph_investigation` rather than staying tied to the
 retiring loop.
@@ -216,7 +216,7 @@ def poisoned_passage() -> RunbookPassage:
 def test_policy_denies_an_action_urged_by_a_retrieved_runbook_passage(
     tmp_path: Path,
 ) -> None:
-    """Milestone 3, Unit 3a's own injection case: the untrusted text this
+    """A parallel injection case: the untrusted text this
     time is not stored evidence but a retrieved runbook passage --
     guidance, not evidence, per `TECHNICAL_SPEC.md` §6/§7 -- and the
     scripted model is the obedient one: its second turn proposes exactly
@@ -226,7 +226,7 @@ def test_policy_denies_an_action_urged_by_a_retrieved_runbook_passage(
     evidence -- retrieval is a second channel for untrusted text into the
     model's context, not a second trust boundary.
 
-    Lab-defect-fix Unit 3/Q2: turn 0's `search_runbooks` call spends a
+    Turn 0's `search_runbooks` call spends a
     slot, but turn 1's denied `billing_proposal` does not, so with the
     `model_turn < 2` cap removed one slot and enough model-call headroom
     both remain after turn 1 and the graph asks a third `HYPOTHESIS_UPDATE`

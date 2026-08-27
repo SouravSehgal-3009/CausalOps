@@ -7,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 MAX_INPUT_TOKENS = 9_600
 MAX_OUTPUT_TOKENS = 1_600
 
-# Unit 3b-2, P2-4. `TECHNICAL_OVERVIEW.md`'s "Default limits" table's own
-# "Model call | 90 seconds" row, unenforced until now. Lives beside the
+# `TECHNICAL_OVERVIEW.md`'s "Default limits" table's own
+# "Model call | 90 seconds" row. Lives beside the
 # other two limits above rather than in `live_model.py` for the same reason
 # they do: one file an owner can read to see every number this gate bounds,
 # not three.

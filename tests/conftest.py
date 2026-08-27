@@ -6,7 +6,7 @@ nothing in `src/` could reach one -- `prometheus.py` and `scenario_control.py`
 both talk `urllib.request` to `DEFAULT_PROMETHEUS_URL = "http://127.0.0.1:9090"`
 (`prometheus.py:29`), and `tests/unit/conftest.py`'s `fake_prometheus` binds a
 real `ThreadingHTTPServer` on `127.0.0.1`. That structural guarantee ends the
-moment a live model adapter exists (Unit 3b-2's `api.anthropic.com`), so this
+moment a live model adapter exists (`api.anthropic.com`), so this
 guard ships now, before any code in this project can dial out, rather than
 being bolted on after the first thing that can.
 

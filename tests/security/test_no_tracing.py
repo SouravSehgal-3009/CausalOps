@@ -1,5 +1,5 @@
 """`TECHNICAL_SPEC.md` section 11's second half: "a test proves no tracing
-client is constructed and no tracing request is attempted." Unit 1a's
+client is constructed and no tracing request is attempted."
 `test_tracing_disabled.py` proved the force-disable mechanism (both env
 variables are set to `"false"` at import time); it could not prove the rest,
 because nothing imported `langchain-core` yet. `graph.py` is the first thing
@@ -19,7 +19,7 @@ narrower and is what this file checks: after a full graph run, no
 process through the two client libraries LangSmith uses to send traces, and
 both tracing environment variables are still `"false"`.
 
-Unit 3b-2, P2-3: the two `..._through_the_cli_entry_point` tests below
+The two `..._through_the_cli_entry_point` tests below
 prove that *running* a replay investigation through `cli.main` sends
 nothing -- a real, separate claim `pyproject.toml`'s `langchain-anthropic`
 dependency comment also cites, since that import path (`causalops.cli` now
@@ -144,7 +144,7 @@ def test_tracing_env_vars_stay_disabled_after_a_graph_run(
 
 
 def run_one_cli_replay_investigation(tmp_path: Path) -> None:
-    """Unit 3b-2 audit: `causalops.cli` now imports `causalops.live_model`
+    """`causalops.cli` imports `causalops.live_model`
     at module level unconditionally (`--model replay` or `--model claude`
     alike), which pulls in `langchain_anthropic` -- and, transitively,
     `anthropic`, `httpx`, and `requests` all over again through a second
@@ -211,7 +211,7 @@ def test_no_network_request_is_attempted_through_the_cli_entry_point(
 
 
 def test_importing_causalops_cli_never_sends_a_tracing_request() -> None:
-    """Unit 3b-2, P2-3's actual import-time proof, distinct from the two
+    """The actual import-time proof, distinct from the two
     tests above. Installs the same three refusal monkeypatches those tests
     use, but in a *fresh subprocess*, before `causalops.cli` is ever
     imported -- `import causalops.cli` runs strictly after the patches are

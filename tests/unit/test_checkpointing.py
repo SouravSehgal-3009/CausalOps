@@ -1,8 +1,8 @@
-"""Unit 2a: the SQLite checkpointer swap, the `investigation_id` inversion,
+"""The SQLite checkpointer swap, the `investigation_id` inversion,
 events durable in `GraphState`, and the msgpack hardening on the real
 checkpoint database.
 
-`test_graph_frozen_reports.py` is untouched by this unit and stays that way:
+`test_graph_frozen_reports.py` is untouched by this file and stays that way:
 every test below either drives `run_graph_investigation` with the new
 `checkpointer`/`investigation_id` parameters directly and checks what those
 two `None`-defaulted arguments exist to prove, or exercises `cli.py`'s own
@@ -152,7 +152,7 @@ def test_a_file_backed_checkpointer_reproduces_the_in_memory_run(
 
 
 def test_a_second_connection_reads_back_the_finished_run(tmp_path: Path) -> None:
-    """Precursor to Milestone 2b's real two-process resume: a completed run's
+    """Precursor to a real two-process resume: a completed run's
     final checkpoint must be readable from an independent `SqliteSaver`
     instance opened fresh against the same file, not merely from the
     in-process object that wrote it."""
@@ -242,14 +242,14 @@ def test_a_raising_backend_leaves_a_durable_reserved_receipt(tmp_path: Path) -> 
 def test_a_two_process_pause_and_resume_settles_over_a_real_sqlite_file(
     tmp_path: Path,
 ) -> None:
-    """Unit 2b's own named proof, not the in-process convenience every other
+    """The named proof, not the in-process convenience every other
     escalation-interrupt test in this project uses: every one of them drives
-    `InMemorySaver()`, which would pass identically whether or not this
-    unit's real target -- resuming through the hardened `SqliteSaver` this
+    `InMemorySaver()`, which would pass identically whether or not the
+    real target -- resuming through the hardened `SqliteSaver` this
     project actually runs, `cli._sqlite_checkpointer` -- works at all. This
     test closes the connection between pause and resume and reopens the
     checkpoint file fresh, standing in for the second process
-    `causalops approve`/`reject` will be in 2c: it never touches the
+    `causalops approve`/`reject` runs in: it never touches the
     `checkpointer` the pause used, only the database path and the thread id
     a real second process would actually have."""
     db_path = tmp_path / "cp.db"
@@ -312,7 +312,7 @@ def test_an_explicit_investigation_id_becomes_the_report_id_and_the_thread_id(
     tmp_path: Path,
 ) -> None:
     """`investigation_id` inverts from an output every caller used to
-    receive to an optional input Milestone 2b's resume will supply -- it
+    receive to an optional input a resume path can supply -- it
     must land in both the finished report and LangGraph's own `thread_id`,
     which is where a resumed run would look it up."""
     db_path = tmp_path / "checkpoints.db"
@@ -345,7 +345,7 @@ def test_run_id_is_present_and_distinct_from_investigation_id(tmp_path: Path) ->
     """`run_id` is `TECHNICAL_SPEC.md:140-142`'s own requirement and is not
     exposed on `InvestigationReport` -- the only way to observe it is through
     the checkpointed `GraphState` a real checkpointer records. This does not
-    (and, before Milestone 2b adds a resume path with something to diverge
+    (and, before a resume path exists with something to diverge
     across, cannot) prove `run_id` behaves differently from
     `investigation_id`; it proves the field exists, is populated, and is not
     silently aliased to the value `investigation_id` was given."""
@@ -437,7 +437,7 @@ def test_sqlite_checkpointer_yields_a_saver_with_the_hardened_serializer(
     tmp_path: Path,
 ) -> None:
     """Exercises `cli._sqlite_checkpointer` itself, not a `JsonPlusSerializer`
-    built separately in the test -- the gap the reviewer found: swapping
+    built separately in the test -- a real gap once found: swapping
     `_sqlite_checkpointer`'s `allowed_msgpack_modules=None` for the
     permissive default made every test in this file pass, because nothing
     reached into the object it actually yields. `checkpointer.serde` is the
@@ -455,7 +455,7 @@ def test_sqlite_checkpointer_yields_a_saver_with_the_hardened_serializer(
 def test_investigate_leaves_a_checkpoint_database_in_a_fresh_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The end-to-end acceptance check for this unit: a real `causalops
+    """The end-to-end acceptance check: a real `causalops
     investigate` run, in a project that has never had a `results/` directory
     before, must both succeed and leave `results/checkpoints.db` behind --
     proving `cli.py`'s own `mkdir(parents=True, exist_ok=True)` handles the

@@ -1,4 +1,4 @@
-"""Real change content in the summary the model reads -- Lab-defect-fix F8,
+"""Real change content in the summary the model reads,
 against the real lab.
 
 Marked `docker` for the same reason as `test_pool_metric_gauge_name.py`: every
@@ -39,7 +39,7 @@ def test_the_real_change_content_reaches_the_model_visible_summary() -> None:
     """`configuration_change.json`'s own change entry names
     `require_order_token` in its `summary` field -- the exact string this
     family's ground-truth predicate requires (`expected.predicates[0].value`
-    in the scenario JSON). Before F8, `run_changes_check`'s returned
+    in the scenario JSON). Before this fix, `run_changes_check`'s returned
     `.summary` never carried this text at all, only the bare change count --
     `render_context` (`prompts.py`) puts only `.summary` in front of the
     model, so a model that correctly called `list_recent_changes` against a

@@ -292,19 +292,18 @@ def resume_graph_run(
     decision: str,
 ) -> InvestigationResult:
     """Resumes a paused compiled graph with an owner decision and reconstructs
-    the terminal `InvestigationResult`, for tests proving Unit 2b's/2c's
-    graph-level resume.
+    the terminal `InvestigationResult`, for tests proving graph-level resume.
 
     `graph.py`'s `run_graph_investigation` has no resume parameter of its
-    own; production resume goes through `graph.resume_graph_investigation`
-    (Unit 2c), which this helper deliberately does not call -- it is
+    own; production resume goes through `graph.resume_graph_investigation`,
+    which this helper deliberately does not call -- it is
     written against only public domain types (`EvidenceStore`,
     `InvestigationReport.model_validate`), the same reduced surface it
     always exercised, so a graph-level test can drive `Command(resume=...)`
     directly without also depending on `cli.py`'s incident-loading and
     guard machinery.
 
-    Unit 2c: `Command(resume=...)` now carries a compound value -- a
+    `Command(resume=...)` carries a compound value -- a
     mapping with `decision` and `rejection_note` keys, the shape
     `causalops.approvals.OwnerDecision.resume_value()` produces -- not the
     bare string this helper's own two-argument signature still takes. This
@@ -408,8 +407,8 @@ class RecordingBackend[ArgsT: BaseModel, OutcomeT: CheckOutcome | RunbookCheckOu
     Set `raises` to make the backend fail mid-dispatch instead of returning,
     for testing that a crash still leaves a visible reserved receipt. Each
     tool's named subclass below only supplies its own default outcome shape
-    -- the recording/raising behaviour lives here once. Unit 3a widens the
-    second type parameter to `CheckOutcome | RunbookCheckOutcome` so
+    -- the recording/raising behaviour lives here once. The
+    second type parameter is widened to `CheckOutcome | RunbookCheckOutcome` so
     `RecordingRunbooksBackend` below can reuse this same class instead of a
     near-identical copy that differs only in outcome type.
     """
@@ -508,7 +507,7 @@ class RecordingTopologyBackend(RecordingBackend[GetTopologyArguments, CheckOutco
 class RecordingRunbooksBackend(
     RecordingBackend[SearchRunbooksArguments, RunbookCheckOutcome]
 ):
-    """Unit 3a's fifth spy. Its default outcome carries one passage, not
+    """The fifth spy. Its default outcome carries one passage, not
     zero -- most tests wiring this backend want a normal retrieval result,
     not `RETRIEVAL_COVERAGE_INSUFFICIENT`'s zero-passage trigger; a test
     that wants that trigger passes its own `outcome=RunbookCheckOutcome(...,

@@ -77,7 +77,7 @@ def sample_context(passages: tuple[RunbookPassage, ...] = ()) -> str:
 
 
 def adversarial_passage(content: str) -> RunbookPassage:
-    """Milestone 3, Unit 3a. A retrieved passage is untrusted, retrieved
+    """A retrieved passage is untrusted, retrieved
     text -- unlike `Evidence`, nothing about its content is under this
     project's control (the corpus itself is curated, but this stands in for
     what an attacker who could edit or poison a runbook document would
@@ -98,7 +98,7 @@ def adversarial_passage(content: str) -> RunbookPassage:
 def test_no_investigator_module_imports_the_evaluator() -> None:
     """The rule this test actually enforces is narrower than "nothing but
     `evaluation.py` imports `causalops.evaluation`": it is "no INVESTIGATOR
-    module does." Unit 3c's `evaluate_cli.py` is legitimately evaluator-side
+    module does." `evaluate_cli.py` is legitimately evaluator-side
     too -- it is the one place `score_run` is finally called, reading
     evaluator-only `expected.json` and building `ExpectedOutcome` -- so it
     joins `evaluation.py` itself in the allowed set rather than being a
@@ -202,7 +202,7 @@ def test_the_context_fences_telemetry_as_untrusted() -> None:
 
 
 def test_a_retrieved_passage_leaks_no_cause_seed_or_scenario_either() -> None:
-    """Milestone 3, Unit 3a. `TECHNICAL_SPEC.md` §7 places the same
+    """`TECHNICAL_SPEC.md` §7 places the same
     exclusion on the runbook corpus that §6 already places on evidence --
     this is that claim checked against `render_context`'s actual output
     once a passage is present, the same way the sibling test above checks
@@ -234,7 +234,7 @@ def test_a_root_cause_code_hidden_in_a_passage_is_still_caught() -> None:
 
 
 def test_a_passage_cannot_close_the_fence_or_add_a_second_one() -> None:
-    """The injection test this unit's plan calls for: a passage containing
+    """The injection test this design calls for: a passage containing
     the fence's own close marker, plus an imperative instruction that reads
     like a command to an obedient model, must not let the passage escape
     the fence or add a second fenced section. `render_context` reuses the

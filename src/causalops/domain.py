@@ -18,13 +18,12 @@ SCHEMA_VERSION = "1"
 
 # The `model_name` label a report/artifact carries for a replay-backed
 # investigation. Lives here, not in `cli.py` (where it originated) or
-# `graph.py` (which now needs it too), because Unit 3b-2 gave it a second
-# reader: `graph.py`'s `run_graph_investigation` seeds it into
+# `graph.py` (which also needs it), because it has two readers:
+# `graph.py`'s `run_graph_investigation` seeds it into
 # `GraphState["model_name"]` as the default for every caller that does not
 # pass a live model's own name, and `cli.py` reads it back on a resumed
 # thread instead of hardcoding it a second time -- one shared constant, not
-# two independent string literals that could drift, the same reasoning that
-# named it in the first place (see git history, Unit 2c).
+# two independent string literals that could drift.
 REPLAY_MODEL_NAME = "replay"
 
 
@@ -74,10 +73,9 @@ class RetrievalMode(StrEnum):
     that case is `RETRIEVAL_COVERAGE_INSUFFICIENT` instead, a different
     fact about the same run. §7's own text, "`disabled` means no runbook
     passage was retrieved," reads ambiguously between these two cases;
-    `TECHNICAL_SPEC.md`'s Unit 3a amendment resolves it to "never
-    dispatched," which is the reading this codebase implements. See
-    `graph.py`'s `dispatch_tool` for where this is set, from the backend's
-    own configuration rather than from what it found."""
+    this codebase resolves it to "never dispatched." See `graph.py`'s
+    `dispatch_tool` for where this is set, from the backend's own
+    configuration rather than from what it found."""
 
     DISABLED = "disabled"
     FTS5_LEXICAL = "fts5_lexical"
@@ -91,8 +89,7 @@ class GatewaySymptom(StrEnum):
 
 
 class MetricSampleStatus(StrEnum):
-    """Lab-defect-fix Unit 2, W7 (+ W14's `MULTIPLE_SERIES`, folded in per
-    owner decision Q15). What a `query_metric` check's raw Prometheus
+    """What a `query_metric` check's raw Prometheus
     response actually contained -- describing only what the query
     returned, never claiming anything about what exists in Prometheus's
     own storage. Before this, `sample_count: 0, max_value: 0.0` rendered
@@ -146,7 +143,7 @@ class ReasonCode(StrEnum):
     CROSS_INCIDENT_REQUEST = "CROSS_INCIDENT_REQUEST"
     UNKNOWN_SERVICE = "UNKNOWN_SERVICE"
     OUTSIDE_INCIDENT_WINDOW = "OUTSIDE_INCIDENT_WINDOW"
-    # Lab-defect-fix Unit 3, W1. `policy.authorize` denies with this code
+    # `policy.authorize` denies with this code
     # when it is handed a proposal whose window has not been resolved
     # (`window_start`/`window_end` is `None`) -- the ordinary wrapper path
     # (`tool_wrappers.ToolWrapper.dispatch`) always resolves the window
@@ -166,7 +163,7 @@ class ReasonCode(StrEnum):
     WALL_CLOCK_EXPIRED = "WALL_CLOCK_EXPIRED"
     FORGED_EVIDENCE_REFERENCE = "FORGED_EVIDENCE_REFERENCE"
     RESULT_ALREADY_FINALIZED = "RESULT_ALREADY_FINALIZED"
-    # Unit 3b-2. A live model call the cost gate refused *before sending*,
+    # A live model call the cost gate refused *before sending*,
     # because the reservation it would need would exceed
     # `LIVE_EVALUATION_MAX_USD`'s remaining balance. Deliberately its own
     # code, not `BUDGET_EXHAUSTED`: that code already means "the *count*
@@ -179,7 +176,7 @@ class ReasonCode(StrEnum):
     # An owner reading `reason_code` needs to tell those apart to know
     # whether raising `Budgets.model_calls` would even help (it would not).
     COST_CEILING_EXCEEDED = "COST_CEILING_EXCEEDED"
-    # Unit 3b-2. The rendered request's pessimistic token estimate exceeded
+    # The rendered request's pessimistic token estimate exceeded
     # the 9,600-token input cap (`pricing.MAX_INPUT_TOKENS`,
     # `TECHNICAL_OVERVIEW.md`'s "Default limits" table). Its own code, not
     # `COST_CEILING_EXCEEDED`: one is about a dollar balance across every
@@ -189,8 +186,8 @@ class ReasonCode(StrEnum):
     # request was too big" (the second is fixable by trimming context; the
     # first is not, no matter how small the next request is).
     INPUT_TOKEN_CAP_EXCEEDED = "INPUT_TOKEN_CAP_EXCEEDED"
-    # Unit 3b-4 addendum, Group B. `cost_ledger.record_reservation_before_
-    # request` found a reservation already on file for this exact request
+    # `cost_ledger.record_reservation_before_request` found a reservation
+    # already on file for this exact request
     # key (`run_id`, `graph_phase`, `model_turn`, `context_digest`) -- this
     # attempt did not create a new one. `live_model.py`'s `_send` refuses to
     # invoke the provider under a pre-existing reservation rather than
@@ -214,11 +211,11 @@ class ReasonCode(StrEnum):
 class GraphPhase(StrEnum):
     """The LangGraph phases from `TECHNICAL_SPEC.md` §5's diagram.
 
-    This describes the graph the spec defines, not just what Unit 1a builds --
-    `graph.py` (Unit 1b) is the first consumer. Names every phase a state
-    machine can reach, including ones no code visits yet -- the precedent set
-    by `InvestigationState`, the retired loop orchestrator's own state enum
-    (removed in Unit 1d-2, once `workflow.py` no longer used it).
+    This describes the graph the spec defines, not just what `graph.py`
+    builds today. Names every phase a state machine can reach, including
+    ones no code visits yet -- the same precedent `InvestigationState`, the
+    retired loop orchestrator's own state enum, set before it was removed
+    once `workflow.py` no longer used it.
     """
 
     CREATED = "CREATED"
@@ -231,19 +228,19 @@ class GraphPhase(StrEnum):
 
 
 class EscalationReason(StrEnum):
-    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, all
-    four reachable as of Milestone 3's Unit 3a.
+    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, all four
+    now reachable.
 
-    Unit 2b made the first three reachable: `graph.py`'s `_escalation_reason`
-    checks a receipt outcome, the model's own disposition, and its own
-    contrary-citation list -- all already in state at that point.
+    `graph.py`'s `_escalation_reason` checks a receipt outcome, the model's
+    own disposition, and its own contrary-citation list for the first
+    three -- all already in state by the time it runs.
     `RETRIEVAL_COVERAGE_INSUFFICIENT` needed `search_runbooks`, which did not
-    exist yet; it was named here anyway, the same precedent `GraphPhase`
-    itself sets above -- naming a state before anything reaches it costs
-    nothing and meant this enum did not need a second, breaking edit once
-    retrieval landed. `_escalation_reason` now fires it when an `ALLOWED`,
-    `SETTLED` `search_runbooks` receipt exists but this run retrieved zero
-    passages.
+    exist when the other three became reachable; it was named here anyway,
+    the same precedent `GraphPhase` itself sets above -- naming a state
+    before anything reaches it costs nothing and meant this enum did not
+    need a second, breaking edit once retrieval landed. `_escalation_reason`
+    fires it when an `ALLOWED`, `SETTLED` `search_runbooks` receipt exists
+    but this run retrieved zero passages.
     """
 
     CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
@@ -361,7 +358,7 @@ class StoredIncident(BaseModel):
     Investigator-visible only: an opaque scope, the answer-neutral packet, and the
     packet's own evidence. Expected outcomes live elsewhere.
 
-    Post-freeze review, P1. Three fields carry an `incident_id`, and this
+    Three fields carry an `incident_id`, and this
     validator is what confirms all three actually agree -- an auditable
     list, the same discipline `live_model.py`'s `_RATIONALE_PROPERTIES`
     and `test_live_model.py`'s `KNOWN_PROSE_ONLY_CONTRACTS` already use
@@ -397,9 +394,9 @@ class StoredIncident(BaseModel):
 
     @model_validator(mode="after")
     def check_identity_agrees(self) -> Self:
-        """Unit 3b-4 addendum's post-freeze review, P1. Correctness traced
-        a real safe-failure breakage from a mismatched artifact: `graph.py`'s
-        `_rebuild_store` raises `ValueError` on an `evidence[i].incident_id`
+        """Closes a real safe-failure breakage a mismatched artifact could
+        cause: `graph.py`'s `_rebuild_store` raises `ValueError` on an
+        `evidence[i].incident_id`
         mismatch, and that function is called from BOTH the normal
         `_build_report` path and the outer crash-containment path that
         exists to catch exactly this kind of failure -- a mismatched
@@ -438,9 +435,8 @@ class Hypothesis(BaseModel):
     rank: int = Field(ge=1)
     supporting_evidence_ids: tuple[str, ...] = ()
     contrary_evidence_ids: tuple[str, ...] = ()
-    # Unit 3b-4, item 3: `maxLength: 300` is a schema keyword Anthropic's
-    # structured outputs do not enforce server-side (confirmed by the
-    # correctness reviewer against the live adapter's own second run, which
+    # `maxLength: 300` is a schema keyword Anthropic's
+    # structured outputs do not enforce server-side (a real live call once
     # exceeded an equivalent bound on `FinalAssessment.uncertainty` on its
     # first, uncorrected attempt) -- prose stating the bound in words is the
     # only mechanism that can actually keep a model under it, so the limit
@@ -480,35 +476,35 @@ class ReceiptState(StrEnum):
 class ToolReceipt(BaseModel):
     """What a proposal did, whether or not it was allowed to run.
 
-    `state` defaults to `SETTLED` because every receipt built before this unit
-    is one-shot: policy decides, the backend runs (or doesn't), and the receipt
-    is written once with a known outcome. Only the new reservation path in
+    `state` defaults to `SETTLED` because every receipt built before this field
+    existed is one-shot: policy decides, the backend runs (or doesn't), and the
+    receipt is written once with a known outcome. Only the reservation path in
     `tool_wrappers.py` ever constructs a `RESERVED` receipt.
 
     `arguments` defaults to `None` for the same reason `state` does above:
-    every receipt built before the lab-defect-fix Unit 1 that added this field
-    predates it entirely. `None` here means "this receipt was written before
-    Unit 1," never "this check ran with no arguments" -- every tool this
-    application registers requires at least one argument, so a settled
-    receipt for a real check always has a real `ToolArguments` value once this
-    field is populated. `ledger.reserve`, `ledger.settle`, and
-    `_denied_receipt` in `tool_wrappers.py` always set it on a freshly built
-    receipt; only a receipt round-tripped from a pre-Unit-1 `receipts.jsonl`
-    or checkpoint can carry `None`. This carries the *effective* arguments a
-    backend actually ran (or would have run, for a denial) -- today identical
+    every receipt built before this field existed predates it entirely. `None`
+    here means "this receipt predates the field," never "this check ran with
+    no arguments" -- every tool this application registers requires at least
+    one argument, so a settled receipt for a real check always has a real
+    `ToolArguments` value once this field is populated. `ledger.reserve`,
+    `ledger.settle`, and `_denied_receipt` in `tool_wrappers.py` always set it
+    on a freshly built receipt; only a receipt round-tripped from a
+    `receipts.jsonl` or checkpoint written before this field existed can carry
+    `None`. This carries the *effective* arguments a backend actually ran (or
+    would have run, for a denial) -- today identical
     to what the model requested, since nothing yet normalizes a proposal's
-    window before dispatch; a later unit that adds clamping only has to set
+    window before dispatch; a later change that adds clamping only has to set
     this field to the clamped value at the same construction sites, no shape
     change here. No `SCHEMA_VERSION` bump: an added optional field breaks no
     reader, the same reasoning `state`'s own addition and `GraphState.model_
     name`'s addition both already used.
 
-    Lab-defect-fix Unit 3, W1: on a denial, this is the wrapper's
+    On a denial, this is the wrapper's
     *resolved* attempt to authorize -- the value it tried to check the
     model's request against -- not necessarily the value the model wrote
     verbatim; the as-proposed (raw) window is separately recorded on
-    `investigate`'s own `proposal_recorded` event (lab-defect-fix Unit 1,
-    W11) for the same `proposal_turn`, joinable via `dispatch_tool`'s
+    `investigate`'s own `proposal_recorded` event for the same
+    `proposal_turn`, joinable via `dispatch_tool`'s
     `proposal_denied` event's own `proposal_turn`/`receipt_id`.
     """
 
@@ -583,7 +579,7 @@ class FinalAssessment(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: str = SCHEMA_VERSION
-    # Unit 3b-4, item 2: `check_terminal_invariants` below enforces a rule
+    # `check_terminal_invariants` below enforces a rule
     # invisible to both the emitted schema and a one-line tool description --
     # a `model_validator(mode="after")` cannot appear in `model_json_schema()`
     # 's output, so nothing in the wire schema told Claude that a DIAGNOSED
@@ -593,9 +589,9 @@ class FinalAssessment(BaseModel):
     # reading the tool schema sees the invariant before it is refused for
     # missing it, not only after.
     #
-    # Addendum, A5: this and `root_cause`'s description below restate the
+    # This and `root_cause`'s description below restate the
     # SAME rule `_final_assessment_tool_definition`'s hand-written tool-level
-    # description already states in `live_model.py`. Verified deliberate,
+    # description already states in `live_model.py`. Deliberate,
     # not accidental duplication to "simplify away": the tool-level
     # description is redundant WITH these two exactly because a model reads
     # both, and it is unconfirmed whether Anthropic's parser honours a
@@ -604,10 +600,10 @@ class FinalAssessment(BaseModel):
     # losing the guidance entirely if the sibling form is ever silently
     # ignored. Load-bearing redundancy, not duplication to prune.
     #
-    # Addendum, F5: the final sentence below ("An abstention must still
+    # The final sentence below ("An abstention must still
     # cite...") is ALSO deliberately duplicated in `prompts.py`'s
     # `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`, a different duplication
-    # than A5's above -- that copy reaches the rendered prompt text, this
+    # than the one above -- that copy reaches the rendered prompt text, this
     # one reaches only this tool-call JSON schema, so a model needs both to
     # see the rule regardless of which channel it actually reads. See
     # `test_live_model.py`'s `test_the_respond_tool_payload_size_matches_
@@ -630,18 +626,15 @@ class FinalAssessment(BaseModel):
             "DIAGNOSED."
         )
     )
-    # Unit 3b-4, item 4 (and its own follow-up): `graph.py`'s
-    # `store.unknown_ids(cited)` check runs after the model's response is
-    # parsed, so a forged or mistyped id in EITHER field below is terminal
-    # with no repair (`ReasonCode.FORGED_EVIDENCE_REFERENCE`) -- unlike a
-    # malformed shape, there is no second chance to fix a wrong id, so the
-    # instruction has to land on the first attempt. `contrary_evidence_ids`
-    # was missed in item 4's first pass -- `graph.py:1069`'s
-    # `cited = parsed.supporting_evidence_ids + parsed.contrary_evidence_ids`
-    # feeds both fields into the identical check, so leaving one documented
-    # and its sibling silent was the same instance-not-class error this
-    # whole unit exists to close, caught by item 5's own cross-check test
-    # before it reached a live run.
+    # `graph.py`'s `store.unknown_ids(cited)` check runs after the model's
+    # response is parsed, so a forged or mistyped id in EITHER field below is
+    # terminal with no repair (`ReasonCode.FORGED_EVIDENCE_REFERENCE`) --
+    # unlike a malformed shape, there is no second chance to fix a wrong id, so
+    # the instruction has to land on the first attempt. Both fields must state
+    # this: `graph.py:1069`'s `cited = parsed.supporting_evidence_ids +
+    # parsed.contrary_evidence_ids` feeds both fields into the identical check,
+    # so documenting one and leaving its sibling silent would be the same
+    # mistake in two places.
     supporting_evidence_ids: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -667,8 +660,8 @@ class FinalAssessment(BaseModel):
     # fields above) score exactly what they scored before this field
     # existed.
     runbook_citations: tuple[str, ...] = ()
-    # Unit 3b-4, item 3: see `Hypothesis.missing_evidence`'s comment above --
-    # the second live run's second new failure exceeded this same bound on
+    # See `Hypothesis.missing_evidence`'s comment above --
+    # a live run once exceeded this same bound on
     # an unrepaired first attempt, and the provider does not enforce
     # `maxLength` server-side, so the word limit has to be stated in prose.
     uncertainty: str = Field(
@@ -779,7 +772,7 @@ class EscalationRecord(BaseModel):
     rewording, so there is one vocabulary for the same concept across the
     node, the graph state, and the report.
 
-    `rejection_note` is Unit 2c's own field: the owner's reason for
+    `rejection_note` carries the owner's reason for
     `causalops reject <thread-id> <reason>`. Named `rejection_note`, not
     `owner_reason` (which would collide with `reason` above -- the enum
     trigger, a different concept) or `decision_note` (which would wrongly
@@ -842,24 +835,21 @@ class InvestigationReport(BaseModel):
     final_context_digest: str
     evidence_ids: tuple[str, ...] = ()
     receipt_ids: tuple[str, ...] = ()
-    # Milestone 3, Unit 3a. `retrieval_mode` is `DISABLED` on every run that
-    # never dispatched an allowed `search_runbooks` check -- which is every
-    # run before this unit -- and is set from the backend's own
+    # `retrieval_mode` is `DISABLED` on every run that never dispatched an
+    # allowed `search_runbooks` check, and is set from the backend's own
     # configuration otherwise, never inferred from whether any passage came
     # back (`RetrievalMode`'s docstring). `runbook_passage_ids` mirrors
-    # `evidence_ids`/`receipt_ids`'s own auditability: an owner can
-    # re-resolve every id the assessment's `runbook_citations` names against
-    # this list the same way `evidence_ids` lets them re-resolve
-    # `supporting_evidence_ids`.
+    # `evidence_ids`/`receipt_ids`'s own auditability: an owner can re-resolve
+    # every id the assessment's `runbook_citations` names against this list the
+    # same way `evidence_ids` lets them re-resolve `supporting_evidence_ids`.
     retrieval_mode: RetrievalMode = RetrievalMode.DISABLED
     runbook_passage_ids: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
-    # Unit 2b. `None` for every run that never escalated -- which is every
-    # run before this unit and most runs after it. Deliberately not folded
-    # into `limitations`: that field is free text an evaluator would have to
-    # string-match to answer "did this escalate, and what did the owner
-    # decide," where this field answers it directly. Additive and optional,
-    # so `check_terminal_invariants` below needs no change -- disposition,
+    # `None` for every run that never escalated -- most runs. Deliberately not
+    # folded into `limitations`: that field is free text an evaluator would
+    # have to string-match to answer "did this escalate, and what did the owner
+    # decide," where this field answers it directly. Additive and optional, so
+    # `check_terminal_invariants` below needs no change -- disposition,
     # root_cause, assessment, and reason_code are unaffected by whether an
     # owner accepted or rejected the assessment they describe.
     escalation: EscalationRecord | None = None
@@ -899,7 +889,7 @@ class InvestigationResult(BaseModel):
 
     Domain vocabulary, not orchestrator-specific: `graph.py`'s LangGraph
     orchestrator produces one of these from a finished run today, and so did
-    `workflow.py`'s loop before it was retired in Unit 1d-2.
+    the retired `workflow.py` loop it replaced.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -923,7 +913,7 @@ class EscalatedInvestigation(BaseModel):
     the same state a finished run's report is built from, so carrying them
     costs nothing extra. `checkpoint_id`/`reason`/`remaining_check_count`/
     `proposal_fingerprint` are `TECHNICAL_SPEC.md` §8's interrupt payload;
-    `proposal_fingerprint` is always `None` in Unit 2b -- nothing in the
+    `proposal_fingerprint` is always `None` today -- nothing in the
     codebase can produce a policy-approved next-check proposal at escalation
     time yet (see `graph.py`'s module docstring).
     """

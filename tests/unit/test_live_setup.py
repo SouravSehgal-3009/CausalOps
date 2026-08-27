@@ -1,5 +1,5 @@
 """Tests for `causalops.live_setup`, extracted from `test_cli.py` alongside
-Unit 3c's `_build_model_and_registry`/`_live_evaluation_ceiling_usd`
+the `_build_model_and_registry`/`_live_evaluation_ceiling_usd`
 extraction out of `cli.py` -- both `causalops.cli` and
 `causalops.evaluate_cli` build a live model/tool registry and resolve the
 cost ceiling through this shared module now, so its tests live here rather
@@ -156,8 +156,8 @@ def test_live_evaluation_ceiling_still_accepts_a_value_above_the_true_floor() ->
 
 
 def test_live_evaluation_ceiling_honours_a_well_formed_typo() -> None:
-    """The boundary this fix does *not* move: `500` typed for `5.00` (Unit
-    3b-3's default, raised from 2.00) is a well-formed positive, finite
+    """The boundary this fix does *not* move: `500` typed for `5.00` (the
+    default, raised from 2.00) is a well-formed positive, finite
     number and is honoured as written, same as any other config value --
     guarding against a fat-fingered magnitude is the owner's job, not this
     parser's. This test exists so the boundary is documented, not implied."""

@@ -1,4 +1,4 @@
-"""Unit 2c: the owner's accept/reject decision on a paused investigation.
+"""The owner's accept/reject decision on a paused investigation.
 
 Two things live in one module because they share one job: the resume value
 `graph.py`'s `escalation_interrupt` node sees and the row `owner_decisions`
@@ -9,17 +9,17 @@ copies hold identical bytes.
 
 This is the first code in the project that takes an authorization
 instruction from outside the process (`TECHNICAL_SPEC.md` §12's dual-review
-trigger for this unit): `causalops approve`/`reject` run in a second process
-from the one that paused, with nothing but a thread id and, for a reject,
-free text a person typed.
+trigger for exactly this kind of module): `causalops approve`/`reject` run in
+a second process from the one that paused, with nothing but a thread id and,
+for a reject, free text a person typed.
 
-`CheckpointStoreError`/`CheckpointStoreReasonCode` (Unit 2d) are named for
+`CheckpointStoreError`/`CheckpointStoreReasonCode` are named for
 `results/checkpoints.db`, not for "approval," even though they are defined
 here: `owner_decisions` and LangGraph's own `checkpoints`/`writes` tables
 live in that one physical file, and `cli.py`'s `_sqlite_checkpointer` --
 used unconditionally by a plain `causalops investigate`, with no approval in
-sight -- raises the same type on a failure to open it. The name was
-`ApprovalError` through Unit 2c, when this module was the only thing that
+sight -- raises the same type on a failure to open it. The type used to be
+named `ApprovalError`, back when this module was the only thing that
 ever opened that file; keeping that name once a second, approval-free
 caller needed it too would have left it wrong at half its call sites.
 """
@@ -226,9 +226,9 @@ def read_decision_for_thread(
     was written against -- `escalation_interrupt` and `final_report` each
     commit a checkpoint after the resume, so the composite key identifies
     the write, never a later lookup against an already-advanced checkpoint.
-    Unit 2c's reachable state has at most one decision per thread (there is
+    Today's reachable state has at most one decision per thread (there is
     no "approve one more check" path yet -- see `graph.py`'s module
-    docstring and the `TECHNICAL_SPEC.md` Unit 2c amendment), so the most
+    docstring and `TECHNICAL_SPEC.md`'s own amendment note), so the most
     recent row for a thread is unambiguous.
     """
     try:

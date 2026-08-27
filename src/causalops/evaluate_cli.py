@@ -1,4 +1,4 @@
-"""`causalops-evaluate`: the Unit 3c paired live comparison.
+"""`causalops-evaluate`: the paired live comparison.
 
 `TECHNICAL_SPEC.md` §10: "same model and same answer-neutral initial alert
 compare a no-tool baseline against the tool-enabled LangGraph workflow,"
@@ -77,7 +77,7 @@ from causalops.scenario_control import (
 # these four families today, each already carrying a `seed_variants.
 # evaluation` block distinct from `seed_variants.development` --
 # `TECHNICAL_SPEC.md` §10 permits up to six held-out incidents; this project
-# chose four (`CLAUDE.md`'s Unit 3c scoping note). Adding a fifth or sixth
+# chose four (`CLAUDE.md`'s own scoping note). Adding a fifth or sixth
 # family later is a one-line change here, not a redesign.
 EVALUATION_FAMILIES: tuple[str, ...] = (
     "ambiguous_telemetry",
@@ -189,7 +189,7 @@ def _run_id_from_events(events: Sequence[RunEvent]) -> str:
     but `cost_ledger.run_cost_totals` is keyed by `run_id`, not
     `investigation_id`, so this script recovers it from the
     `investigation_started` event every run records first (`graph.py`'s
-    `run_graph_investigation`, Unit 3c)."""
+    `run_graph_investigation`)."""
     for event in events:
         if event.name == "investigation_started":
             run_id = event.fields.get("run_id")
@@ -566,8 +566,8 @@ def summarize_paired_evaluation(
     enough -- then calls the existing arm/mode-agnostic
     `summarize_evaluation` once per distinct pair present.
     `summarize_evaluation` itself is taught nothing about arms or retrieval
-    modes; it predates Unit 3c's paired design and stays usable on any flat
-    list of records, here or elsewhere. `total_records` is a bare count of
+    modes; it predates this script's paired design and stays usable on any
+    flat list of records, here or elsewhere. `total_records` is a bare count of
     the whole batch, not a call to `summarize_evaluation` on the unpartitioned
     records -- see `PairedEvaluationSummary`'s own docstring for why no
     benchmark figure may span more than one retrieval mode.

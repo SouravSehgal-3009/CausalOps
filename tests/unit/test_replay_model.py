@@ -25,7 +25,7 @@ FIXTURES = (
 def make_request(
     stage: Stage, system_text: str = "system", context_text: str = "context"
 ) -> ModelRequest:
-    """`run_id`/`graph_phase`/`model_turn`/`context_digest` (Unit 3b-2) are
+    """`run_id`/`graph_phase`/`model_turn`/`context_digest` are
     inert to `ReplayReasoningModel.respond`, which matches fixtures on
     `request.stage` alone -- placeholder values below, not meaningful ones,
     present only because the fields are required."""

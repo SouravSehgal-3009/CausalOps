@@ -33,13 +33,13 @@ def test_every_container_declares_its_memory_ceiling() -> None:
 
 
 def test_prometheus_keeps_a_day_of_history() -> None:
-    """Lab-defect-fix Unit 2, W13. Raised from 1h to 24h: the §7
-    investigation this plan is built from lost the billed evaluation run's
+    """Raised from 1h to 24h: an earlier
+    investigation lost a billed evaluation run's
     own raw telemetry inside one hour, before it could be re-analysed.
     24h covers "run it in the morning, analyse it in the evening." Series
     cardinality growth over the longer window is bounded operationally, not
-    by this retention setting -- W15's re-scoped answer (a documented
-    container restart between evaluation batches) is what keeps that in
+    by this retention setting -- a documented
+    container restart between evaluation batches is what keeps that in
     check; see this repo's `TECHNICAL_OVERVIEW.md`."""
     command = compose()["services"]["prometheus"]["command"]
 

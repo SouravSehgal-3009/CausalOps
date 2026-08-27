@@ -33,10 +33,10 @@ NO_INCIDENT = "none"
 MAX_LOG_FIELDS = 8
 MAX_FIELD_LENGTH = 120
 
-# Lab-defect-fix Unit 2, W6. `prometheus_client`'s own default buckets
+# `prometheus_client`'s own default buckets
 # (`.005` to `10.0`, doubling roughly every 2-3 steps) put this lab's
-# entire real dynamic range inside one bucket -- confirmed measured
-# (§8.6): a real ~1.21s mean latency was reported by `histogram_quantile`
+# entire real dynamic range inside one bucket -- confirmed by direct
+# measurement: a real ~1.21s mean latency was reported by `histogram_quantile`
 # as `peak 2.425`, a bucket-interpolation artifact roughly double reality,
 # not a query defect. Deriving a replacement ladder from the histogram's
 # OWN `histogram_quantile` output during a live run would be circular --

@@ -15,7 +15,7 @@ from causalops.tools import ToolName
 
 BUDGETS = Budgets()
 
-# Fix F2. Every `(tool, reason_code)` pair `policy.authorize()` can
+# Every `(tool, reason_code)` pair `policy.authorize()` can
 # actually produce, per `policy.py`'s own `deny(...)` call sites --
 # `RESULT_LIMIT_EXCEEDED` fires from two different tools (`query_logs`,
 # `search_runbooks`), every other reason code from `query_metric`/
@@ -108,7 +108,7 @@ def test_evidence_appears_with_its_opaque_id_inside_the_fence() -> None:
 
 
 def test_no_denied_checks_renders_byte_identically_to_before_fix_f2() -> None:
-    """Fix F2. `denied_checks` defaults to `()`, the same backward-
+    """`denied_checks` defaults to `()`, the same backward-
     compatible pattern `passages` already uses -- every call site that
     predates this fix (every one in the existing suite) must keep working
     unchanged. Compares the implicit default against an explicit empty
@@ -127,7 +127,7 @@ def test_no_denied_checks_renders_byte_identically_to_before_fix_f2() -> None:
 def test_denial_guidance_covers_every_real_denial_without_a_bare_value_fallback(
     tool: ToolName, reason_code: ReasonCode
 ) -> None:
-    """Fix F2. `denial_guidance` must never raise and must never fall back
+    """`denial_guidance` must never raise and must never fall back
     to a bare `reason_code.value` for any `(tool, reason_code)` pair
     `policy.authorize()` can actually produce -- a raised `KeyError` would
     crash the investigation, and a bare enum name (e.g. `"BUDGET_
@@ -140,7 +140,7 @@ def test_denial_guidance_covers_every_real_denial_without_a_bare_value_fallback(
 
 
 def test_a_denied_check_renders_outside_the_fence_between_status_and_evidence() -> None:
-    """Fix F2. The denial line must be model-visible application text, not
+    """The denial line must be model-visible application text, not
     recorded telemetry -- it sits between `## Status` and `## Evidence`,
     outside `FENCE_OPEN`/`FENCE_CLOSE`, and is prefixed `"denied: "`, never
     `"- "` (see `render_context`'s own docstring for why: `models.py`'s

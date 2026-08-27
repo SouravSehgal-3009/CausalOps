@@ -1,7 +1,6 @@
-"""F9's new `service` field descriptions, against the real lab -- follow-up
-to `UNIT6_FOLLOWUP_PLAN.md`.
+"""The `service` field descriptions, against the real lab.
 
-The restriction F9 documents (a metric template or log category recorded by
+The restriction documented there (a metric template or log category recorded by
 one lab service and not another) is architectural, not scenario-specific --
 it comes from which `lab/services/*.py` module publishes which gauge/counter
 or writes which log category, not from any one incident's fault injection.

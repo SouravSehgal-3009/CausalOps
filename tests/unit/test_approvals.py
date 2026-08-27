@@ -1,4 +1,4 @@
-"""Unit 2c: `OwnerDecision`'s validation, the append-only `owner_decisions`
+"""`OwnerDecision`'s validation, the append-only `owner_decisions`
 store, and `causalops approve`/`reject` end to end through `cli.py`.
 
 The CLI-level tests below follow `test_checkpointing.py`'s own idiom: a
@@ -258,7 +258,7 @@ def test_approve_refuses_cleanly_when_the_finalized_report_is_corrupted(
     without ever touching the graph -- a corrupted artifact there must also
     refuse cleanly rather than raising an unhandled `ValidationError`.
 
-    Unit 3b-4 addendum, C5: this used to refuse as `STORE_UNAVAILABLE`
+    This used to refuse as `STORE_UNAVAILABLE`
     (the same code a broken checkpoint STORE gets), even though nothing
     about the store itself was wrong here -- only `report.json`'s own
     contents were. `_load_stored_artifact` (`cli.py`) now reports
@@ -289,11 +289,11 @@ def test_approve_refuses_cleanly_when_the_finalized_report_is_corrupted(
 def test_approve_refuses_cleanly_when_the_stored_incident_no_longer_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Post-freeze review, P2-3. `run_decision_command` (the resume path
+    """`run_decision_command` (the resume path
     behind `causalops approve`/`reject`) used to build `RunPaths` directly
     from the checkpoint's own recorded `incident_id`, with no check that
     `runs/<incident_id>/incident.json` still describes that same incident
-    -- C1's identity check landed on `run_investigate_command` only. This
+    -- the identity check landed on `run_investigate_command` only. This
     simulates `incident.json` diverging from its own directory name AFTER
     a thread has already paused against it (a manual copy, a future code
     path, or a bug), the same shape
@@ -308,7 +308,7 @@ def test_approve_refuses_cleanly_when_the_stored_incident_no_longer_matches(
     original_scope = incident_scope()
     paths = cli.RunPaths(root=tmp_path / "runs" / original_scope.incident_id)
     # Every field must agree with the OTHERS (`StoredIncident.check_
-    # identity_agrees`, `domain.py`, added by this same post-freeze review)
+    # identity_agrees`, `domain.py`)
     # for this to even construct -- the drift under test here is against
     # the DIRECTORY NAME the thread's checkpoint actually points at, not
     # an internal inconsistency inside the artifact itself, which is now a
@@ -455,8 +455,8 @@ def _checkpoint_snapshot(root: Path, thread_id: str) -> StateSnapshot:
 
 
 def _feed_one_bad_resume(root: Path, thread_id: str) -> None:
-    """Puts a paused thread into the *re-paused* state from Unit 2b's own
-    measured table -- `.next == ()`, `.interrupts` still non-empty --
+    """Puts a paused thread into the *re-paused* state -- `.next == ()`,
+    `.interrupts` still non-empty --
     standing in for a stray malformed `Command(resume=...)` from outside
     this CLI (a test, or a future caller). Guard #1 must still recognize
     this thread as pending through `.interrupts`; using `.next` instead
@@ -482,7 +482,7 @@ def _feed_one_bad_resume(root: Path, thread_id: str) -> None:
 def test_a_re_paused_thread_is_still_approvable_through_dot_interrupts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression guard for Unit 2b's own measured trap: a re-paused run
+    """Regression guard for a real measured trap: a re-paused run
     (after a bad resume value) shows `.next == ()`, exactly like a settled
     run does -- only `.interrupts` tells them apart. Mutating guard #1 to
     read `.next` instead would make this test fail by wrongly refusing a
@@ -504,7 +504,7 @@ def test_a_re_paused_thread_is_still_approvable_through_dot_interrupts(
 def test_approve_reports_a_locked_checkpoint_store_instead_of_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unit 2d: `run_decision_command`'s own `mkdir`/`sqlite3.connect` pair
+    """`run_decision_command`'s own `mkdir`/`sqlite3.connect` pair
     (`cli.py`, the connection `owner_decisions` lives behind) was the other
     untranslated connection open -- reached before any thread lookup, so no
     incident or paused thread is needed to exercise it, only a database
@@ -556,7 +556,7 @@ def test_approve_on_a_never_paused_thread_fails_no_pending_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A checkpoint exists (the investigation ran and settled normally),
-    but it never escalated -- `.interrupts` is empty, and Unit 2b's own
+    but it never escalated -- `.interrupts` is empty, and a real
     measured trap says `.next` cannot be trusted to tell this apart from a
     re-paused run. Guard #1 must refuse this, not silently resume nothing
     and report success."""
@@ -600,7 +600,7 @@ def test_the_decision_is_recorded_before_the_graph_is_resumed(
     -- exactly the regression this test exists to catch -- the row would
     never be written, and this test would find nothing.
 
-    A crash here is not a benign test artifact: 2c's own design note is
+    A crash here is not a benign test artifact: the design intent is
     that the *retry* path (`existing is not None`, artifacts not yet on
     disk) is what turns a mid-resume crash into a recoverable second
     attempt rather than a thread stuck behind a record claiming it settled
@@ -632,13 +632,13 @@ def test_the_decision_is_recorded_before_the_graph_is_resumed(
 def test_a_retry_after_a_crash_before_resume_still_settles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unit 2d's own crash/idempotency suite. The branch the test above
+    """The branch the test above
     stops short of: after the identical crash (decision row written,
-    `Command(resume=...)` never called at all -- this thread is still
-    genuinely paused, not merely reported as such), a *retry* must find the
-    existing row, skip the redundant write, and actually resume this time.
-    Before this unit this was 2c's own design note ("the retry path...is
-    what turns a mid-resume crash into a recoverable second attempt"),
+    `Command(resume=...)` never called at all -- this thread is still genuinely
+    paused, not merely reported as such), a *retry* must find the existing row,
+    skip the redundant write, and actually resume this time. Before this test
+    existed, this was only a design note ("the retry path...is what turns a
+    mid-resume crash into a recoverable second attempt"),
     reasoned about but never exercised."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -869,7 +869,7 @@ def test_a_malformed_rejection_reason_fails_before_anything_durable_is_written(
 def test_approve_and_reject_never_fall_through_to_investigate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guards the explicit `main` dispatch branch: before this unit, `main`
+    """Guards the explicit `main` dispatch branch: before this fix, `main`
     fell through to `run_investigate_command` for any unrecognized command
     value, which would have made `approve`/`reject` silently run an
     investigation instead of refusing on an unknown thread."""

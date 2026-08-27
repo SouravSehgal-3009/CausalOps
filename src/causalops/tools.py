@@ -51,8 +51,8 @@ class LogFilter(StrEnum):
 class RunbookTopic(StrEnum):
     """The closed set of guidance topics `search_runbooks` may request.
 
-    Milestone 3's owner decision, taken over the plan's original "sanitize a
-    free-text query" framing: this module's own docstring already promises
+    A closed enum was chosen deliberately over a "sanitize a
+    free-text query" alternative: this module's own docstring already promises
     "raw ... queries ... have no representation here and cannot be
     proposed," and a free-text `query` field would have made `search_runbooks`
     the one tool that broke that promise instead of merely constraining it.
@@ -92,7 +92,7 @@ class QueryMetricArguments(BaseModel):
             "or time out. gateway_latency_p95 is recorded by every service."
         )
     )
-    # Lab-defect-fix Unit 3, W1. Optional, not required: the model that just
+    # Optional, not required: the model that just
     # wants "the incident" -- every observed case -- no longer has to
     # retype the window verbatim. `tool_wrappers.resolve_effective_window`
     # resolves an omitted bound to the matching scope boundary and narrows
@@ -125,7 +125,7 @@ class QueryLogsArguments(BaseModel):
             "inventory logs none of the four categories."
         )
     )
-    # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
+    # See `QueryMetricArguments.window_start`
     # above for the full rationale -- identical here.
     window_start: UtcDatetime | None = Field(
         default=None,
@@ -152,7 +152,7 @@ class ListRecentChangesArguments(BaseModel):
     # it here would leak evaluation ground truth into the tool schema, so
     # this field deliberately stays undescribed.
     service: str
-    # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
+    # See `QueryMetricArguments.window_start`
     # above for the full rationale -- identical here.
     window_start: UtcDatetime | None = Field(
         default=None,

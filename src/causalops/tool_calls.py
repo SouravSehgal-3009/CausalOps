@@ -4,9 +4,9 @@
 to speak the same native-tool-call protocol: the model proposes a check by
 calling a registered tool, not by writing a `proposal` field into a structured
 JSON response. `NativeToolCall` models that shape without depending on
-`langchain-core`'s own type, so the replay adapter (Unit 1b) can emit an
+`langchain-core`'s own type, so the replay adapter can emit an
 "equivalent message" as the spec requires without importing anything from the
-new dependency this unit deliberately leaves unused.
+new dependency the replay adapter deliberately leaves unused.
 
 Nothing here calls a backend or a policy wrapper. This module only answers:
 is there exactly one call, and does it parse into a well-formed proposal?

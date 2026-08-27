@@ -64,7 +64,7 @@ def test_another_incident_is_denied() -> None:
 
 
 def test_a_window_outside_the_incident_is_denied() -> None:
-    """Lab-defect-fix Unit 3, W1: this calls `authorize` directly, the way
+    """This calls `authorize` directly, the way
     only this module's own tests and a future caller that skips
     `tool_wrappers.resolve_effective_window` would -- the ordinary wrapper
     path always resolves/clamps a window first, so a raw window entirely
@@ -90,7 +90,7 @@ def test_a_window_outside_the_incident_is_denied() -> None:
 
 
 def test_a_window_that_extends_past_the_incident_is_denied() -> None:
-    """Lab-defect-fix Unit 3, W1: same direct-call contract as the test
+    """Same direct-call contract as the test
     above -- reached only by bypassing `tool_wrappers.resolve_effective_
     window`, which would have clamped this window to the incident before
     `authorize` ever saw it."""
@@ -112,7 +112,7 @@ def test_a_window_that_extends_past_the_incident_is_denied() -> None:
 
 
 def test_a_backwards_window_is_denied() -> None:
-    """Lab-defect-fix Unit 3, W1: same direct-call contract as the two
+    """Same direct-call contract as the two
     tests above. Unlike them, a backwards window stays reachable through
     the ordinary wrapper path too -- clamping narrows but cannot un-invert
     a window, see `test_a_window_entirely_outside_scope_still_denies_
@@ -137,7 +137,7 @@ def test_a_backwards_window_is_denied() -> None:
 
 
 def test_an_unresolved_start_is_denied_not_raised() -> None:
-    """Lab-defect-fix Unit 3, W1/Q16(i). A direct caller (today, only this
+    """A direct caller (today, only this
     module's own tests) can hand `authorize` a proposal whose window was
     never resolved -- the ordinary `tool_wrappers.ToolWrapper.dispatch`
     path always resolves both bounds first. `authorize` must refuse this
@@ -259,7 +259,7 @@ def test_an_allowed_decision_with_a_reason_code_is_rejected() -> None:
 
 
 def test_a_row_limit_denial_states_the_requested_and_budget_numbers() -> None:
-    """Fix F3. `PolicyDecision.message` reaches `events.jsonl`'s
+    """`PolicyDecision.message` reaches `events.jsonl`'s
     `proposal_denied.message` verbatim -- an owner reading that audit log
     needs to see the real numbers, not a bare "above the budget," without
     cross-referencing `Budgets` source. Asserted on the numbers themselves,
@@ -276,7 +276,7 @@ def test_a_row_limit_denial_states_the_requested_and_budget_numbers() -> None:
 
 
 def test_a_passage_limit_denial_states_the_requested_and_budget_numbers() -> None:
-    """Fix F3, the `search_runbooks` sibling of the test above."""
+    """The `search_runbooks` sibling of the test above."""
     over_limit = BUDGETS.runbook_passages + 3
     decision = authorize(
         runbooks_proposal(limit=over_limit), incident_scope(), set(), BUDGETS, 2
@@ -288,10 +288,10 @@ def test_a_passage_limit_denial_states_the_requested_and_budget_numbers() -> Non
 
 
 def test_a_corrected_row_limit_retry_is_allowed_and_the_original_stays_denied() -> None:
-    """Fix F3's corrected-retry proof: proposing an over-limit `row_limit`
+    """The corrected-retry proof: proposing an over-limit `row_limit`
     is denied; proposing the corrected limit is `ALLOWED`; proposing the
     original over-limit value again afterward is still `DUPLICATE_
-    PROPOSAL`, not re-evaluated against the budget -- proving F3's
+    PROPOSAL`, not re-evaluated against the budget -- proving the
     message-text fix left the fingerprint invariant `tool_wrappers.py`
     depends on (a denied proposal's fingerprint is marked seen too, so it
     cannot be silently retried) undisturbed."""

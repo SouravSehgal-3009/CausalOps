@@ -1,5 +1,4 @@
-"""The renamed pool gauge, against the real lab -- Lab-defect-fix Unit A (F1,
-revised).
+"""The renamed pool gauge, against the real lab.
 
 Marked `docker` for the same reason as `test_configuration_change.py`. Every
 non-docker test in this codebase uses `RecordingPrometheus`
@@ -8,7 +7,7 @@ and returns canned data regardless of what that string says -- it never
 validates the query against what a real Prometheus would actually have data
 for. That means a mismatch between the gauge name `lab/services/orders.py`
 publishes and the PromQL string `causalops/prometheus.py` queries for
-(exactly the class of bug F1's rename was at risk of introducing: one side of
+(exactly the class of bug this rename was at risk of introducing: one side of
 a two-file rename updated, the other not) would pass the entire non-docker
 suite. This test calls `run_metric_check` directly against the running lab
 and is the only thing that would catch that class of drift.

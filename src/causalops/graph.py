@@ -2,22 +2,22 @@
 policy-wrapped dispatch node `tool_wrappers.py` built and nothing else consumed
 before this module.
 
-Unit 1a built this beside `workflow.py`'s `Investigation` loop, unchanged, so
+This file was built beside `workflow.py`'s `Investigation` loop, unchanged, so
 an owner could run either path against the same incident and compare --
-`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity. Unit 1d-1
-demonstrated that parity with a 144-pair differential sweep across 13
-dimensions; Unit 1d-2 then retired the loop, `workflow.py` and `cli.py`'s
-`--orchestrator` flag included. This file is now the only orchestrator.
+`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity, demonstrated
+with a 144-pair differential sweep across 13 dimensions before the loop was
+retired, `workflow.py` and `cli.py`'s `--orchestrator` flag included. This
+file is now the only orchestrator.
 
 Graph state is a JSON-only `TypedDict`: nothing here lives off-state.
 `tool_wrappers.py`'s `ReservationLedger` and `evidence.py`'s `EvidenceStore`
 are both rebuilt fresh, inside a node, from state's `receipts`/`evidence`
 lists on every call that needs them -- there is no live object surviving
-between graph turns, so Milestone 2's SQLite-checkpointed resume needs no
-redesign of anything in this file. Unit 2a closes the one exception to that
-claim: `RunRecorder` used to be a factory-closure object shared and mutated
-across every node call, which would have lost every recorded event at a
-process boundary. Events are now a `state["events"]` list, rebuilt into a
+between graph turns, so SQLite-checkpointed resume needs no
+redesign of anything in this file. `RunRecorder` used to be a
+factory-closure object shared and mutated across every node call, which
+would have lost every recorded event at a process boundary. Events are now
+a `state["events"]` list, rebuilt into a
 local `RunRecorder` by `_rebuild_recorder` at the top of each node exactly as
 `_rebuild_receipts` already did for receipts, and written back whole in that
 node's return -- the same "read the full field, extend it, return the full
@@ -30,8 +30,8 @@ apart so recording an event never perturbs a domain-timing read -- see
 Two nodes decide whether the run continues, stops safely, or asks for a
 diagnosis; `final_report` never makes that decision, it only serializes
 whatever `investigate`/`dispatch_tool`/`final_assessment` already decided,
-the same separation `workflow.py`'s `Investigation.report()` kept between
-deciding an outcome and writing it down.
+the same separation the retired `workflow.py`'s `Investigation.report()`
+kept between deciding an outcome and writing it down.
 
 Every node that can raise mid-attempt (`investigate`, `dispatch_tool`,
 `final_assessment`) wraps its own body in `try`/`except`: LangGraph gives a
@@ -40,8 +40,8 @@ so a node that lets an exception escape loses them, not just the exception's
 caller. `dispatch_tool` closes this for a reserved tool receipt;
 `investigate`/`final_assessment` close the same gap for the model-call
 budget, via `_StageCounters`/`_ask_with_repair` below. `GraphBubbleUp` is
-re-raised first in all three, since it is a control-flow signal (interrupt,
-drain, parent command), not a failure -- Milestone 2 adds `interrupt()`.
+re-raised first in all three, since it is a control-flow signal that
+`interrupt()` produces (interrupt, drain, parent command), not a failure.
 
 This file binds `ToolCallingModel` -- the `propose()`/`respond()` protocol in
 `models.py` -- not the plain `ReasoningModel` protocol `workflow.py` used.
@@ -138,17 +138,17 @@ class GraphState(TypedDict):
 
     investigation_id: str
     # `TECHNICAL_SPEC.md:140-142` requires this as a distinct, immutable field
-    # alongside `investigation_id`/`thread_id`. In Unit 2a they are minted
+    # alongside `investigation_id`/`thread_id`. Today they are minted
     # together and never diverge -- there is no resume path yet for them to
-    # diverge across. The distinction becomes load-bearing in Unit 2b, where
+    # diverge across. The distinction becomes load-bearing once
     # the model-request idempotency key is `run_id + graph_phase +
     # model_turn` (`TECHNICAL_SPEC.md:155-158`); this field exists now so
     # that key has something stable to name.
     run_id: str
     incident_id: str
-    # Unit 3b-2. Set once, in `run_graph_investigation`'s `initial_state`,
+    # Set once, in `run_graph_investigation`'s `initial_state`,
     # from a caller-supplied name (or `REPLAY_MODEL_NAME` if the caller does
-    # not pass one -- every pre-3b-2 test call site). Never written by any
+    # not pass one). Never written by any
     # node after that. This is what fixes `cli.py`'s resume path: a resumed
     # thread used to relabel its own artifact `REPLAY_MODEL_NAME`
     # unconditionally, because nothing durable said which model actually
@@ -169,11 +169,11 @@ class GraphState(TypedDict):
     seen_fingerprints: list[str]
     receipts: list[dict[str, JsonValue]]
     evidence: list[dict[str, JsonValue]]
-    # Milestone 3, Unit 3a. `runbook_passages` mirrors `evidence`'s own
+    # `runbook_passages` mirrors `evidence`'s own
     # "full list, rebuilt and extended, written back whole" pattern
     # (`_rebuild_passages` below), but a `RunbookPassage` dump, never an
-    # `Evidence` one -- retrieved guidance never enters `evidence`, the
-    # structural claim this whole unit exists to keep true. `retrieval_mode`
+    # `Evidence` one -- retrieved guidance must never enter `evidence`, a
+    # structural claim kept true by construction here. `retrieval_mode`
     # starts `disabled` and is set once a `search_runbooks` proposal is
     # actually reserved and dispatched, from the backend's own
     # configuration -- never inferred from whether `runbook_passages` ends
@@ -190,7 +190,7 @@ class GraphState(TypedDict):
     assessment: dict[str, JsonValue] | None
     usage: dict[str, JsonValue] | None
     failure_reason: str | None
-    # Unit 2b, extended in 2c. All three are `None` together on every run
+    # All three are `None` together on every run
     # that never reached `escalation_interrupt`, and all three are set
     # together once the node returns -- `rejection_note` only actually
     # holds text when `escalation_decision == "reject"`; it is `None`
@@ -230,26 +230,24 @@ def _rebuild_store(
 def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
     """Rebuild every receipt this thread has recorded so far.
 
-    Lab-defect-fix Unit 1, W16: asserts every reconstructed receipt's
-    `incident_id` agrees with this thread's own `state["incident_id"]`.
-    `thread_id` *is* `investigation_id` (`run_graph_investigation` passes
-    `investigation_id` as LangGraph's own `thread_id`) -- a distinct field
-    from `incident_id`, not the same identifier under two names. What
-    actually makes the invariant hold: `state["incident_id"]` is set once,
-    at investigation creation, from the `IncidentScope` of the one incident
-    this investigation was built against (`initial_state`, this module), and
-    every receipt this codebase can produce is stamped
-    `incident_id=scope.incident_id` at reserve/deny time (`tool_wrappers.py`)
-    from that same state -- so within one investigation this can never
-    actually disagree. `cli.py`'s `_load_verified_incident` is what verifies
-    that scope before an investigation is ever started or resumed, closing
-    the one place an operator could otherwise smuggle in a mismatched scope.
-    This is defence-in-depth against a hand-edited or otherwise corrupted
-    checkpoint DB, not a fix for a reachable cross-incident leak -- see
-    `LAB_DEFECTS_FIX_PLAN.md` §2.2 for the full trace. Raises loudly rather
-    than silently dropping the offending receipt: a dropped receipt would
-    hand back a check slot that was actually spent, which is a worse failure
-    than refusing to proceed.
+    Asserts every reconstructed receipt's `incident_id` agrees with this
+    thread's own `state["incident_id"]`. `thread_id` *is* `investigation_id`
+    (`run_graph_investigation` passes `investigation_id` as LangGraph's own
+    `thread_id`) -- a distinct field from `incident_id`, not the same
+    identifier under two names. What actually makes the invariant hold:
+    `state["incident_id"]` is set once, at investigation creation, from the
+    `IncidentScope` of the one incident this investigation was built against
+    (`initial_state`, this module), and every receipt this codebase can produce
+    is stamped `incident_id=scope.incident_id` at reserve/deny time
+    (`tool_wrappers.py`) from that same state -- so within one investigation
+    this can never actually disagree. `cli.py`'s `_load_verified_incident` is
+    what verifies that scope before an investigation is ever started or
+    resumed, closing the one place an operator could otherwise smuggle in a
+    mismatched scope. This is defence-in-depth against a hand-edited or
+    otherwise corrupted checkpoint DB, not a fix for a reachable cross-incident
+    leak. Raises loudly rather than silently dropping the offending receipt: a
+    dropped receipt would hand back a check slot that was actually spent, which
+    is a worse failure than refusing to proceed.
     """
     receipts = [ToolReceipt.model_validate(dump) for dump in state["receipts"]]
     incident_id = state["incident_id"]
@@ -259,15 +257,14 @@ def _rebuild_receipts(state: GraphState) -> list[ToolReceipt]:
                 f"receipt {receipt.receipt_id} has incident_id "
                 f"{receipt.incident_id!r}, but this thread's own state "
                 f"incident_id is {incident_id!r} -- a corrupted checkpoint, "
-                "not a reachable cross-incident leak (see "
-                "LAB_DEFECTS_FIX_PLAN.md §2.2)"
+                "not a reachable cross-incident leak"
             )
     return receipts
 
 
 def _proposal_turn(state: GraphState) -> int:
     """The zero-based `investigate` turn that produced `state["pending_
-    proposal"]`, canonical name `proposal_turn` (lab-defect-fix Unit 1).
+    proposal"]`, canonical name `proposal_turn`.
 
     `investigate` reads `turn_index = state["model_turn"]` (zero-based, and
     the value that selects `Stage`/schema) and returns `"model_turn":
@@ -289,7 +286,7 @@ def _proposal_turn(state: GraphState) -> int:
 
 
 def _rebuild_passages(state: GraphState) -> list[RunbookPassage]:
-    """Milestone 3, Unit 3a. `state["runbook_passages"]`'s live-object
+    """`state["runbook_passages"]`'s live-object
     counterpart, the same "rebuild from state's own dump list" pattern
     `_rebuild_receipts` already uses one line up."""
     return [RunbookPassage.model_validate(dump) for dump in state["runbook_passages"]]
@@ -327,7 +324,7 @@ def _model_calls_left(model_calls_used: int, budgets: Budgets) -> int:
 def _denied_check_notes(
     receipts: Sequence[ToolReceipt], budgets: Budgets
 ) -> tuple[DeniedCheckNote, ...]:
-    """Fix F2. Every denied receipt accumulated so far, rendered into a
+    """Every denied receipt accumulated so far, rendered into a
     `DeniedCheckNote` the model can actually read -- filtered over *all*
     receipts, not just the most recent one, because each context render is
     a stateless re-render with no conversation history: a turn-0 denial
@@ -367,9 +364,9 @@ def _money_refusal_reason_code(
     in a report -- shared by `investigate`'s and `final_assessment`'s
     identical except-blocks below, rather than repeating a three-way
     `isinstance` chain in both (the exact "same fix, two places, one
-    missed" shape this unit's own investigation kept finding elsewhere).
+    missed" shape that recurs elsewhere in this codebase's own history).
 
-    Post-freeze review, P3-5: the third branch used to be a bare
+    The third branch used to be a bare
     fall-through (`return ReasonCode.AMBIGUOUS_MODEL_REQUEST` with no
     check at all) -- correct today, since the parameter type is a
     three-member union and every member is covered above, but a future
@@ -412,23 +409,21 @@ def _accumulate_usage(
 def _unresolved_runbook_citations(
     assessment: FinalAssessment | None, passages: Sequence[RunbookPassage]
 ) -> tuple[str, ...]:
-    """Milestone 3, Unit 3a. Cited `passage_id`s the model wrote that this
+    """Cited `passage_id`s the model wrote that this
     run never actually retrieved -- a forged runbook citation, the same
     threat §9's "Forged citations" row names, applied to guidance instead
     of evidence.
 
-    Deliberately non-fatal, and *not* `ReasonCode.FORGED_EVIDENCE_REFERENCE`
-    -- both reviewers rejected that shape during the owner's review of this
-    unit's pre-edit report, and the reasoning is load-bearing enough to
-    repeat here: `FORGED_EVIDENCE_REFERENCE` nulls the assessment
+    Deliberately non-fatal, and *not* `ReasonCode.FORGED_EVIDENCE_REFERENCE`:
+    `FORGED_EVIDENCE_REFERENCE` nulls the assessment
     (`final_assessment`'s own `failed_state`), which turns a correct,
     fully evidence-backed `DIAGNOSED` result into `FAILED_SAFE` /
     `UNDETERMINED` over a citation that provably cannot affect whether the
     diagnosis is right -- `evaluation.py`'s `diagnosis_correct` reads
     `report.root_cause`, and a `RunbookPassage` can never support or
     contradict a root cause (§6). Failing the run would be a systematic
-    confound in exactly the retrieval-vs-no-retrieval comparison Milestone
-    3 exists to measure, introduced by the unit creating the treatment arm.
+    confound in exactly the retrieval-vs-no-retrieval comparison this
+    codebase exists to measure honestly.
     Called from `_build_report`, not `final_assessment`: `final_assessment`
     needs no change at all, and the assessment's own bytes stay exactly
     what the model wrote (`_build_report` never reconstructs or strips
@@ -517,7 +512,7 @@ def _build_report(
             "could not be resolved against what this run actually retrieved"
         )
 
-    # Unit 2b. Both keys are `None` together on a run that never reached
+    # Both keys are `None` together on a run that never reached
     # `escalation_interrupt`, and both set together once it has (see
     # `GraphState`'s own comment on these two fields for why they cannot be
     # observed half-set). This is not the same claim as "a failed-safe
@@ -633,20 +628,20 @@ def _render_stage_request(
     importing this function -- the two orchestrators ran side by side and
     reaching across that boundary for one shared helper would have coupled
     their lifecycles for no present benefit, with `test_parity.py` guarding
-    the two copies from drifting apart in the meantime. Unit 1d-2 retired
-    `workflow.py` and that duplication with it; this function now has no
+    the two copies from drifting apart in the meantime. Retiring
+    `workflow.py` retired that duplication with it; this function now has no
     copy to drift from, and `test_graph_frozen_reports.py` (`test_parity.py`,
     renamed) is a plain regression pin on this file's own behaviour, not a
     two-orchestrator drift guard.
 
-    `run_id`/`graph_phase`/`model_turn` (Unit 3b-2) are keyword-only and
+    `run_id`/`graph_phase`/`model_turn` are keyword-only and
     required, not defaulted: every caller already has all three in scope
     (`state["run_id"]`, the node's own `GraphPhase`, and either `turn_index`
     or `state["model_turn"]`), and a silent default here would let a future
     call site mint a `ModelRequest` with a wrong or stale idempotency key
     without mypy or a test ever noticing. The digest is computed *before*
-    `ModelRequest` is constructed, not after as before this unit, because
-    `context_digest` is now one of the object's own frozen fields -- the
+    `ModelRequest` is constructed, because
+    `context_digest` is one of the object's own frozen fields -- the
     formula itself (system text + context text + repair errors) is
     unchanged, so replay's requests and every existing digest-based
     assertion are unaffected.
@@ -852,7 +847,7 @@ def _make_investigate(
                 "stage_finished",
                 proposed=proposal is not None,
             )
-            # Lab-defect-fix Unit 1, W11. `parsed` (the whole `InitialPlan`/
+            # `parsed` (the whole `InitialPlan`/
             # `HypothesisUpdate`) and `proposal` (`ToolProposal | None`) are
             # both still in hand here, right where `stage_finished` is
             # already emitted -- the one place this turn's ranked hypotheses,
@@ -903,7 +898,6 @@ def _make_investigate(
             InputTooLarge,
             AmbiguousReservationNotResent,
         ) as refusal:
-            # Unit 3b-2, extended by the Unit 3b-4 addendum's Group B.
             # `LiveClaudeModel` raises one of these *before sending* (or, for
             # `AmbiguousReservationNotResent`, *instead of* sending) -- the
             # cost gate, the input-token cap, or a pre-existing reservation
@@ -1000,7 +994,7 @@ def _make_dispatch_tool(
             # around the real call) is the authoritative figure;
             # `check_finished` carries it explicitly so nothing has to
             # subtract these two timestamps to get zero.
-            # Lab-defect-fix Unit 1, W11: `proposal_turn` and `receipt_id`
+            # `proposal_turn` and `receipt_id`
             # are the join key back to `investigate`'s own `proposal_recorded`
             # event and to the receipt in `receipts.jsonl` -- added to these
             # two existing events only (never `proposal_received`/
@@ -1043,7 +1037,7 @@ def _make_dispatch_tool(
             evidence = state["evidence"]
             if result.evidence is not None:
                 evidence = [*evidence, result.evidence.model_dump(mode="json")]
-            # Milestone 3, Unit 3a. `result.passages`/`result.retrieval_mode`
+            # `result.passages`/`result.retrieval_mode`
             # are only ever non-empty/non-`None` when `proposal.tool` is
             # `search_runbooks` and the dispatch was allowed (see
             # `DispatchResult`'s own docstring) -- a denial never reaches
@@ -1086,7 +1080,7 @@ def _make_dispatch_tool(
             # exact gap `tool_wrappers.py`'s reservation exists to close.
             # A crash before `ledger.settle()` ever ran leaves the receipt
             # `RESERVED` and `ledger.evidence()` empty -- nothing to carry,
-            # matching this handler's pre-Unit-1d behaviour exactly. The one
+            # matching this handler's original behaviour exactly. The one
             # window that differs is settle-then-crash: a crash *inside*
             # `wrapper.dispatch`, between `ledger.settle()` succeeding and
             # `DispatchResult` being constructed and returned, where a
@@ -1263,12 +1257,11 @@ def _make_final_assessment(
             InputTooLarge,
             AmbiguousReservationNotResent,
         ) as refusal:
-            # Unit 3b-2, extended by the Unit 3b-4 addendum's Group B. Same
-            # reasoning as `investigate`'s handler: a refused-before-sending
-            # (or refused-instead-of-resending) request is not a crash, so
-            # it is caught ahead of the blanket handler below and reported
-            # with its own actionable reason code rather than
-            # `INTERNAL_ERROR`.
+            # Same reasoning as `investigate`'s handler: a
+            # refused-before-sending (or refused-instead-of-resending) request
+            # is not a crash, so it is caught ahead of the blanket handler
+            # below and reported with its own actionable reason code rather
+            # than `INTERNAL_ERROR`.
             reason_code = _money_refusal_reason_code(refusal)
             log_stop(reason_code)
             return failed_state(reason_code)
@@ -1293,8 +1286,8 @@ def _escalation_reason(
     budgets: Budgets,
     retrieved_passage_count: int,
 ) -> EscalationReason | None:
-    """`TECHNICAL_SPEC.md` §8's four triggers, now that Unit 3a makes the
-    fourth reachable. `EscalationReason`'s own member order follows the
+    """`TECHNICAL_SPEC.md` §8's four triggers, all four now reachable.
+    `EscalationReason`'s own member order follows the
     spec's listing (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
     `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`,
     `RETRIEVAL_COVERAGE_INSUFFICIENT`); the checks below deliberately do
@@ -1322,8 +1315,8 @@ def _escalation_reason(
     this trigger, because this trigger never looks at citations at all. The
     remaining two triggers are mutually exclusive by construction today (one
     requires `INSUFFICIENT_EVIDENCE`, the other's citation field has no rule
-    forbidding it on either disposition, but only `DIAGNOSED` runs in this
-    milestone's fixtures ever populate `contrary_evidence_ids`) -- the order
+    forbidding it on either disposition, but only `DIAGNOSED` runs in
+    today's fixtures ever populate `contrary_evidence_ids`) -- the order
     below is still asserted by a dedicated test, since "mutually exclusive
     today" is a fact about current fixtures, not a promise about the fields.
     """
@@ -1350,7 +1343,7 @@ def _escalation_reason(
 def _parse_resume_decision(
     value: object,
 ) -> tuple[Literal["accept", "reject"], str | None] | None:
-    """Unit 2c's resume-value contract: `Command(resume=...)` must carry a
+    """The resume-value contract: `Command(resume=...)` must carry a
     mapping with a `decision` key and a `rejection_note` key, the same
     shape `causalops.approvals.OwnerDecision.resume_value()` produces.
     Returns `None` for anything else -- wrong type, missing/unknown
@@ -1407,7 +1400,7 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         # LangGraph confirmed why: only this node re-runs on resume, from
         # its own top, so anything written here would run twice. The
         # payload itself mirrors §8's interrupt-payload fields this
-        # milestone can supply; `thread_id`/`run_id`/`checkpoint_id` are
+        # codebase can supply today; `thread_id`/`run_id`/`checkpoint_id` are
         # not included here because the node has no way to know its own
         # checkpoint id before it exists -- `run_graph_investigation`
         # attaches all three once `.invoke()` returns.
@@ -1423,17 +1416,17 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         # later resume of the same interrupt -- reproduced against a real
         # `SqliteSaver`: raising on a typo left the thread permanently
         # stuck replaying that same bad value on every subsequent resume,
-        # valid ones included, because 2b never finalizes on pause and so
-        # never gets a fresh interrupt id to retry against. Re-interrupting
-        # instead asks again, under the same id, so a later valid decision
-        # still settles the run. `retry` is not read by anything in this
-        # milestone; it exists so a caller re-reading the pending
+        # valid ones included, because this node never finalizes on pause
+        # and so never gets a fresh interrupt id to retry against.
+        # Re-interrupting instead asks again, under the same id, so a later
+        # valid decision still settles the run. `retry` is not read by
+        # anything today; it exists so a caller re-reading the pending
         # interrupt's payload after a bad attempt can tell a first ask from
         # a retry apart, the same way `payload` already tells them why the
-        # run paused at all. Unit 2c: a bare string (still sent by every
+        # run paused at all. A bare string (still sent by every
         # test that resumes a plain accept/reject through
-        # `resume_graph_run`'s pre-2c call sites) is exactly as invalid as
-        # a typo now -- `_parse_resume_decision` requires the mapping
+        # `resume_graph_run`'s older call sites) is exactly as invalid as
+        # a typo -- `_parse_resume_decision` requires the mapping
         # shape `causalops.approvals.OwnerDecision.resume_value()`
         # produces, so `Command(resume="accept")` re-interrupts too.
         while resolved is None:
@@ -1529,14 +1522,15 @@ def _make_route_after_normalize(
         if state["failure_reason"] is not None:
             return "final_report"
         receipts = _rebuild_receipts(state)
-        # Lab-defect-fix Unit 3, W1/Q2. This router used to cap at
+        # This router used to cap at
         # `state["model_turn"] < 2`, reproducing `workflow.py`'s retired loop,
         # which called `plan_second_check()` at most once regardless of
         # whether the second proposal was allowed or denied. That bound made
         # a denial cost a turn permanently: `eda0135b…`'s real incident asked
         # for `list_recent_changes` first, was denied on a strict window
-        # comparison, and never got a second chance at any check at all. With
-        # Unit 3's window clamp making that class of denial rare rather than
+        # comparison, and never got a second chance at any check at all. Now
+        # that the incident window is clamped rather than compared strictly,
+        # making that class of denial rare rather than
         # frequent, a denial should no longer be able to consume a run's last
         # opportunity, so the `< 2` term is dropped.
         #
@@ -1576,7 +1570,7 @@ def _make_route_after_normalize(
 def _make_route_after_final_assessment(
     budgets: Budgets, *, suppress_escalation: bool = False
 ) -> Callable[[GraphState], str]:
-    """`suppress_escalation` (Unit 3c) is the scored-run mode's only real
+    """`suppress_escalation` is the scored-run mode's only real
     mechanism: `TECHNICAL_SPEC.md` §10 requires the paired live comparison to
     "not invoke the escalation path." Set `True`, this router never reaches
     `_escalation_reason` at all -- not "compute the reason but ignore it,"
@@ -1638,10 +1632,10 @@ def build_graph(
     evidence timestamps by however many events happened to be recorded
     first, for a reason that has nothing to do with the evidence itself.
 
-    `suppress_escalation` and `no_tool_baseline` (Unit 3c) are independent
+    `suppress_escalation` and `no_tool_baseline` are independent
     switches for `causalops.evaluate_cli`'s paired live comparison, both
     defaulted `False` so every existing caller -- `run_graph_investigation`'s
-    own default, `cli.py`, and every test that predates this unit -- keeps
+    own default, `cli.py`, and every test that predates these flags -- keeps
     today's graph unchanged.
 
     `no_tool_baseline=True` builds a strictly smaller graph -- `investigate`,
@@ -1658,15 +1652,15 @@ def build_graph(
     `prompts.py`'s `SYSTEM_TEXT` is unchanged for this smaller graph, on
     purpose -- it still tells the model it "may ask for registered
     read-only checks by name and typed arguments" even though
-    `no_tool_baseline=True` never binds a single one. This was reviewed and
+    `no_tool_baseline=True` never binds a single one. This is
     deliberately kept identical, not overlooked: `TECHNICAL_SPEC.md`'s
     paired-comparison rule requires identical model, initial packet,
     budgets, taxonomy, and safe prompt constraints wherever applicable, and
     the prompt itself is one of those constraints -- diverging it between
     the two conditions, even just to drop a sentence that no longer
     applies, would itself become the confound this comparison exists to
-    avoid. See `TECHNICAL_OVERVIEW.md`'s "Unit 3c" section for the full
-    reasoning.
+    avoid. See `TECHNICAL_OVERVIEW.md`'s section on the paired live
+    comparison for the full reasoning.
 
     `suppress_escalation=True` is unrelated to topology -- see
     `_make_route_after_final_assessment`'s own docstring for the mechanism.
@@ -1766,8 +1760,8 @@ def _settle_invocation(
 ) -> InvestigationResult | EscalatedInvestigation:
     """The tail every caller of `.invoke()` against this graph needs,
     regardless of what started the turn: crash containment, syncing the
-    caller's `recorder`, and the terminal-vs-paused split. Unit 2c factored
-    this out of `run_graph_investigation` so `resume_graph_investigation`
+    caller's `recorder`, and the terminal-vs-paused split. Factored
+    out of `run_graph_investigation` so `resume_graph_investigation`
     (below) shares it rather than duplicating roughly eighty lines of
     crash-recovery and result-assembly logic with a chance to drift between
     the two copies.
@@ -1788,8 +1782,9 @@ def _settle_invocation(
     try:
         raw_state = invoke()
     except GraphBubbleUp:
-        # A control-flow signal (interrupt, drain, parent command), not a
-        # failure -- Milestone 2 adds `interrupt()`, and this must keep
+        # A control-flow signal (interrupt, drain, parent command) that
+        # `interrupt()` produces, not a
+        # failure -- this must keep
         # propagating rather than being turned into a safe report.
         #
         # It must still not lose every event recorded before the signal
@@ -1866,12 +1861,12 @@ def _settle_invocation(
     # practice -- but a future caller that reuses a `RunRecorder` across
     # calls would lose whatever it held before this one. Every existing
     # caller that reads `recorder.events` after this call still sees
-    # exactly what it saw before this unit.
+    # exactly what it saw before.
     recorder.recorded = [
         RunEvent.model_validate(dump) for dump in final_state["events"]
     ]
 
-    # Unit 2b. `.invoke()` returns normally on a real pause -- it does not
+    # `.invoke()` returns normally on a real pause -- it does not
     # raise, so this is not an `except GraphBubbleUp:` case (a probe against
     # the installed LangGraph confirmed this before any of this file was
     # written) -- with `"__interrupt__"` present alongside whatever state the
@@ -1927,10 +1922,10 @@ def run_graph_investigation(
 ) -> InvestigationResult | EscalatedInvestigation:
     """Run one investigation to completion, or to its first pause.
 
-    `suppress_escalation`/`no_tool_baseline` (Unit 3c) pass straight through
+    `suppress_escalation`/`no_tool_baseline` pass straight through
     to `build_graph` -- see its own docstring for what each one does. Both
     default `False`, so this function's behaviour is unchanged for every
-    caller written before this unit. Only `causalops.evaluate_cli` ever
+    caller that predates these flags. Only `causalops.evaluate_cli` ever
     passes either as `True`; `resume_graph_investigation` below never takes
     these two, because a scored run that never pauses has nothing to
     resume.
@@ -1938,10 +1933,10 @@ def run_graph_investigation(
     `investigation_id` doubles as LangGraph's own `thread_id`
     (`TECHNICAL_SPEC.md:140-142`). It is `None` for every caller today --
     minting a fresh one is what every existing caller already gets -- and
-    becomes a real input once Milestone 2's resume path needs to reopen a
+    becomes a real input once the resume path needs to reopen a
     specific thread rather than start a new one.
 
-    `model_name` (Unit 3b-2) is defaulted, not required: it exists so
+    `model_name` is defaulted, not required: it exists so
     `GraphState["model_name"]` carries the label a resumed thread's artifact
     should use, and every one of the ~28 test call sites across this
     project predates that need and passes a `ReplayToolCallingModel` -- the
@@ -1950,7 +1945,7 @@ def run_graph_investigation(
 
     This function takes no `resume` argument. It always starts a fresh run
     from `initial_state` below; resuming a paused thread is
-    `resume_graph_investigation`, below, Unit 2c's real resumable entry
+    `resume_graph_investigation`, below, the real resumable entry
     point -- the two share `_settle_invocation`'s crash containment and
     result assembly rather than each carrying its own copy.
 
@@ -1962,7 +1957,7 @@ def run_graph_investigation(
     if investigation_id is None:
         investigation_id = new_opaque_id()
     # `recorder.clock` -- not the `clock` parameter above -- times every
-    # `RunEvent`. Before this unit, the caller's `RunRecorder` was the only
+    # `RunEvent`. The caller's `RunRecorder` used to be the only
     # thing that ever called `.event(...)`, so its own clock never shared
     # ticks with `clock`, which times domain data (budget expiry, tool
     # duration, evidence timestamps). Rebuilding a recorder from state inside
@@ -1991,16 +1986,15 @@ def run_graph_investigation(
         GraphPhase.CREATED.value,
         "investigation_started",
         incident=scope.incident_id,
-        # Unit 3c. `run_id` is internal bookkeeping and deliberately absent
-        # from `InvestigationReport` itself (see this function's own
-        # comment on `run_id`, above) -- but `causalops.evaluate_cli` needs
-        # it to look up this run's own cost from `cost_ledger.
-        # run_cost_totals`, which is keyed by `run_id`, not
-        # `investigation_id`. Recording it on this one event (`events.jsonl`
-        # is not schema-frozen the way `InvestigationReport` is; no test
-        # pins this event's exact field set) is a smaller, more honest fix
-        # than adding a field to the report schema that Unit 3c does not
-        # otherwise need.
+        # `run_id` is internal bookkeeping and deliberately absent from
+        # `InvestigationReport` itself (see this function's own comment on
+        # `run_id`, above) -- but `causalops.evaluate_cli` needs it to look up
+        # this run's own cost from `cost_ledger.run_cost_totals`, which is
+        # keyed by `run_id`, not `investigation_id`. Recording it on this one
+        # event (`events.jsonl` is not schema-frozen the way
+        # `InvestigationReport` is; no test pins this event's exact field set)
+        # is a smaller, more honest fix than adding a field to the report
+        # schema that nothing else needs.
         run_id=run_id,
     )
     initial_state: GraphState = {
@@ -2069,8 +2063,8 @@ def resume_graph_investigation(
     budgets: Budgets = DEFAULT_BUDGETS,
     clock: Clock = utc_now,
 ) -> InvestigationResult:
-    """Unit 2c's real resumable entry point -- the one `run_graph_investigation`
-    used to say a resume path still owed. Resumes `thread_id` with one
+    """The real resumable entry point -- the one `run_graph_investigation`
+    itself never provides. Resumes `thread_id` with one
     already-validated owner decision and settles it to a terminal
     `InvestigationResult`.
 
@@ -2080,9 +2074,9 @@ def resume_graph_investigation(
     ever called, so `escalation_interrupt`'s own resume-parsing loop
     (`_parse_resume_decision`) exits on the first pass and the run falls
     straight through to `final_report` -- there is no path back to a second
-    pause in Unit 2c's graph (the spec's "approve one additional check"
+    pause in this graph (the spec's "approve one additional check"
     route to `DISPATCH_TOOL` does not exist yet; see this module's
-    docstring and the `TECHNICAL_SPEC.md` Unit 2c amendment).
+    docstring and `TECHNICAL_SPEC.md`'s own amendment note).
 
     `cli.py` owns every guard this function assumes has already passed:
     that `thread_id` names a real, pending interrupt, that `decision`/

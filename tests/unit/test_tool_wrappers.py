@@ -178,7 +178,7 @@ def test_a_second_dispatch_past_budget_is_denied_by_authorize_before_reservation
     assert len(backend.calls) == 1
 
 
-# Lab-defect-fix Unit 3, W1: `resolve_effective_window` itself.
+# --- `resolve_effective_window` itself. -----------------------------------
 
 
 def test_a_fully_omitted_window_resolves_to_the_full_scope() -> None:
@@ -262,11 +262,11 @@ def test_resolve_effective_window_is_a_no_op_for_windowless_tools() -> None:
 
 
 def test_differently_rounded_windows_collide_as_duplicates_once_clamped() -> None:
-    """Lab-defect-fix Unit 3, W1: `authorize` fingerprints the *effective*
+    """`authorize` fingerprints the *effective*
     proposal, computed after `resolve_effective_window` clamps it -- so two
     raw requests that differ only in a window bound that gets clamped away
     now correctly collide as the same check, even though their raw
-    arguments are not byte-identical. Before this unit, the fingerprint was
+    arguments are not byte-identical. Before this fix, the fingerprint was
     computed on the raw (unclamped) arguments and these two would NOT have
     collided."""
     scope = incident_scope()
@@ -347,7 +347,7 @@ def test_record_refuses_an_allowed_receipt() -> None:
     """The guard `record()` needs beside its other two: it exists to record a
     denial, which never spends a slot. An `ALLOWED` receipt must go through
     `reserve()`/`settle()` instead, or it would spend a slot that was never
-    reserved -- the exact shape this unit exists to eliminate."""
+    reserved -- the exact shape `record()` exists to eliminate."""
     ledger = ReservationLedger(executed_tools_budget=2)
     allowed_receipt = ToolReceipt(
         receipt_id="receipt-allowed",
@@ -620,7 +620,7 @@ def test_a_receipt_round_trips_through_json_without_losing_fidelity() -> None:
     live `ToolReceipt` objects. If that round trip lost anything -- a
     timestamp's timezone, an enum's value -- budget accounting would corrupt
     silently, since `slots_left()` reads `policy_result` off the
-    reconstructed object. `arguments` (lab-defect-fix Unit 1) round-trips
+    reconstructed object. `arguments` round-trips
     through the same `model_dump`/`model_validate` pair, via `ToolArguments`'s
     own `tool`-discriminated union, exactly like every other typed field
     here."""
@@ -646,7 +646,7 @@ def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
     take -- `outcome`, `reason_code`, `result_digest`, and `evidence_id` are
     all still `None`. A `SETTLED` receipt with every optional field filled
     in is the harder case to prove lossless, and the more representative one
-    for what Milestone 2's checkpoint resume actually has to survive.
+    for what a real checkpoint resume actually has to survive.
     `arguments` set at reserve time must still be present after `settle()`
     replaces the receipt -- `settle()` copies it from the reserved receipt
     rather than re-deriving it, since it never sees the original proposal."""
@@ -677,13 +677,13 @@ def test_a_fully_populated_settled_receipt_round_trips_too() -> None:
 
 
 def test_a_receipt_dict_written_before_this_unit_still_validates() -> None:
-    """Backward compatibility, lab-defect-fix Unit 1: a `receipts.jsonl` line
-    or checkpoint dump written before this unit's `arguments` field existed
+    """Backward compatibility: a `receipts.jsonl` line
+    or checkpoint dump written before the `arguments` field existed
     has no `arguments` key at all -- `_rebuild_receipts` in `graph.py` runs
     `ToolReceipt.model_validate` over every persisted receipt on every node
     call, so a dict missing this key must still validate, with `arguments`
     defaulting to `None`, or every pre-existing checkpoint would fail to
-    resume. `None` means "written before this unit," never "ran with no
+    resume. `None` means "written before this field existed," never "ran with no
     arguments" -- see `ToolReceipt.arguments`'s own docstring."""
     pre_unit_dump = {
         "receipt_id": "receipt-pre-unit-1",
@@ -695,7 +695,8 @@ def test_a_receipt_dict_written_before_this_unit_still_validates() -> None:
         "outcome": ToolOutcome.EXECUTED.value,
         "requested_at": WINDOW_START.isoformat(),
         "duration_ms": 5,
-        # No "arguments" key -- exactly what a pre-Unit-1 dump looks like.
+        # No "arguments" key -- exactly what a dump from before this field
+        # existed looks like.
     }
 
     reloaded = ToolReceipt.model_validate(pre_unit_dump)
@@ -704,14 +705,13 @@ def test_a_receipt_dict_written_before_this_unit_still_validates() -> None:
 
 
 def test_every_fresh_receipt_construction_site_sets_arguments() -> None:
-    """The forward guarantee lab-defect-fix Unit 1 pins with a test rather
-    than a validator (per the plan's own reasoning: a `schema_version`-tied
-    `model_validator` would encode a migration policy this project does not
-    otherwise have, for a field nothing reads yet): every receipt built
-    *fresh* by this module -- `ledger.reserve`, `ledger.settle` (which
-    carries the reserved receipt's `arguments` forward), and
-    `_denied_receipt` -- always sets `arguments` to a real value, never
-    `None`. Only a receipt round-tripped from a pre-Unit-1 artifact should
+    """The forward guarantee pinned with a test rather than a validator (a
+    `schema_version`-tied `model_validator` would encode a migration policy
+    this project does not otherwise have, for a field nothing reads yet): every
+    receipt built *fresh* by this module -- `ledger.reserve`, `ledger.settle`
+    (which carries the reserved receipt's `arguments` forward), and
+    `_denied_receipt` -- always sets `arguments` to a real value, never `None`.
+    Only a receipt round-tripped from an artifact predating this field should
     ever carry `None`, which the test above covers separately."""
     ledger = ReservationLedger(executed_tools_budget=2)
     reserved = ledger.reserve(
@@ -775,7 +775,7 @@ def test_the_wrapper_refuses_arguments_for_a_different_tool() -> None:
 
 def test_the_registry_holds_only_wrapper_produced_entries() -> None:
     """All five tools now, not just `query_logs` -- `dispatch_registry` always
-    builds the full registry as of Unit 3a."""
+    builds the full registry."""
     registry = dispatch_registry(
         run_metric=RecordingMetricBackend(),
         run_logs=RecordingLogsBackend(),
@@ -855,7 +855,7 @@ def test_the_real_backend_executes_against_a_written_log_file(tmp_path: Path) ->
     assert result.evidence.payload["row_count"] == 1
 
 
-# -- Unit 1c: the three tools query_logs's wrapper proved the shape against --
+# -- The three tools query_logs's wrapper proved the shape against ---------
 #
 # One allowed-executes test and one denied-untouched test per tool, mirroring
 # the query_logs coverage above at a lighter weight: the dispatch body

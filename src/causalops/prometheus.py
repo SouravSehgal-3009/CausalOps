@@ -35,21 +35,21 @@ DEFAULT_PROMETHEUS_URL = "http://127.0.0.1:9090"
 # the incident allowlist; this is the second lock on the same door.
 SAFE_SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 
-# Lab-defect-fix Unit 2, W5. `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
-# narrow their `rate(...)` lookback from `[1m]` to `[30s]` -- confirmed
-# against `TOOL_SELECTION_BIAS_FINDINGS.md` §8.5's own line citations
-# (`prometheus.py:38-41`/`:47-50`, unchanged by this unit's earlier edits)
-# that these two, and only these two, are the ones measured to understate
-# a real fault's error rate ~6.5x: the fault band here is 4-15s, and a
+# `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
+# narrow their `rate(...)` lookback from `[1m]` to `[30s]` -- measured
+# directly that these two, and only these two, understate
+# a real fault's error rate roughly 6.5x: the fault band here is 4-15s, and a
 # 1-minute rate window averages it against ~45s of nothing. `[30s]` at a
 # 5s scrape still contains 6 samples (well above the 2-sample minimum
-# `rate()` needs), cutting the dilution roughly in half, and W3's settle
-# delay guarantees both samples the lookback needs are actually present.
+# `rate()` needs), cutting the dilution roughly in half, and the settle
+# delay before stamping `window_end` guarantees both samples the lookback
+# needs are actually present.
 # `GATEWAY_LATENCY_P95`'s own `rate(...[1m])` is deliberately UNCHANGED:
 # it feeds `histogram_quantile`, a different computation (a quantile
-# estimate, not a raw count), which W6's bucket-boundary fix addresses on
-# its own terms -- narrowing its lookback too was never part of the §8.5
-# finding this item fixes, and is not a decision this unit makes silently.
+# estimate, not a raw count), which the histogram bucket-boundary fix
+# addresses on its own terms -- narrowing its lookback too was never part
+# of the measured finding that motivated this change, and is not a
+# decision made silently.
 METRIC_QUERIES: dict[MetricTemplate, str] = {
     MetricTemplate.GATEWAY_ERROR_RATE: (
         'sum(rate(causalops_requests_total{{service="{service}",'
@@ -64,7 +64,7 @@ METRIC_QUERIES: dict[MetricTemplate, str] = {
         'sum(rate(causalops_requests_total{{service="{service}",'
         'incident="{incident}",outcome="timeout"}}[30s]))'
     ),
-    # Fix F1 (revised). Queries `causalops_pool_attempts_per_capacity`: total
+    # Queries `causalops_pool_attempts_per_capacity`: total
     # slot acquisition attempts for the incident divided by configured
     # capacity. This is honestly unbounded above -- it exceeds 1 once
     # attempts outstrip the pool, since a refused request is still a real
@@ -102,7 +102,7 @@ def read_sample(pair: JsonValue) -> MetricSample | None:
         at = float(moment)
         value = float(reading)
     except (ValueError, OverflowError):
-        # Round 8 review, P2. `json.loads` produces a genuine Python `int`
+        # `json.loads` produces a genuine Python `int`
         # for a large integer literal in a JSON response (no decimal point
         # or exponent, so `float()`'s string-parsing path -- which happily
         # rounds an oversized literal to inf rather than raising -- is
@@ -134,7 +134,7 @@ class ParsedSamples(NamedTuple):
     actually sent (`raw_count`), and how many series the response held
     (`series_count`).
 
-    Round 8 review, P2. Before this type existed, `parse_samples` returned
+    Before this type existed, `parse_samples` returned
     only the surviving samples -- the row-level distinction between "nothing
     was fetched" and "rows were fetched but every one of them was
     unreadable" (e.g. an all-NaN `histogram_quantile` window, a documented,
@@ -144,7 +144,7 @@ class ParsedSamples(NamedTuple):
     empty, valid response. `raw_count > len(samples)` is `run_metric_check`'s
     signal that rows existed and were discarded, not that nothing was there.
 
-    Lab-defect-fix Unit 2, W14. `series_count` closes the same class of gap
+    `series_count` closes the same class of gap
     one level up: every registered template aggregates
     (`sum`/`max`/`histogram_quantile`), so a real Prometheus response is
     never meant to carry more than one series, but nothing enforced that --
@@ -189,7 +189,7 @@ def parse_samples(answered: JsonValue) -> ParsedSamples | None:
 def aligned_metric_window(
     window_start: datetime, window_end: datetime
 ) -> tuple[datetime, datetime, timedelta]:
-    """Lab-defect-fix Unit 2, W2. Anchors the query grid on `window_end`
+    """Anchors the query grid on `window_end`
     instead of `window_start`, so `window_end` -- the instant closest to
     the fault, and the one most likely to hold data -- is itself an
     evaluated point, not a gap `query_range` silently steps past.
@@ -229,13 +229,13 @@ def query_prometheus(
     step: timedelta,
     timeout: int,
 ) -> ParsedSamples | None:
-    # Lab-defect-fix Unit 2, W2/#3. `step` is a parameter, not a second,
+    # `step` is a parameter, not a second,
     # independent read of `METRIC_STEP_SECONDS` -- this function has
     # exactly one caller (`fetch_metric_samples`, confirmed by grep), which
     # already computed `step` once via `aligned_metric_window`. Two sites
     # each reading the same module constant is a real drift hazard,
-    # especially with `METRIC_STEP_SECONDS` left open to future change
-    # (owner decision Q12); passing it through keeps one source of truth.
+    # especially with `METRIC_STEP_SECONDS` left open to future change;
+    # passing it through keeps one source of truth.
     #
     # `int(step.total_seconds())`, not an f-string over the `timedelta`
     # directly: `f"{step}s"` on a `timedelta` renders its own `str()` form
@@ -330,18 +330,16 @@ def run_metric_check(
     if isinstance(fetched, CheckOutcome):
         return fetched
     all_samples = fetched.samples
-    # Lab-defect-fix Unit 2, W7 (+ W14's `MULTIPLE_SERIES`). Computed from
-    # `fetched` before any trimming, so the status describes what
+    # Computed from `fetched` before any trimming, so the status describes what
     # Prometheus actually returned, not what survived the cap/byte budget
     # below. `MULTIPLE_SERIES` is checked first and, deliberately, does NOT
-    # short-circuit the rest of this function: `parse_samples` already
-    # always reads `series[0]`'s real samples regardless of `series_count`
-    # (see `MetricSampleStatus`'s own docstring), and this status must
-    # never become a reason to withhold them -- a reader who cannot tell
-    # `MULTIPLE_SERIES` apart from "no usable data" would be worse off than
-    # before this status existed.
+    # short-circuit the rest of this function: `parse_samples` already always
+    # reads `series[0]`'s real samples regardless of `series_count` (see
+    # `MetricSampleStatus`'s own docstring), and this status must never become
+    # a reason to withhold them -- a reader who cannot tell `MULTIPLE_SERIES`
+    # apart from "no usable data" would be worse off than before this status
+    # existed.
     #
-    # Post-freeze review, P2 (three independent reviewers, same finding):
     # `MULTIPLE_SERIES` must be checked BEFORE `NO_USABLE_SAMPLES`/
     # `ALL_READINGS_DISCARDED`, not just for style -- `raw_count`/`all_
     # samples` are both computed from `series[0]` alone, so a response can
@@ -362,18 +360,18 @@ def run_metric_check(
         status = MetricSampleStatus.ALL_READINGS_DISCARDED
     else:
         status = MetricSampleStatus.SAMPLED
-    # Lab-defect-fix Unit 2, W4. Samples arrive already time-ordered
+    # Samples arrive already time-ordered
     # ascending from Prometheus's own `query_range` response (confirmed by
     # this module's own test fixtures, never independently sorted here) --
     # every real observation in this lab is at the tail of the window
-    # (`SCRAPE_SETTLE_SECONDS`/W3 exists precisely because the fault signal
+    # (`SCRAPE_SETTLE_SECONDS` exists precisely because the fault signal
     # only appears near `window_end`), so keeping the *first* N samples, as
     # this line used to, silently discarded exactly the data-bearing region
     # once a query returned more than `MAX_METRIC_SAMPLES` rows. Keep the
     # newest N instead.
     kept = all_samples[-MAX_METRIC_SAMPLES:]
     rows: list[JsonValue] = [[sample.at, sample.value] for sample in kept]
-    # Round 8 review, P2. `fetched.raw_count` is how many rows Prometheus
+    # `fetched.raw_count` is how many rows Prometheus
     # actually sent; `len(all_samples)` is how many of those `read_sample`
     # could parse into a finite `MetricSample`. The gap between them is
     # rows discarded as unreadable (malformed shape, or non-finite -- most
@@ -393,7 +391,7 @@ def run_metric_check(
         "readings_discarded": readings_discarded,
         "status": status.value,
     }
-    # Q7 addendum. Receipt-internal audit data only: `render_context`
+    # Receipt-internal audit data only: `render_context`
     # (`prompts.py`) puts only `Evidence.summary` in front of the model,
     # never `Evidence.payload`, so these five fields change nothing the
     # model sees -- they exist for an owner reading `evidence.jsonl` back,
@@ -420,36 +418,32 @@ def run_metric_check(
     payload["query_step_seconds"] = int(step.total_seconds())
     payload["grid_points"] = int((end - start) // step) + 1
     payload = trim_to_bytes(payload, "samples", rows, "sample_count")
-    # Post-freeze review. `count_key="sample_count"` was added in this
-    # same round to keep the PAYLOAD honest post-trim (Unit 3b-4 addendum,
-    # C3's fix, applied here too) -- but this summary string kept reading
+    # `count_key="sample_count"` keeps the PAYLOAD honest post-trim -- but
+    # this summary string used to keep reading
     # `len(kept)`, the PRE-trim count, four lines below where the payload
     # was already fixed. Reproduced live: payload said `sample_count: 371`
     # while this string still said "900 samples." Same bug, same fix
-    # pattern already applied twice this round (`run_logs_check`,
-    # `run_changes_check`).
+    # pattern already applied to `run_logs_check`/`run_changes_check`.
     #
-    # Round 4 review, F3. `max_value` (above) has the SAME pre-trim-
+    # `max_value` (above) has the SAME pre-trim-
     # aggregate shape -- computed from `kept` before `trim_to_bytes` ever
     # runs, so a sample popped by byte trimming could still be reported as
     # the peak even though it no longer appears in `payload["samples"]`.
     # Not reachable with this suite's real data (`MetricSample.at`/
     # `.value` are both floats, always small -- byte trimming never fires
     # below the `MAX_METRIC_SAMPLES` cap already applied above), but fixed
-    # anyway: the owner ruled this closes the CLASS, not just the
+    # anyway to close the CLASS of bug, not just the
     # reachable instance. Rebuilt from `payload["samples"]`, the POST-trim
     # list.
     #
-    # Round 6 review. The comment here used to also claim rebuilding
-    # `max_value` "can only shrink or hold... never grow the payload back
-    # over budget" -- true of the NUMERIC value (every kept sample was
-    # already in the pre-trim set, so the max can only fall or stay the
-    # same), but not a safe claim about JSON BYTE LENGTH: `900.0`
-    # serializes to 5 bytes, `0.30000000000000004` to 19, so a smaller
-    # float is not guaranteed to serialize to fewer bytes. The real safety
-    # argument is unreachability, stated above, not this false general
-    # property -- the same shape of overclaiming this round's own review
-    # was about.
+    # An earlier version of this comment also claimed rebuilding `max_value`
+    # "can only shrink or hold... never grow the payload back over budget" --
+    # true of the NUMERIC value (every kept sample was already in the pre-trim
+    # set, so the max can only fall or stay the same), but not a safe claim
+    # about JSON BYTE LENGTH: `900.0` serializes to 5 bytes,
+    # `0.30000000000000004` to 19, so a smaller float is not guaranteed to
+    # serialize to fewer bytes. The real safety argument is unreachability,
+    # stated above, not this false general property.
     kept_samples = payload["samples"]
     assert isinstance(kept_samples, list)
     kept_values: list[float] = []
@@ -459,13 +453,13 @@ def run_metric_check(
             if isinstance(value, int | float):
                 kept_values.append(float(value))
     payload["max_value"] = max(kept_values, default=0.0)
-    # Round 6 review, the P1. `payload["truncated"]` already carries whether
+    # `payload["truncated"]` already carries whether
     # this check's data was cut, but only `run_logs_check`/`run_changes_check`
-    # rendered that into their summary string -- the only field of a
+    # used to render that into their summary string -- the only field of a
     # `CheckOutcome` `prompts.py`'s `render_context` puts in front of the
     # model. A truncated metric window read as complete with no signal the
     # true peak might lie outside what was kept.
-    # Lab-defect-fix Unit 2, W4. Names the *direction* kept, not just that
+    # Names the *direction* kept, not just that
     # trimming happened -- a model silently reading a window trimmed at the
     # wrong end has no way to know from "(truncated)" alone which end it was.
     truncated_note = (
@@ -473,7 +467,7 @@ def run_metric_check(
         if payload["truncated"]
         else ""
     )
-    # Round 8 review, P2. Deliberately a SEPARATE note from `(truncated)`
+    # Deliberately a SEPARATE note from `(truncated)`
     # rather than folded into it: `truncated` means "there was more data
     # than fit the byte/count budget," `readings_discarded` means "some of
     # what Prometheus sent could not be read at all" (typically non-finite
@@ -486,13 +480,12 @@ def run_metric_check(
     discarded = payload["readings_discarded"]
     assert isinstance(discarded, int)
     discarded_note = f" ({discarded} unreadable, discarded)" if discarded else ""
-    # Lab-defect-fix Unit 2, W7/W14. `prompts.py`'s `render_context` puts
-    # only `CheckOutcome.summary` in front of the model -- `payload["status"]`
-    # existing is not enough on its own (§8.11's finding, restated by this
-    # unit's plan: a fix that only touches the payload is invisible to the
-    # thing it exists to fix). `MULTIPLE_SERIES` states both facts at once
-    # -- the ambiguity AND that the sample figures above are real data from
-    # one specific series, not withheld -- rather than only one.
+    # `prompts.py`'s `render_context` puts only `CheckOutcome.summary` in front
+    # of the model -- `payload["status"]` existing is not enough on its own: a
+    # fix that only touches the payload is invisible to the thing it exists to
+    # fix. `MULTIPLE_SERIES` states both facts at once -- the ambiguity AND
+    # that the sample figures above are real data from one specific series, not
+    # withheld -- rather than only one.
     status_note = ""
     if status is MetricSampleStatus.MULTIPLE_SERIES:
         status_note = (

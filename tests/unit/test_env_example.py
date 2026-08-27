@@ -31,9 +31,9 @@ def test_env_example_documents_the_anthropic_api_key() -> None:
 
 
 def test_env_example_documents_the_live_evaluation_cost_ceiling() -> None:
-    # Unit 3b-2, S-P2-1. This used to compare against a hardcoded "2.00"
+    # This used to compare against a hardcoded "2.00"
     # literal -- a comment claiming a drift guard the test did not actually
-    # provide, the same defect class as P1-1's tautological pricing test.
+    # provide, the same defect class as a tautological pricing test elsewhere.
     # Importing the real constant means a changed default in `cli.py`
     # without a matching `.env.example` edit fails here, not silently.
     pairs = parsed_env_example()

@@ -138,9 +138,9 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
     parsed = parser.parse_args(["investigate", "abc", "--model", "replay"])
     assert (parsed.incident_id, parsed.model) == ("abc", "replay")
 
-    # Unit 3b-2. `--model claude` is now a real dispatch choice -- see
+    # `--model claude` is a real dispatch choice -- see
     # `live_setup.build_model_and_registry`'s docstring -- so this parses
-    # instead of exiting, unlike before this unit; only a genuinely unknown
+    # instead of exiting; only a genuinely unknown
     # model name is still refused.
     parsed = parser.parse_args(["investigate", "abc", "--model", "claude"])
     assert (parsed.incident_id, parsed.model) == ("abc", "claude")
@@ -151,8 +151,8 @@ def test_investigate_accepts_only_an_id_and_a_model_it_has() -> None:
         parser.parse_args(["scenario", "start", "a_family"])
 
 
-# Unit 3c moved the cost-ceiling parsing tests to `test_live_setup.py`,
-# alongside the `causalops.live_setup` extraction those tests now cover.
+# The cost-ceiling parsing tests live in `test_live_setup.py`,
+# alongside the `causalops.live_setup` extraction those tests cover.
 
 
 def test_a_lab_command_reports_a_refusal_with_its_code(
@@ -194,7 +194,7 @@ def test_investigating_an_unknown_incident_is_refused(
 def test_investigating_a_path_traversal_argument_is_refused_before_any_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unit 3b-4 addendum, C1. `../`-shaped, and otherwise non-`isalnum()`,
+    """`../`-shaped, and otherwise non-`isalnum()`,
     positional CLI arguments used to build `root / "runs" / incident_id`
     directly, with no validation -- `validated_run_paths`
     (`scenario_control.py`) now refuses (`isalnum()` fails on `/` and `.`
@@ -235,7 +235,7 @@ def test_investigating_a_path_traversal_argument_is_refused_before_any_read(
 def test_investigating_an_incident_id_mismatched_with_its_stored_scope_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unit 3b-4 addendum, C1. Simulates `runs/<id>/incident.json` diverging
+    """Simulates `runs/<id>/incident.json` diverging
     from its own directory name (a manual copy, a future code path, or a
     bug) -- `run_investigate_command` now asserts the loaded `StoredIncident
     .scope.incident_id` matches the requested directory name and refuses
@@ -261,7 +261,7 @@ def test_investigating_an_incident_id_mismatched_with_its_stored_scope_is_refuse
     assert directory_name in printed
 
 
-# --- Unit 3b-4 addendum, C5: corrupt stored artifacts refuse cleanly -----
+# --- Corrupt stored artifacts refuse cleanly ------------------------------
 
 
 def test_a_malformed_incident_json_is_refused_not_a_traceback(
@@ -328,10 +328,10 @@ def test_main_returns_zero_for_a_healthy_machine(
 def test_a_missing_api_key_warns_but_doctor_still_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Unit 3b-2, owner-ruled: FAIL -> WARN. Renamed from
-    # `test_main_returns_one_and_prints_the_reason_code` -- a missing key no
-    # longer fails `doctor` (`replay` runs entirely without one), but the
-    # reason code still prints, so an attentive owner still sees it.
+    # Renamed from `test_main_returns_one_and_prints_the_reason_code` -- a
+    # missing key no longer fails `doctor` (`replay` runs entirely without
+    # one), but the reason code still prints, so an attentive owner still sees
+    # it.
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "SystemProbe", FakeProbe)
@@ -431,7 +431,7 @@ def test_investigate_runs_an_investigation_end_to_end(
 def test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unit 2d: before this unit, `cli._sqlite_checkpointer`'s bare
+    """Before this fix, `cli._sqlite_checkpointer`'s bare
     `sqlite3.connect(...)` let a locked/unopenable database escape as a raw
     traceback -- measured against exactly this scenario (the database path
     itself occupied by a directory, so `sqlite3.connect` raises
@@ -475,7 +475,7 @@ def test_investigate_reports_a_locked_checkpoint_store_instead_of_a_traceback(
 def test_investigate_pauses_and_reports_escalation_without_finalizing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unit 2b: `lab_diagnosis.json` proposes `query_logs` then
+    """`lab_diagnosis.json` proposes `query_logs` then
     `list_recent_changes`; leaving no `changes.json` behind (unlike the
     end-to-end test above, which writes one) makes the second check come
     back `UNAVAILABLE` -- a real `TOOL_UNAVAILABLE` escalation trigger, not
@@ -568,11 +568,10 @@ def _settle_a_replay_investigation(
 
 
 def test_model_name_round_trips_through_a_stored_checkpoint(tmp_path: Path) -> None:
-    """P2-1's regression test. This is the fix for the bug 3b-1's handoff
-    recorded at `cli.py:531`: a resumed live run used to be relabelled
-    "replay" in its own artifact because nothing durable said which model
-    actually produced it. `_resolve_thread_incident_and_model` is currently
-    protected only by prose -- mutation-proven: hardcoding its second
+    """This is the fix for a real bug: a resumed live run used to be
+    relabelled "replay" in its own artifact because nothing durable said which
+    model actually produced it. `_resolve_thread_incident_and_model` is
+    currently protected only by prose -- mutation-proven: hardcoding its second
     return value to `"replay"` still leaves 476 passed without this test."""
     thread_id = "thread-live"
     _settle_a_replay_investigation(tmp_path, thread_id, model_name=cli.LIVE_MODEL_NAME)
@@ -588,9 +587,9 @@ def test_model_name_round_trips_through_a_stored_checkpoint(tmp_path: Path) -> N
 def test_model_name_defaults_to_replay_for_a_pre_3b2_checkpoint(
     tmp_path: Path,
 ) -> None:
-    """The compatibility half of P2-1's fix. `cli.py`'s own docstring on
-    `_resolve_thread_incident_and_model`: a checkpoint written before Unit
-    3b-2's `model_name` field existed has no such key in `channel_values`
+    """The compatibility half of that fix. `cli.py`'s own docstring on
+    `_resolve_thread_incident_and_model`: a checkpoint written before the
+    `model_name` field existed has no such key in `channel_values`
     at all -- it can only ever have been a replay run, since no other kind
     existed yet -- so this must default to `REPLAY_MODEL_NAME`/`"replay"`,
     not raise on a missing key."""
@@ -626,9 +625,9 @@ def test_model_name_defaults_to_replay_for_a_pre_3b2_checkpoint(
 def test_a_missing_credential_fails_the_live_run_safe_before_reserving_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P3-3's end-to-end regression test, through the real CLI entry point
-    -- not the `live_model.py` test seam -- proving what the rejected
-    review finding assumed wrong: `ChatAnthropic()` does not raise at
+    """An end-to-end regression test, through the real CLI entry point
+    -- not the `live_model.py` test seam -- proving directly:
+    `ChatAnthropic()` does not raise at
     construction even with no key, so this drives all the way through a
     real `LiveClaudeModel` construction and into `propose()`'s `_send`,
     which must refuse (`MissingCredential`) before ever calling `.invoke()`

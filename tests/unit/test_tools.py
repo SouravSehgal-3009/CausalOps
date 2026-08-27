@@ -136,7 +136,7 @@ def test_a_different_service_changes_the_fingerprint() -> None:
 
 
 def test_an_omitted_window_defaults_to_none_and_round_trips() -> None:
-    """Lab-defect-fix Unit 3, W1. `window_start`/`window_end` became
+    """`window_start`/`window_end` became
     optional so the model can ask for "the incident" without retyping its
     window verbatim -- `tool_wrappers.resolve_effective_window` is what
     turns an omitted bound into a real one before dispatch, not this

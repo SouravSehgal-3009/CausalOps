@@ -89,7 +89,7 @@ def stalled_prometheus() -> Iterator[str]:
     server.server_close()
 
 
-# Lab-defect-fix Unit 2, W4. Mirrors `prometheus_body()`'s own default
+# Mirrors `prometheus_body()`'s own default
 # (`fake_incident.py`) by the same formula -- `fake_prometheus` always
 # calls `prometheus_body()` with no argument, so this is exactly how many
 # samples every test using that fixture actually receives.
@@ -124,11 +124,11 @@ def test_a_metric_query_returns_bounded_samples(
     tmp_path: Path,
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    """Lab-defect-fix Unit 2, W4. `fake_prometheus` returns `prometheus_body()`'s
+    """`fake_prometheus` returns `prometheus_body()`'s
     default `MAX_METRIC_SAMPLES + 5` samples with `value = index * 0.5`,
     strictly increasing with index -- so the newest-kept slice (indices
     `5..MAX_METRIC_SAMPLES+4`) peaks at its own last index, not at
-    `MAX_METRIC_SAMPLES - 1` the way the pre-W4 oldest-kept slice did.
+    `MAX_METRIC_SAMPLES - 1` the way an oldest-kept slice would.
     Derived from `FAKE_PROMETHEUS_SAMPLE_COUNT`, not hand-typed, so a future
     change to `prometheus_body`'s own default cannot silently desync this
     literal again."""
@@ -175,7 +175,7 @@ def small_fake_prometheus() -> Iterator[str]:
 def test_a_metric_summary_names_truncation_when_samples_were_cut(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    """Round 6 review, the P1. `prompts.py`'s `render_context` puts only
+    """`prompts.py`'s `render_context` puts only
     `CheckOutcome.summary` in front of the model -- the full payload
     (which correctly carries `payload["truncated"]`) never reaches it.
     `run_logs_check`/`run_changes_check` already named truncation in
@@ -187,7 +187,7 @@ def test_a_metric_summary_names_truncation_when_samples_were_cut(
     )
 
     assert outcome.payload["truncated"] is True
-    # Lab-defect-fix Unit 2, W4: the note now names the kept direction, not
+    # The note names the kept direction, not
     # just that trimming happened.
     assert outcome.summary.endswith(
         f"(kept the newest {MAX_METRIC_SAMPLES} of {FAKE_PROMETHEUS_SAMPLE_COUNT})"
@@ -208,11 +208,11 @@ def test_a_metric_summary_names_no_truncation_when_nothing_was_cut(
 def test_a_metric_summary_reports_the_post_trim_count_not_the_pre_trim_one(
     monkeypatch: pytest.MonkeyPatch, fake_prometheus: RecordingPrometheus
 ) -> None:
-    """Post-freeze review. `run_metric_check`'s summary string used to read
+    """`run_metric_check`'s summary string used to read
     `len(kept)` (the PRE-trim count) instead of `payload['sample_count']`
-    (kept honest post-trim by `trim_to_bytes`, Unit 3b-4 addendum's C3)
+    (kept honest post-trim by `trim_to_bytes`)
     four lines below where the payload was already fixed -- reproduced
-    live by correctness (payload said `sample_count: 371`, the summary
+    live (payload said `sample_count: 371`, the summary
     still said "900 samples"). Unreachable through this function's own
     REAL data shape in this test suite: `MetricSample.at`/`.value` are
     both floats, always small, so `trim_to_bytes`'s byte-level popping
@@ -254,25 +254,25 @@ def test_a_metric_summary_reports_the_post_trim_count_not_the_pre_trim_one(
 def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one(
     monkeypatch: pytest.MonkeyPatch, fake_prometheus: RecordingPrometheus
 ) -> None:
-    """Round 4 review, F3. `max_value` (payload) used to be computed from
+    """`max_value` (payload) used to be computed from
     `kept`, entirely before `trim_to_bytes` runs -- so a sample popped by
     byte trimming could still be reported as the peak even though it no
     longer appears in `payload["samples"]`. Not reachable through this
     function's own real data shape in this test suite (`MetricSample.at`/
     `.value` are both floats, always small, so byte-level popping never
     fires below the `MAX_METRIC_SAMPLES` count cap already applied
-    earlier), fixed anyway per the owner's ruling to close the class, not
+    earlier), fixed anyway to close the class of bug, not
     just the reachable `event_codes` instance. Monkeypatching
     `trim_to_bytes` to additionally pop the LAST sample drops the
     highest-value sample -- `test_a_metric_query_returns_bounded_samples`
     above already establishes values increase with index, so the last
-    sample in the kept (post-W4, newest-first-preserved) slice is always
+    sample in the kept (newest-first-preserved) slice is always
     its peak -- forcing `payload["max_value"]` and the pre-trim peak to
     genuinely differ, proving the field reads the samples the payload
     itself reports, not a stale local variable.
 
-    Lab-defect-fix Unit 2, W4 note: production's own `trim_to_bytes` now
-    pops from the FRONT, not the end (see its docstring) -- this
+    Production's own `trim_to_bytes` pops from the FRONT, not the end
+    (see its docstring) -- this
     monkeypatch deliberately pops the opposite end anyway. That is still a
     valid test of the property under test here (`max_value` is rebuilt
     from whatever `payload["samples"]` actually holds after trimming, not
@@ -310,14 +310,12 @@ def test_a_metric_max_value_reflects_the_post_trim_samples_not_every_fetched_one
 
 
 def test_the_aligned_window_keeps_window_end_as_an_evaluated_point() -> None:
-    """Lab-defect-fix Unit 2, W2. Asserts on the EMITTED request parameters
+    """Asserts on the EMITTED request parameters
     only -- `(end - start) % step == 0` and `start > window_start` --
-    never inferred Prometheus rounding/millisecond semantics (round-3
-    correction, `LAB_DEFECTS_FIX_PLAN.md` §11.5: a sound inference is not a
-    documented guarantee).
+    never inferred Prometheus rounding/millisecond semantics: a sound
+    inference is not a documented guarantee.
 
-    Post-freeze review (three independent reviewers, same finding): a
-    `WINDOW_START`/`WINDOW_END` span is exactly `120 * METRIC_STEP_SECONDS`
+    A `WINDOW_START`/`WINDOW_END` span is exactly `120 * METRIC_STEP_SECONDS`
     -- an exact multiple of the step -- so floor division (the correct
     fix) and ceiling division (the exact bug this design explicitly warns
     against: it pushes `start` *before* `window_start`, widening the
@@ -347,8 +345,8 @@ def test_the_aligned_window_keeps_window_end_as_an_evaluated_point() -> None:
 def _recording_prometheus() -> Iterator[tuple[str, list[dict[str, str]]]]:
     """A loopback stand-in that records every full query-string dict it
     received (`start`/`end`/`step`/`query`), not just `query` alone the
-    way `conftest.py`'s `fake_prometheus` does -- needed here because W2's
-    own claim is about the emitted `start`/`end`/`step` parameters
+    way `conftest.py`'s `fake_prometheus` does -- needed here because the
+    claim under test is about the emitted `start`/`end`/`step` parameters
     themselves, not the PromQL string."""
     received: list[dict[str, str]] = []
 
@@ -377,8 +375,8 @@ def _recording_prometheus() -> Iterator[tuple[str, list[dict[str, str]]]]:
 
 
 def test_fetch_metric_samples_emits_a_plain_integer_second_step() -> None:
-    """Lab-defect-fix Unit 2, W2/(a). `step` is a `timedelta` parameter as
-    of this unit (passed through from `aligned_metric_window`, not read a
+    """`step` is a `timedelta` parameter
+    (passed through from `aligned_metric_window`, not read a
     second time from `METRIC_STEP_SECONDS` inside `query_prometheus` --
     see its own docstring for the drift hazard this closes). `f"{step}s"`
     on a bare `timedelta` renders its own `str()` form (`"0:00:15s"` for 15
@@ -404,7 +402,7 @@ def test_fetch_metric_samples_emits_a_plain_integer_second_step() -> None:
 def test_the_metric_payload_records_what_was_actually_queried(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    """Q7's audit fields. Deliberately uses a window whose span is NOT a
+    """The audit fields. Deliberately uses a window whose span is NOT a
     whole multiple of METRIC_STEP_SECONDS: with the default 30-minute
     fixture window (1800s, an exact multiple of 15s) `aligned_metric_window`
     is a no-op and `query_window_start` would equal the raw `window_start`,
@@ -472,13 +470,13 @@ def test_an_unreadable_prometheus_answer_is_an_error() -> None:
 
 
 def test_read_sample_rejects_non_finite_readings() -> None:
-    """Round 7 review. `float()` parses "NaN", "Infinity", and an overflow
+    """`float()` parses "NaN", "Infinity", and an overflow
     literal like "1e400" into non-finite floats without raising -- so
     those used to become an ordinary-looking `MetricSample`. `float()`
     also accepts a bare numeric NaN/inf for the timestamp field, so both
     positions are checked.
 
-    Round 8 review, P2. `float()` on a STRING that overflows (`"1e400"`,
+    `float()` on a STRING that overflows (`"1e400"`,
     above) rounds to `inf` without raising -- caught by the `isfinite`
     check below. `float()` on a Python `int` that is too large to
     represent raises `OverflowError` INSTEAD, which is not a subclass of
@@ -555,7 +553,7 @@ def test_a_metric_checks_reported_peak_survives_a_nan_sample_end_to_end() -> Non
     `run_metric_check`'s full pipeline (including the post-trim
     `payload["max_value"]` rebuild) rather than only the parsing layer.
 
-    Round 8 review, P2. This is also the partially-NaN case for
+    This is also the partially-NaN case for
     `readings_discarded`: 3 raw rows, 1 unreadable, 2 kept -- the summary
     must name the 1 discarded reading, distinct from `(truncated)`."""
     body = json.dumps(
@@ -575,17 +573,17 @@ def test_a_metric_checks_reported_peak_survives_a_nan_sample_end_to_end() -> Non
 
 
 def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
-    """Round 8 review, P2. `histogram_quantile` (GATEWAY_LATENCY_P95) is
-    documented to return NaN over an all-zero-rate bucket -- a realistic
-    "quiet minute," not an exotic input. Once round 7's fix correctly
-    drops every non-finite sample, an all-NaN window produces
-    `sample_count: 0, max_value: 0.0` -- which, without `readings_
-    discarded`, is bit-for-bit identical to a genuinely empty, valid
-    response (`test_an_unreadable_prometheus_answer_is_an_error`'s `{
-    "result": []}` case). A model reading only the summary could not tell
-    "confirmed zero, nothing measured was wrong" from "every reading this
-    window returned was unreadable" -- exactly the ambiguity round 6's own
-    `truncated` fix closed for the byte-trim case, reopened here in a new
+    """`histogram_quantile` (GATEWAY_LATENCY_P95) is
+    documented to return NaN over an all-zero-rate bucket -- a realistic "quiet
+    minute," not an exotic input. Once non-finite samples are correctly
+    dropped, an all-NaN window produces `sample_count: 0, max_value: 0.0` --
+    which, without `readings_ discarded`, is bit-for-bit identical to a
+    genuinely empty, valid response
+    (`test_an_unreadable_prometheus_answer_is_an_error`'s `{ "result": []}`
+    case). A model reading only the summary could not tell "confirmed zero,
+    nothing measured was wrong" from "every reading this window returned was
+    unreadable" -- exactly the ambiguity the `truncated` fix closed for the
+    byte-trim case, reopened here in a new
     shape."""
     body = json.dumps(
         {
@@ -600,8 +598,7 @@ def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
     assert outcome.payload["max_value"] == 0.0
     assert outcome.payload["readings_discarded"] == 3
     assert "3 unreadable, discarded" in outcome.summary
-    # Lab-defect-fix Unit 2, post-freeze review (three independent
-    # reviewers, same finding): a direct `payload["status"]` assertion,
+    # A direct `payload["status"]` assertion,
     # not just the summary-text behavior above -- all 3 raw rows came back
     # but none survived `read_sample`, `ALL_READINGS_DISCARDED`.
     assert outcome.payload["status"] == "ALL_READINGS_DISCARDED"
@@ -629,14 +626,13 @@ def test_an_all_nan_metric_window_does_not_read_as_confirmed_zero() -> None:
 
 
 def test_multiple_series_reports_status_without_suppressing_real_data() -> None:
-    """Lab-defect-fix Unit 2, W7/W14, round-2 refinement (c). The positive
-    case for `MULTIPLE_SERIES`: it is a status LABEL, never a gate that
-    withholds `series[0]`'s real samples. Without a test proving this
+    """The positive case for `MULTIPLE_SERIES`: it is a status LABEL, never a
+    gate that withholds `series[0]`'s real samples. Without a test proving this
     specifically, a future refactor that early-returns on `MULTIPLE_SERIES`
-    (treating it as another failure-shaped status, the same trap `§8.11`
-    already caught once for `readings_discarded`) would pass every other
-    test in this file while silently regressing exactly the property this
-    status exists to preserve."""
+    (treating it as another failure-shaped status, the same trap already caught
+    once for `readings_discarded`) would pass every other test in this file
+    while silently regressing exactly the property this status exists to
+    preserve."""
     body = json.dumps(
         {
             "status": "success",
@@ -666,8 +662,7 @@ def test_multiple_series_reports_status_without_suppressing_real_data() -> None:
 
 
 def test_multiple_series_wins_even_when_series_zero_is_itself_unusable() -> None:
-    """Lab-defect-fix Unit 2, W7/W14, post-freeze review P2 (three
-    independent reviewers, same finding). `raw_count`/`all_samples` are
+    """`raw_count`/`all_samples` are
     both computed from `series[0]` alone, so a response can have
     `series_count > 1` AND an empty, unusable `series[0]` at the same
     time. If the empty-series checks (`NO_USABLE_SAMPLES`/
@@ -698,11 +693,11 @@ def test_multiple_series_wins_even_when_series_zero_is_itself_unusable() -> None
 
 
 def test_no_returned_series_is_distinguishable_from_no_usable_samples() -> None:
-    """Lab-defect-fix Unit 2, W7. `NO_RETURNED_SERIES` (empty `result`
+    """`NO_RETURNED_SERIES` (empty `result`
     list) and `NO_USABLE_SAMPLES` (a series returned but yielded nothing)
     are different facts about what the query returned -- the neutral
-    naming this unit adopted specifically avoids claiming either one means
-    the series does not exist (round-1 correction, plan §9.1)."""
+    naming deliberately avoids claiming either one means
+    the series does not exist."""
     empty_result = json.dumps({"status": "success", "data": {"result": []}}).encode(
         "utf-8"
     )
@@ -714,8 +709,7 @@ def test_no_returned_series_is_distinguishable_from_no_usable_samples() -> None:
 
 
 def test_the_ordinary_case_reports_sampled(small_fake_prometheus: str) -> None:
-    """Lab-defect-fix Unit 2, post-freeze review (three independent
-    reviewers, same finding): `SAMPLED` -- the ordinary, successful case,
+    """`SAMPLED` -- the ordinary, successful case,
     exercised by nearly every other test in this file -- had no test
     asserting `payload["status"]` directly. `small_fake_prometheus`
     returns a genuinely un-truncated, real response (`prometheus_body
@@ -768,14 +762,14 @@ def test_a_log_result_stays_inside_the_byte_bound(tmp_path: Path) -> None:
 
     assert len(json.dumps(outcome.payload).encode("utf-8")) <= MAX_RESULT_BYTES
     assert outcome.payload["truncated"] is True
-    # Post-freeze review, P3-1. 30 rows were matched, but byte-trimming
+    # 30 rows were matched, but byte-trimming
     # (not just the `row_limit` cap) drops some of them -- `outcome.summary`
     # must report the SAME, smaller, post-trim count `payload["row_count"]`
     # holds, not the pre-trim 30 `len(rows)` used to report regardless of
     # what trimming did.
     assert outcome.payload["row_count"] < 30
     assert f"{outcome.payload['row_count']} rows" in outcome.summary
-    # Lab-defect-fix Unit 2, W4: the note now names the kept direction. All
+    # The note names the kept direction. All
     # 30 rows matched the filter/window (`row_limit=30` never triggers the
     # ring's own eviction here -- only byte-trimming reduces the count
     # below 30), so the "of" figure is 30, the matched total.
@@ -787,13 +781,13 @@ def test_a_log_result_stays_inside_the_byte_bound(tmp_path: Path) -> None:
 def test_log_event_codes_reflect_the_post_trim_rows_not_every_matched_row(
     tmp_path: Path,
 ) -> None:
-    """Round 4 review, F3. `event_codes` used to be built from `events`,
+    """`event_codes` used to be built from `events`,
     gathered during the loop that fills `rows` -- entirely BEFORE
     `trim_to_bytes` runs. So a row popped by byte trimming (as opposed to
     the `row_limit` cap the loop already respects) could still have its
     event code listed even though it no longer appears in
     `payload["rows"]`. `trim_to_bytes` pops from the FRONT of the row list
-    (`kept.pop(0)`) as of lab-defect-fix Unit 2, W4, so the FIRST matched
+    (`kept.pop(0)`), so the FIRST matched
     row here -- the only one carrying "config_loaded" -- is the first one
     trimmed away once the payload is oversized; every surviving row is
     "config_rejected_request". Reachable with real data (same
@@ -832,7 +826,7 @@ def test_a_log_query_for_a_run_without_that_log_is_unavailable(tmp_path: Path) -
 
 
 def test_within_window_rejects_a_naive_timestamp_instead_of_raising() -> None:
-    """Unit 3b-4 addendum, C2. `datetime.fromisoformat` returns a naive
+    """`datetime.fromisoformat` returns a naive
     `datetime` for a string carrying no UTC offset; comparing it against
     the aware `WINDOW_START`/`WINDOW_END` this function is always called
     with used to raise `TypeError`, uncaught (only `ValueError`, the parse
@@ -898,7 +892,7 @@ def test_a_change_row_with_a_naive_timestamp_is_excluded_not_crashed(
 def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
     tmp_path: Path,
 ) -> None:
-    """Unit 3b-4 addendum, C3. `run_changes_check` joins every matched
+    """`run_changes_check` joins every matched
     change's `summary` into one scalar `summaries` string before calling
     `trim_to_bytes` -- a single change with an oversized summary makes that
     scalar bigger than `MAX_RESULT_BYTES` all by itself, which no amount of
@@ -936,17 +930,17 @@ def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
     # inspects top-level scalars. `change_count` still honestly matches
     # what `changes` actually holds, whatever that ends up being.
     assert outcome.payload["change_count"] == len(outcome.payload["changes"])  # type: ignore[arg-type]
-    # Post-freeze review, P3-1. Before that fix, `outcome.summary` was
+    # Before that fix, `outcome.summary` was
     # built from `len(changes)` (the PRE-trim count, always 1 here) --
     # "1 recent changes on orders" while the payload actually held zero.
-    # Reproduced by correctness directly against this exact scenario.
+    # Reproduced directly against this exact scenario.
     assert outcome.payload["change_count"] == 0
-    # Lab-defect-fix Unit 2, W4: the note now names the kept direction --
+    # The note names the kept direction --
     # one change matched (`len(changes) == 1`), none survived.
     assert outcome.summary == "0 recent changes on orders (kept the newest 0 of 1)"
     assert isinstance(outcome.payload["summaries"], str)
     assert len(outcome.payload["summaries"]) < MAX_RESULT_BYTES
-    # Round 6 review, item 2. `changes` was fully emptied here, so the
+    # `changes` was fully emptied here, so the
     # rebuild below (built from the post-trim `changes` list) replaces
     # whatever text the scalar-shrinking fallback left in `summaries` with
     # an empty string -- there is nothing left to summarize.
@@ -956,18 +950,18 @@ def test_an_oversized_single_summary_still_forces_the_payload_under_budget(
 def test_changes_summaries_only_name_changes_still_present_after_trimming(
     tmp_path: Path,
 ) -> None:
-    """Round 6 review, item 2. `summaries` is joined from EVERY matched
+    """`summaries` is joined from EVERY matched
     change before `trim_to_bytes` runs and is a scalar, not a row list --
-    the same pre-trim-aggregate shape already fixed twice this round for
+    the same pre-trim-aggregate shape already fixed for
     `event_codes` and `max_value`. Unlike the single-oversized-summary
     case above (where `changes` is fully emptied), this scenario is the
     more common partial trim: enough changes to force byte trimming, but
     not so much oversized text that popping rows alone cannot bring the
     payload back under budget. Every entry here shares the identical `at`
-    timestamp, so `run_changes_check`'s own chronological sort (lab-defect-
-    fix Unit 2, W4/#4) is a no-op and declaration order survives unchanged
+    timestamp, so `run_changes_check`'s own chronological sort
+    is a no-op and declaration order survives unchanged
     into `trim_to_bytes`. `trim_to_bytes` pops rows from the FRONT of the
-    list as of that same unit (`kept.pop(0)`), so `changes` 023 through 029
+    list (`kept.pop(0)`), so `changes` 023 through 029
     survive and 000 through 022 do not -- reproduced directly against the
     real function (not asserted blindly): 30 changes here reduce to
     `change_count == 7`, with `summaries` still holding the text of every
@@ -1021,9 +1015,9 @@ def test_changes_summaries_only_name_changes_still_present_after_trimming(
 def test_a_pathologically_long_changes_summary_still_builds_valid_evidence(
     tmp_path: Path,
 ) -> None:
-    """Lab-defect-fix F8. `run_changes_check`'s summary now embeds real change
+    """`run_changes_check`'s summary embeds real change
     content, capped to a budget computed from the rest of the summary's own
-    runtime length (Codex round 1 -- a fixed content cap alone cannot
+    runtime length (a fixed content cap alone cannot
     guarantee the overall bound, since `arguments.service` has no schema
     `max_length`) and marked with "..." -- this proves the cap actually holds
     against `Evidence.summary`'s hard `max_length=400` bound (`domain.py`),
@@ -1075,7 +1069,7 @@ def test_a_pathologically_long_changes_summary_still_builds_valid_evidence(
 def test_changes_summary_content_keeps_the_newest_text_not_the_oldest(
     tmp_path: Path,
 ) -> None:
-    """Codex round-1 finding on lab-defect-fix F8. `payload["summaries"]` (the
+    """`payload["summaries"]` (the
     real change content, joined) is already ordered oldest-to-newest by the
     time it reaches the summary's content-display cap -- `changes.sort(key=
     _change_moment)` above, then `trim_to_bytes`'s own front-pop keeps the
@@ -1149,13 +1143,12 @@ def test_changes_summary_content_keeps_the_newest_text_not_the_oldest(
 def test_a_moderately_long_service_name_shrinks_the_budget_but_shows_content(
     tmp_path: Path,
 ) -> None:
-    """Codex round-1 finding. `arguments.service` has no schema `max_length`
+    """`arguments.service` has no schema `max_length`
     (`ListRecentChangesArguments`, `tools.py`), so a longer-than-usual service
     name must correctly shrink the content budget around itself rather than
     assume a fixed content cap always leaves the summary under 400 chars.
 
-    Post-freeze review, correctness's P3 + simplicity's P2 (same gap, two
-    angles). The original version of this test used a change summary (~57
+    An earlier version of this test used a change summary (~57
     chars) far shorter than the computed budget for an 80-char service name
     (298 chars) -- it always landed in the "content fits whole, no
     truncation" branch and never exercised the tail-slice logic the
@@ -1164,7 +1157,7 @@ def test_a_moderately_long_service_name_shrinks_the_budget_but_shows_content(
     computed budget is derived here with the SAME formula `run_changes_check`
     uses (`400 - len(prefix) - len(": ")`), not asserted only as `<= 400`,
     so a mutation that hardcodes `content_budget` to a fixed wrong constant
-    (confirmed by the correctness reviewer's own mutation test: reverting to
+    (confirmed by mutation testing: reverting to
     a hardcoded `220` leaves this test's old assertions all still green)
     would make the exact-length and marker-survival assertions below fail."""
     paths = RunPaths(root=tmp_path)
@@ -1222,7 +1215,7 @@ def test_a_moderately_long_service_name_shrinks_the_budget_but_shows_content(
 def test_a_pathologically_long_service_name_still_produces_valid_evidence(
     tmp_path: Path,
 ) -> None:
-    """Codex's own reproduction, made permanent. Before this fix, a service
+    """A real reproduction, made permanent. Before this fix, a service
     name long enough that the fixed prefix alone exceeded `Evidence.summary`'s
     hard `max_length=400` bound (`domain.py`) crashed the whole investigation
     via an uncaught `AssertionError` -- `build_evidence` (`tool_wrappers.py`)
@@ -1236,14 +1229,14 @@ def test_a_pathologically_long_service_name_still_produces_valid_evidence(
     changes_summary_still_builds_valid_evidence` above already established,
     to prove it doesn't raise -- not just that the string itself is short.
 
-    Post-freeze review note: this service name is long enough (450 chars)
+    This service name is long enough (450 chars)
     that the fixed prefix alone (470 chars) already exceeds the final
     unconditional clamp's own 397-char cut point, before any change content
     is considered -- so this case cannot distinguish a correctly-computed
     negative `content_budget` from a wrong, hardcoded one: the final clamp
     truncates within the prefix either way, producing byte-identical output
-    regardless of what `content_budget` was. That is precisely why the
-    correctness reviewer's `content_budget = 220` mutation still passed this
+    regardless of what `content_budget` was. That is precisely why a
+    `content_budget = 220` mutation still passed this
     test's own original assertions. This test stays -- it is still real
     proof that an oversized prefix cannot crash the check via `build_
     evidence` -- but the arithmetic itself is pinned by the adjacent test
@@ -1293,25 +1286,24 @@ def test_a_pathologically_long_service_name_still_produces_valid_evidence(
 def test_a_negative_content_budget_produces_the_exact_expected_summary(
     tmp_path: Path,
 ) -> None:
-    """Post-freeze review, correctness's P3 + simplicity's P2. Neither
-    existing service-name test above can distinguish a correctly-computed
-    `content_budget` from a wrong, hardcoded one: the moderate case (~80
-    chars) used to use content far shorter than any budget, and the
-    pathological case (450 chars) has its result masked by the final
-    unconditional clamp regardless of the budget's value (see that test's
-    own updated docstring).
+    """Neither existing service-name test above can distinguish a
+    correctly-computed `content_budget` from a wrong, hardcoded one: the
+    moderate case (~80 chars) used to use content far shorter than any budget,
+    and the pathological case (450 chars) has its result masked by the final
+    unconditional clamp regardless of the budget's value (see that test's own
+    updated docstring).
 
     This service length (379 chars) is chosen precisely so `content_budget`
     computed from it (`400 - len(prefix) - len(": ")`) is a small negative
     number (-1) while `prefix` itself (399 chars) still fits under the
     400-char bound on its own -- so the final unconditional clamp never
     fires, and the summary is exactly `prefix`, unpadded. A mutation that
-    hardcodes `content_budget` to a fixed positive constant (e.g. the
-    correctness reviewer's own `220`) would instead take the "content fits
+    hardcodes `content_budget` to a fixed positive constant (e.g.
+    `220`) would instead take the "content fits
     whole" branch, append `": a real change happened here"` after the
     prefix, push the result to 429 chars, and get clamped to a DIFFERENT
-    397-char cut -- verified directly against real production arithmetic in
-    this docstring's own review round, not asserted on faith."""
+    397-char cut -- verified directly against real production arithmetic,
+    not asserted on faith."""
     paths = RunPaths(root=tmp_path)
     service = "s" * 379
     paths.changes_file.write_text(
@@ -1353,7 +1345,7 @@ def test_a_negative_content_budget_produces_the_exact_expected_summary(
 def test_a_content_budget_of_exactly_three_still_shows_no_content(
     tmp_path: Path,
 ) -> None:
-    """External review, P3. `run_changes_check`'s own comment on the
+    """`run_changes_check`'s own comment on the
     `keep > 0` guard states the failure range as `0 < content_budget <=
     len(marker)` (correct) but glosses it in English as "content_budget of
     1 or 2" (wrong -- `marker` is 3 chars, so 3 is in range too). The math
@@ -1404,33 +1396,31 @@ def test_a_content_budget_of_exactly_three_still_shows_no_content(
 def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(
     tmp_path: Path,
 ) -> None:
-    """Lab-defect-fix Unit 2, W4/#4. `changes.json` can declare entries out
-    of chronological order -- confirmed directly against this repo's own
-    `configuration_change.json`, whose `require_order_token` entry
-    (`offset_seconds: -60`, chronologically newer) is declared BEFORE its
-    `image_rebuild` entry (`offset_seconds: -240`, chronologically older).
-    A naive front-pop over declaration order would drop whichever entry
-    happens to be declared first, which is not necessarily the oldest --
-    here it would wrongly drop the newer, real one. `run_changes_check`
-    sorts matched changes by their parsed `at` (ascending) before
-    `trim_to_bytes` pops from the front, so trimming always drops the
+    """`changes.json` can declare entries out of chronological order --
+    confirmed directly against this repo's own `configuration_change.json`,
+    whose `require_order_token` entry (`offset_seconds: -60`, chronologically
+    newer) is declared BEFORE its `image_rebuild` entry (`offset_seconds:
+    -240`, chronologically older). A naive front-pop over declaration order
+    would drop whichever entry happens to be declared first, which is not
+    necessarily the oldest -- here it would wrongly drop the newer, real one.
+    `run_changes_check` sorts matched changes by their parsed `at` (ascending)
+    before `trim_to_bytes` pops from the front, so trimming always drops the
     truly oldest change regardless of declaration order.
 
-    Post-freeze review (three independent reviewers, same finding): both
-    timestamps used to come from `.isoformat()` on datetimes sharing the
+    Both timestamps used to come from `.isoformat()` on datetimes sharing the
     same `tzinfo=UTC`, so both strings rendered with an identical `+00:00`
-    offset -- a raw lexicographic string sort and the correct parsed-
-    `datetime` sort agree on that shape, so this test could not actually
-    tell them apart. Confirmed by mutation: reverting `_change_moment` to
-    return the raw string instead of `datetime.fromisoformat(moment)`, all
-    6 changes-related tests still passed. `newer_at` below is the SAME
-    absolute instant as `WINDOW_START + timedelta(minutes=5)`, re-rendered
-    in a `-05:00` offset instead of `+00:00` -- its string now starts
-    `"...T05:05..."`, which sorts lexicographically BEFORE `older_at`'s
-    `"...T10:00..."`, the opposite of true chronological order. A raw
-    string sort would therefore keep `older_at` (wrong); the real,
-    datetime-based sort keeps `newer_at` (correct) -- exactly the
-    divergence needed to catch a regression back to string comparison."""
+    offset -- a raw lexicographic string sort and the correct parsed-`datetime`
+    sort agree on that shape, so this test could not actually tell them apart.
+    Confirmed by mutation: reverting `_change_moment` to return the raw string
+    instead of `datetime.fromisoformat(moment)`, all 6 changes-related tests
+    still passed. `newer_at` below is the SAME absolute instant as
+    `WINDOW_START + timedelta(minutes=5)`, re-rendered in a `-05:00` offset
+    instead of `+00:00` -- its string now starts `"...T05:05..."`, which sorts
+    lexicographically BEFORE `older_at`'s `"...T10:00..."`, the opposite of
+    true chronological order. A raw string sort would therefore keep `older_at`
+    (wrong); the real, datetime-based sort keeps `newer_at` (correct) --
+    exactly the divergence needed to catch a regression back to string
+    comparison."""
     paths = RunPaths(root=tmp_path)
     newer_at = "2026-08-16T05:05:00-05:00"
     assert datetime.fromisoformat(newer_at) == WINDOW_START + timedelta(minutes=5)
@@ -1504,7 +1494,7 @@ def test_recent_changes_are_filtered_by_service_and_window(tmp_path: Path) -> No
 
     assert outcome.payload["change_count"] == 1
     assert "require_order_token" in str(outcome.payload["summaries"])
-    # Lab-defect-fix F8. `render_context` (`prompts.py`) only ever shows the
+    # `render_context` (`prompts.py`) only ever shows the
     # model `Evidence.summary`, never `.payload` -- a model that correctly
     # calls `list_recent_changes` and gets the right evidence still could
     # not see what it said until the change content itself reached this
@@ -1531,7 +1521,7 @@ def test_topology_reads_the_run_manifest(tmp_path: Path) -> None:
 def test_topology_summary_names_truncation_when_the_payload_was_cut(
     tmp_path: Path,
 ) -> None:
-    """Round 6 review, the P1. Same gap as the metric case: `payload
+    """Same gap as the metric case: `payload
     ["truncated"]` already carried whether trimming cut this topology, but
     `run_topology_check`'s summary string never rendered it -- the only
     part of a `CheckOutcome` `prompts.py`'s `render_context` puts in front
@@ -1549,10 +1539,10 @@ def test_topology_summary_names_truncation_when_the_payload_was_cut(
 
 
 def test_topology_summary_reports_the_post_trim_edge_count(tmp_path: Path) -> None:
-    """Post-freeze review. `run_topology_check`'s summary string used to
+    """`run_topology_check`'s summary string used to
     read `len(edge_list)` (the PRE-trim count) instead of
-    `payload['edge_count']` (kept honest post-trim by `trim_to_bytes`,
-    Unit 3b-4 addendum's C3) -- the same bug already fixed this round in
+    `payload['edge_count']` (kept honest post-trim by `trim_to_bytes`)
+    -- the same bug already fixed in
     `run_logs_check`/`run_changes_check`/`run_metric_check`. Unlike the
     metric case, this one is genuinely reachable with real data: many
     long edge strings really do exceed the byte budget without needing a
@@ -1583,13 +1573,13 @@ def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) ->
     long service names really do exceed it. Not reachable through any of
     the four shipped lab topologies (all under 100 bytes total) -- this
     is a defensive bound, not a scenario this project's own lab can
-    trigger, per the owner's P3 severity ruling.
+    trigger, but worth covering anyway.
 
-    Round 6 review, item 3. This test used to pair the oversized `services`
+    This test used to pair the oversized `services`
     list with an EMPTY `edges` list (`"edges": []`) -- a degenerate shape
     that pinned nothing about what happens to a genuinely non-empty `edges`
     list under the same oversized-services condition, which is exactly the
-    kind of gap that let the round-3 regression (F1: an all-`services`,
+    kind of gap that let a real regression (an all-`services`,
     no-`edges` case masking what a real, non-empty `edges` list does) ship
     unnoticed. `edges` here is a handful of real, short edges -- reproduced
     directly against the real function before writing this assertion (not
@@ -1625,7 +1615,7 @@ def test_an_oversized_services_list_still_fits_the_byte_bound(tmp_path: Path) ->
 
 
 def test_a_small_services_list_survives_an_oversized_edges_list(tmp_path: Path) -> None:
-    """Round 4 review. The services-list fix above was tested only against
+    """The services-list fix above was tested only against
     the case it was built for -- an oversized `services` list on its own --
     and shipped with `trim_to_bytes(payload, "services", ...)` called
     BEFORE the `"edges"` call. That order broke the realistic asymmetric
@@ -1795,11 +1785,10 @@ def test_a_changes_check_never_surfaces_another_incidents_entries(
 def test_w5_narrows_only_the_two_rate_templates_the_finding_measured(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    """Lab-defect-fix Unit 2, W5. `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
+    """`GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
     render `[30s]`; `GATEWAY_LATENCY_P95` -- whose own `rate(...)` feeds
-    `histogram_quantile`, a different computation this unit does not touch
-    -- still renders `[1m]`, confirmed directly rather than assumed from
-    the plan's own "two templates" phrasing."""
+    `histogram_quantile`, a different computation this narrowing does not touch
+    -- still renders `[1m]`, confirmed directly rather than assumed."""
     run_metric_check(
         metric_arguments(template=MetricTemplate.GATEWAY_ERROR_RATE),
         incident_scope(),
@@ -1956,7 +1945,7 @@ def test_the_config_reload_filter_matches_config_loaded_events(tmp_path: Path) -
 
 
 def test_read_json_line_rejects_non_finite_tokens() -> None:
-    """Round 8 review (codex). `json.loads` accepts the non-standard
+    """`json.loads` accepts the non-standard
     `NaN`/`Infinity`/`-Infinity` tokens by default -- an extension beyond
     RFC-8259 most other JSON readers reject. Without `parse_constant`
     refusing them, a NaN token anywhere in a log line would parse into an
@@ -1991,13 +1980,12 @@ def test_json_readers_reject_overflowing_numeric_literals(tmp_path: Path) -> Non
 def test_a_log_line_with_a_non_finite_token_is_skipped_not_crashed(
     tmp_path: Path,
 ) -> None:
-    """Round 8 review, codex finding, independently reproduced. Before this
-    fix, `read_json_line`'s bare `json.loads` accepted a NaN/Infinity token
-    anywhere in a log line and returned an ordinary-looking record carrying
-    a Python `nan`/`inf` float. Confirms the poisoned line is now skipped
-    the same way any other malformed line already is (`read_json_line`
-    returning `None`, `continue`d over), not that the whole check fails or
-    that the bad value silently reaches `payload["rows"]`."""
+    """Before this fix, `read_json_line`'s bare `json.loads` accepted a
+    NaN/Infinity token anywhere in a log line and returned an ordinary-looking
+    record carrying a Python `nan`/`inf` float. Confirms the poisoned line is
+    now skipped the same way any other malformed line already is
+    (`read_json_line` returning `None`, `continue`d over), not that the whole
+    check fails or that the bad value silently reaches `payload["rows"]`."""
     paths = RunPaths(root=tmp_path)
     poisoned_row: dict[str, object] = {
         "at": (WINDOW_START + timedelta(seconds=2)).isoformat(),
@@ -2033,7 +2021,7 @@ def test_a_log_line_with_an_overflowing_numeric_literal_is_skipped(
 
 
 def test_a_changes_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -> None:
-    """Same codex finding as the log-line test above, for `run_changes_
+    """The same finding as the log-line test above, for `run_changes_
     check`'s whole-manifest reader (`read_json_file`): the non-standard
     token can sit anywhere in the file, not just in a field this function
     reads, so the entire manifest becomes unreadable rather than one row
@@ -2086,7 +2074,7 @@ def test_a_changes_manifest_with_an_overflowing_numeric_literal_is_refused(
 
 
 def test_a_topology_manifest_with_a_non_finite_token_is_refused(tmp_path: Path) -> None:
-    """Same codex finding, for `run_topology_check`'s manifest reader."""
+    """The same finding, for `run_topology_check`'s manifest reader."""
     paths = RunPaths(root=tmp_path)
     paths.topology_file.write_text(
         json.dumps(

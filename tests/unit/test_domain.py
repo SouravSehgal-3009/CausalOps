@@ -185,7 +185,7 @@ def test_an_incident_window_must_end_after_it_starts() -> None:
 
 
 def test_stored_incident_refuses_a_packet_incident_id_mismatch() -> None:
-    """Post-freeze review, P1. `packet.incident_id` is rendered straight
+    """`packet.incident_id` is rendered straight
     into the model's own prompt (`prompts.py`'s `render_context`:
     `f"incident: {packet.incident_id}"`) -- a mismatch against `scope.
     incident_id` would show the model a different incident than the one
@@ -193,7 +193,7 @@ def test_stored_incident_refuses_a_packet_incident_id_mismatch() -> None:
     with nothing else in the pipeline positioned to catch it before the
     prompt is built. `StoredIncident.check_identity_agrees` now refuses
     this at load time instead. (The `_rebuild_store` double-fault
-    correctness traced -- a mismatched `evidence[i].incident_id` raising
+    traced directly -- a mismatched `evidence[i].incident_id` raising
     `ValueError` from both the normal report path and the crash-
     containment path meant to catch it, escaping `main()`'s catch tuple
     entirely -- is the sibling evidence-mismatch test's own reason, not
@@ -277,8 +277,8 @@ def test_the_alert_packet_names_its_own_initial_evidence() -> None:
 
 
 def test_the_graph_phase_enum_matches_the_seven_phases_in_the_spec() -> None:
-    """`TECHNICAL_SPEC.md` §5's diagram, not just what Unit 1a implements --
-    `graph.py` (Unit 1b) is the first consumer of this enum."""
+    """`TECHNICAL_SPEC.md` §5's diagram, not just what `graph.py`
+    implements -- `graph.py` is the first consumer of this enum."""
     assert [phase.value for phase in GraphPhase] == [
         "CREATED",
         "INVESTIGATE",
@@ -295,8 +295,8 @@ def test_the_escalation_reason_enum_matches_the_four_triggers_in_the_spec() -> N
     in the order the spec lists them. `graph.py`'s `_escalation_reason` does
     *not* check them in this same order -- it checks `TOOL_UNAVAILABLE`
     first, deliberately ahead of the spec's own listing order, and says why
-    in its own docstring. `RETRIEVAL_COVERAGE_INSUFFICIENT` is unreachable
-    until Milestone 3's retrieval lands; it is named here anyway, the same
+    in its own docstring. `RETRIEVAL_COVERAGE_INSUFFICIENT` was unreachable
+    until retrieval landed; it is named here anyway, the same
     precedent `GraphPhase` above already sets."""
     assert [reason.value for reason in EscalationReason] == [
         "CONFLICTING_EVIDENCE",
@@ -308,7 +308,7 @@ def test_the_escalation_reason_enum_matches_the_four_triggers_in_the_spec() -> N
 
 def test_a_report_carries_no_escalation_record_unless_the_run_escalated() -> None:
     """The default an ordinary, never-escalated run gets -- every report
-    before Unit 2b, and most reports after it."""
+    before escalation existed, and most reports after it."""
     diagnosed = report(Disposition.DIAGNOSED, RootCauseCode.CONFIG_CHANGE, assessment())
 
     assert diagnosed.escalation is None

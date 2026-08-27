@@ -1,4 +1,4 @@
-"""Unit 3b-2: `cost_ledger`'s reserve-before-send gate and its settlement.
+"""`cost_ledger`'s reserve-before-send gate and its settlement.
 
 Every test here uses `sqlite3.connect(":memory:")` -- no `checkpoints.db`
 file, no network, no live model. This is the durable half of the cost gate;
@@ -81,9 +81,9 @@ def test_an_identical_retry_reads_back_the_same_row_not_a_second_one(
     second dollar amount to the running total -- either alone could pass
     against a subtly wrong fix; both together cannot.
 
-    Unit 3b-4 addendum, Group B: the ledger-level bookkeeping this test
-    covers (one row, one dollar amount) is correct and unaffected by that
-    fix -- what changed is that `is_new` now tells the caller which of the
+    The ledger-level bookkeeping this test
+    covers (one row, one dollar amount) is correct and unaffected by a
+    later fix -- what changed is that `is_new` now tells the caller which of the
     two identical-looking calls actually inserted the row, which is what
     `test_live_model.py`'s new transport-invocation test uses to refuse the
     second one before it reaches the provider."""
@@ -105,7 +105,7 @@ def test_ambiguous_reservation_message_names_the_state_key_and_next_action() -> 
     -- constructed here without a live model or a real send, since the
     class itself lives in this module.
 
-    Post-freeze review, P3-4: the message used to name only the state and
+    The message used to name only the state and
     key, leaving an owner reading `FAIL AMBIGUOUS_MODEL_REQUEST ...` with
     no indication of what to do next -- a real, narrow dead end for a
     `SETTLED` row specifically (a crash after `settle_reservation` commits
@@ -299,7 +299,7 @@ def test_settling_an_already_settled_row_is_refused(conn: sqlite3.Connection) ->
 
 
 def test_run_cost_totals_sums_only_one_run_id(conn: sqlite3.Connection) -> None:
-    """Unit 3c. A different question from `_reserved_and_settled_total`'s
+    """A different question from `_reserved_and_settled_total`'s
     application-wide ceiling sum: two turns of `run-1`, settled, plus one
     turn of an unrelated `run-2` that must not leak into `run-1`'s
     totals."""
@@ -514,7 +514,7 @@ def test_settle_reservation_survives_warnings_as_errors_on_an_overrun(
 def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(
     conn: sqlite3.Connection,
 ) -> None:
-    """Reproduces the exact Codex-reported scenario: a $0.01 reservation
+    """Reproduces the exact reported scenario: a $0.01 reservation
     that settles at $0.03 under a $0.02 application-wide ceiling. Before
     this fix, `_reserved_and_settled_total` summed `reserved_usd`
     unconditionally, so the ceiling's running total still believed only
@@ -525,8 +525,8 @@ def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(
     correctly refused.
 
     `ceiling_usd` carries `RESERVATION_CEILING_BUFFER_USD` on top of the
-    0.02 this scenario is actually about, reproducing the exact Codex
-    report's own arithmetic unchanged -- `RESERVATION_CEILING_BUFFER_USD`
+    0.02 this scenario is actually about, reproducing the exact
+    original report's own arithmetic unchanged -- `RESERVATION_CEILING_BUFFER_USD`
     exceeds 0.02 outright, so without this the very first reservation below
     would be refused for the wrong reason before this test ever reaches the
     overrun it exists to cover."""

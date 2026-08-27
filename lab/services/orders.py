@@ -64,7 +64,7 @@ def handle(request_id: str) -> RouteResult:
     )
     slots_requested = pool.acquire(incident_id)
     capacity = configuration.get(POOL_CAPACITY_SETTING)
-    # Fix F1 (revised). Publish attempts-per-capacity, not raw utilization.
+    # Publish attempts-per-capacity, not raw utilization.
     # `LeakyPool.acquire` above runs unconditionally on every request,
     # including requests that will be refused for exceeding capacity below
     # -- so this quantity can exceed 1.0 once attempts outstrip the pool,

@@ -54,7 +54,7 @@ def authorize(
 ) -> PolicyDecision:
     """Decide whether a proposed check may run.
 
-    Lab-defect-fix Unit 3, W1: the ordinary path here is always
+    The ordinary path here is always
     `tool_wrappers.ToolWrapper.dispatch`, which resolves an omitted or
     out-of-scope window into the incident's own bounds
     (`resolve_effective_window`) before ever calling this function -- no
@@ -109,7 +109,7 @@ def authorize(
         return deny(mark, ReasonCode.UNKNOWN_SERVICE, "that service is out of scope")
     window_start = arguments.window_start
     window_end = arguments.window_end
-    # Lab-defect-fix Unit 3, W1. See this function's own docstring above --
+    # See this function's own docstring above --
     # the ordinary (wrapper) path never reaches here with either bound
     # unresolved; only a direct or future caller that skips normalization
     # can.

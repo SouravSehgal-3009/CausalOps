@@ -131,7 +131,7 @@ def within_window(moment: str, start: datetime, end: datetime) -> bool:
     handler, then `FAILED_SAFE` for the entire run instead of skipping one
     row).
 
-    Unit 3b-4 addendum, C2: `datetime.fromisoformat` returns either an
+    `datetime.fromisoformat` returns either an
     aware or a naive `datetime` depending on whether `moment` carries a UTC
     offset; comparing a naive one against the aware `start`/`end` this
     function is always called with raises `TypeError`, not `ValueError` --
@@ -173,9 +173,9 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
             f"no log for {arguments.service} in this run",
         )
     limit = min(arguments.row_limit, MAX_LOG_ROWS)
-    # Lab-defect-fix Unit 2, W4. A bounded ring, not a `break`-at-`limit`
+    # A bounded ring, not a `break`-at-`limit`
     # scan: every real observation in this lab sits near the tail of the
-    # window (see W3/`SCRAPE_SETTLE_SECONDS`), so keeping the first `limit`
+    # window (see `SCRAPE_SETTLE_SECONDS`), so keeping the first `limit`
     # matching rows in file order -- the oldest matches -- silently
     # discarded exactly the data-bearing region once more than `limit` rows
     # matched. `deque(maxlen=limit)` evicts the oldest match automatically
@@ -214,16 +214,16 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
         "truncated": truncated,
     }
     payload = trim_to_bytes(payload, "rows", list(rows), "row_count")
-    # Post-freeze review, P3-1. `len(rows)` here is the PRE-trim count --
+    # `len(rows)` here is the PRE-trim count --
     # `trim_to_bytes` mutates a COPY (`kept = list(rows)`), never `rows`
     # itself, so this summary used to claim more rows than `payload["rows"]`
     # actually holds whenever byte-trimming (not just the `limit` cap
     # above) removed any. `payload["row_count"]` is what `trim_to_bytes`
-    # keeps honest throughout (Unit 3b-4 addendum, C3); a trailing
+    # keeps honest throughout; a trailing
     # "(truncated)" names the gap explicitly rather than leaving a reader
     # to notice the count looks low.
     #
-    # Round 4 review, F3. `event_codes` (above, built from `events`) has
+    # `event_codes` (above, built from `events`) has
     # the SAME pre-trim-aggregate shape as `row_count` did -- it is
     # assembled during the loop that fills `rows`, entirely before
     # `trim_to_bytes` runs, so a row popped by BYTE trimming (as opposed
@@ -243,7 +243,7 @@ def run_logs_check(arguments: QueryLogsArguments, paths: RunPaths) -> CheckOutco
             if isinstance(kept_event, str):
                 kept_events.add(kept_event)
     payload["event_codes"] = ",".join(sorted(kept_events))
-    # Lab-defect-fix Unit 2, W4. Names the *direction* kept, matching the
+    # Names the *direction* kept, matching the
     # metric/change checks -- see `run_metric_check`'s identical note.
     truncated_note = (
         f" (kept the newest {payload['row_count']} of {matched_count})"
@@ -298,11 +298,11 @@ def run_changes_check(
         if isinstance(summary, str):
             summaries.append(summary)
 
-    # Lab-defect-fix Unit 2, W4/#4. `changes.json` lists entries in
+    # `changes.json` lists entries in
     # scenario-definition order, not chronological order (confirmed:
     # `configuration_change.json` declares its -60s entry before its
-    # -240s one), so `trim_to_bytes`'s front-pop (this unit's own W4 fix,
-    # "drop the oldest, keep the newest") only actually drops the oldest
+    # -240s one), so `trim_to_bytes`'s front-pop ("drop the oldest, keep
+    # the newest") only actually drops the oldest
     # if `changes` is sorted oldest-first beforehand. Sorted by the SAME
     # parsed `datetime` `within_window` already validated above, never by
     # the raw string -- every record happens to share the same UTC offset
@@ -324,8 +324,8 @@ def run_changes_check(
         "truncated": False,
     }
     payload = trim_to_bytes(payload, "changes", changes, "change_count")
-    # Round 6 review, item 2. `summaries` (above) has the same pre-trim-
-    # aggregate shape already fixed twice this round elsewhere
+    # `summaries` (above) has the same pre-trim-
+    # aggregate shape already fixed elsewhere in this module
     # (`event_codes`, `max_value`): it was joined from EVERY matched
     # change before `trim_to_bytes` ran and never rebuilt, so it could
     # still name changes no longer present in `payload["changes"]` after
@@ -335,7 +335,7 @@ def run_changes_check(
     #
     # Unlike `event_codes`/`max_value`, this rebuild is not simply
     # guaranteed smaller by construction without checking: `trim_to_bytes`
-    # pops rows from the FRONT of the list as of lab-defect-fix Unit 2, W4
+    # pops rows from the FRONT of the list
     # (`changes` is sorted chronologically ascending just above this
     # block, so popping the front drops the oldest -- see the sort's own
     # comment), so `kept_summaries` is always a SUFFIX (in sorted order) of
@@ -346,9 +346,9 @@ def run_changes_check(
     # byte length. If `changes` was fully emptied, the
     # scalar-shrinking fallback already halved `summaries` down before
     # this rebuild replaces it with an even shorter (or empty) string.
-    # Both branches can only shrink the payload -- but that reasoning is
-    # exactly the shape of claim a previous fix in THIS SAME FUNCTION made
-    # about seeding order and shipped wrong (F1, round 3), so it is
+    # Both branches can only shrink the payload -- but a previous version
+    # of THIS SAME FUNCTION made exactly this shape of claim about
+    # seeding order and shipped it wrong, so it is
     # checked with `fits()` below rather than trusted silently.
     kept_changes = payload["changes"]
     assert isinstance(kept_changes, list)
@@ -359,19 +359,19 @@ def run_changes_check(
             if isinstance(kept_summary, str):
                 kept_summaries.append(kept_summary)
     payload["summaries"] = "; ".join(kept_summaries)
-    # Round 7 review confirmed this check is genuinely unreachable here
+    # This check is genuinely unreachable here
     # (this function always has a string-valued field -- `summaries` --
     # for `trim_to_bytes`'s own scalar fallback to shrink, so `fits()`
     # cannot come back `False` at this point). Kept anyway as harmless
     # defense-in-depth: it costs nothing at runtime and would catch a
     # future change to this rebuild that broke the reasoning above.
     #
-    # Round 8 review, P3. This assert's sibling in `run_topology_check`
+    # This assert's sibling in `run_topology_check`
     # was, at one point, described as "the genuinely load-bearing one" by
-    # contrast with this one -- wrong: a reviewer measured directly (120
+    # contrast with this one -- wrong: direct measurement (120
     # randomized trials, 5 adversarial shapes, and a mutation test
-    # disabling the topology assert entirely) that IT is unreachable too,
-    # today, for the same reason any `run_topology_check` payload converges
+    # disabling the topology assert entirely) showed that IT is unreachable
+    # too, today, for the same reason any `run_topology_check` payload converges
     # once both lists are trimmable to empty. Both asserts are currently
     # unreachable defense-in-depth, not one provably-needed and one
     # decorative -- see the topology assert's own comment for why it is
@@ -380,7 +380,7 @@ def run_changes_check(
         "rebuilding summaries from the post-trim changes list must not "
         "grow the payload back over the byte bound"
     )
-    # Lab-defect-fix Unit 2, W4. Names the *direction* kept, matching the
+    # Names the *direction* kept, matching the
     # metric/log checks -- see `run_metric_check`'s identical note. `changes`
     # itself is unmutated by `trim_to_bytes` (which pops from a copy), so
     # `len(changes)` still reflects the pre-trim, post-sort count here.
@@ -389,7 +389,7 @@ def run_changes_check(
         if payload["truncated"]
         else ""
     )
-    # Lab-defect-fix F8. `payload["summaries"]` (rebuilt above, post-trim)
+    # `payload["summaries"]` (rebuilt above, post-trim)
     # is the only place the actual change content lives -- `render_context`
     # (`prompts.py`) puts only this function's returned `.summary` in front
     # of the model, never `.payload`, so a bare count here made the model
@@ -398,7 +398,7 @@ def run_changes_check(
     # supporting while its own stated uncertainty said it never saw change
     # content -- true, given what it was shown).
     #
-    # Lab-defect-fix F8, Codex round 1. `payload["summaries"]` is already
+    # `payload["summaries"]` is already
     # ordered oldest-to-newest (`changes.sort(key=_change_moment)` above,
     # then `trim_to_bytes`'s own front-pop keeps the newest survivors) --
     # a fixed-size head slice would keep the OLDEST of what survived and
@@ -490,14 +490,14 @@ def run_topology_check(
     service_list: list[JsonValue] = (
         services_field if isinstance(services_field, list) else []
     )
-    # Post-freeze review. `services` is a LIST, not the string-valued
-    # scalar `trim_to_bytes`'s own fallback (Unit 3b-4 addendum, C3) can
+    # `services` is a LIST, not the string-valued
+    # scalar `trim_to_bytes`'s own fallback can
     # shrink, and it is not `edges`, the ROW list this function's other
     # `trim_to_bytes` call below already bounds -- an oversized `services`
-    # list would pass through both mechanisms untouched. Correctness
-    # measured this concretely (34,863 bytes against the 12,288-byte cap,
+    # list would pass through both mechanisms untouched. Measured directly
+    # (34,863 bytes against the 12,288-byte cap,
     # not reachable through any of the four shipped lab topologies, all
-    # under 100 bytes total -- P3, not P2) and confirmed `services` is the
+    # under 100 bytes total) and confirmed `services` is the
     # ONLY non-string, non-row field anywhere in this codebase's `trim_to_
     # bytes` callers that needs its own bounding pass: not evidence for a
     # general recursive mechanism over arbitrary payload shapes, which
@@ -526,7 +526,7 @@ def run_topology_check(
     # DOES decide it -- `trim_to_bytes` pops rows from its own list
     # unconditionally until `fits(payload)`, so whichever call runs first
     # keeps popping against the OTHER list's still-untrimmed full weight.
-    # A round of review found this the hard way: with `services`-first
+    # Discovered the hard way: with `services`-first
     # (the order this function used to run in) and a realistic incident
     # shape -- a handful of real service names next to a genuinely
     # oversized `edges` list -- the `services` call never sees `fits()`
@@ -549,20 +549,20 @@ def run_topology_check(
     }
     payload = trim_to_bytes(payload, "edges", edge_list, "edge_count")
     payload = trim_to_bytes(payload, "services", service_list, "service_count")
-    # Round 7 review. This payload has NO string-valued field at all
+    # This payload has NO string-valued field at all
     # (`services`/`edges` are lists, `service_count`/`edge_count`/
     # `truncated` are int/bool) -- unlike every other `trim_to_bytes`
     # caller in this codebase, `trim_to_bytes`'s own scalar-shrinking
     # fallback (see its docstring) is a true no-op here, not a second
-    # layer of defense. A reviewer measured directly that the fallback's
+    # layer of defense. Measured directly that the fallback's
     # `widest_key is None` escape IS reached in normal operation (a
     # realistic small-services/large-edges shape hits it inside the
     # `edges` call, while `services` is still its full, untrimmed size) --
     # not just hypothetically.
     #
-    # Round 8 review, P3. The paragraph above used to go on to call this
+    # An earlier version of the paragraph above used to go on to call this
     # assert "the actual safety net" for that shape -- overclaiming what
-    # was actually verified. A reviewer measured directly (120 randomized
+    # was actually verified. Measured directly (120 randomized
     # trials, 5 adversarial shapes, and a mutation test that disabled this
     # assert entirely) that it is currently UNREACHABLE, same as its
     # sibling in `run_changes_check`: both lists can always be popped to
@@ -580,7 +580,7 @@ def run_topology_check(
         "a payload under the byte bound -- this function has no string "
         "field for trim_to_bytes's own fallback to shrink instead"
     )
-    # Round 6 review, the P1. Same gap as `run_metric_check`: `payload
+    # Same gap as `run_metric_check`: `payload
     # ["truncated"]` already carries whether either list above was cut,
     # but this summary string never rendered it, and the summary is the
     # only part of a `CheckOutcome` `prompts.py` puts in front of the
@@ -604,7 +604,7 @@ def _registered_check_runner(
     Everything a backend needs beyond the proposal is configuration, so it is
     captured here and the returned callable matches the seam exactly.
 
-    Unit 3b-4 addendum, C6: private, not a real dispatch path. Superseded by
+    Private, not a real dispatch path. Superseded by
     `tool_wrappers.dispatch_registry` before `search_runbooks` existed;
     nothing in `cli.py` calls this today, and its `RunCheck` return type
     (`CheckOutcome` only) cannot even express a `search_runbooks` result

@@ -1,6 +1,6 @@
 """Shared live/replay model and tool-registry construction.
 
-Unit 3c extracted this out of `cli.py` (`_build_model_and_registry`,
+Extracted out of `cli.py` (`_build_model_and_registry`,
 `_live_evaluation_ceiling_usd`, `REPLAY_FIXTURE`/`REPLAY_FIXTURE_DIR`) so
 `causalops.evaluate_cli` could reuse the exact same wiring `causalops.cli`
 uses for a live `investigate`, instead of copy-pasting it. `CLAUDE.md`
@@ -44,20 +44,20 @@ from causalops.tool_wrappers import ToolWrapper, dispatch_registry
 from causalops.tools import ToolName
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
-# `dispatch_registry` wraps all four tools as of Unit 1c, so the graph
+# `dispatch_registry` wraps all four tools, so the graph
 # orchestrator runs `lab_diagnosis.json` -- two executed checks across two
 # tools -- exactly as the retired loop orchestrator did; parity between the
-# two was established in Unit 1d-1 before the loop was retired.
+# two was established and proven before the loop was retired.
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
-# Unit 3b-2. `.env.example`-documented, application-wide, covering standalone
+# `.env.example`-documented, application-wide, covering standalone
 # and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). Only an
 # ABSENT or BLANK `LIVE_EVALUATION_MAX_USD` silently falls back to the
 # default below -- an owner who never set the variable, or set it to
 # whitespace, gets the documented default rather than a startup failure.
-# Unit 3b-3: that default was raised from 2.00 to 5.00, re-derived from the
+# That default was raised from 2.00 to 5.00, re-derived from a real
 # smoke call's measured per-call reservation size after the ratio replan;
-# the calibration record is in `TECHNICAL_OVERVIEW.md`. Unit 3c: extracted
+# the calibration record is in `TECHNICAL_OVERVIEW.md`. Extracted
 # here from `cli.py`, still the one ceiling both `causalops` and
 # `causalops-evaluate` read.
 #
@@ -72,8 +72,8 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # suggested they wanted. Only unset/blank still defaults, because there
 # both "the value the owner typed" and "the value the owner is implicitly
 # asking for" are the same thing -- nothing was typed, so there is no wrong
-# signal to silently override. Full design rationale, including why this
-# was worth a dedicated review pass, is in `TECHNICAL_OVERVIEW.md`'s
+# signal to silently override. Full design rationale is in
+# `TECHNICAL_OVERVIEW.md`'s
 # "Live-evaluation cost ceiling validation" section.
 #
 # A well-formed, finite, positive value can still be unusable: `cost_ledger.
@@ -204,8 +204,8 @@ def build_model_and_registry(
 ]:
     """The model, tool registry, display model name, and (for a live model
     only) the cost-ledger connection one incident needs -- built the same
-    way for `causalops.cli`'s fresh `investigate` and Unit 2c's
-    `approve`/`reject` resume, and (Unit 3c) for `causalops.evaluate_cli`'s
+    way for `causalops.cli`'s fresh `investigate` and its
+    `approve`/`reject` resume, and for `causalops.evaluate_cli`'s
     paired live comparison, all three of which need the exact same wiring
     `build_graph` requires.
 
@@ -251,7 +251,7 @@ def build_model_and_registry(
         return replay_model, registry, REPLAY_MODEL_NAME, None
     ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
     ensure_cost_ledger_table(ledger_conn)
-    # Unit 3b-2, P3-3. Presence only, mirroring `doctor.check_api_key`'s own
+    # Presence only, mirroring `doctor.check_api_key`'s own
     # check -- the value itself never leaves this line. `LiveClaudeModel`
     # never reads `ANTHROPIC_API_KEY` itself (`live_model.MissingCredential`'s
     # docstring; `tests/security/test_credential_isolation.py` proves the

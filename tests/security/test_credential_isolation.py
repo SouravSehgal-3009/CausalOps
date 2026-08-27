@@ -1,4 +1,4 @@
-"""Unit 3b-2's half of the "Credential leakage" threat-model row
+"""This module's half of the "Credential leakage" threat-model row
 (`TECHNICAL_OVERVIEW.md`): "Environment-only API key plus redaction; verify
 it never reaches CLI text, config, artifacts, logs, reports, receipts, or
 errors."

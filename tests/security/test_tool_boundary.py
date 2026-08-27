@@ -128,7 +128,7 @@ def out_of_scope_runbooks_proposal() -> ToolProposal:
 # One arm per registered tool -- the property this table backs (§9's spy
 # control) outlives the tool count, so a newly registered tool must add its
 # own arm here or the assertion below fails loudly rather than silently
-# narrowing coverage. Unit 3a added `SEARCH_RUNBOOKS`.
+# narrowing coverage. `SEARCH_RUNBOOKS` was added this way.
 OUT_OF_SCOPE_PROPOSAL_BY_TOOL: dict[ToolName, ToolProposal] = {
     ToolName.QUERY_METRIC: out_of_scope_metric_proposal(),
     ToolName.QUERY_LOGS: out_of_scope_logs_proposal(),

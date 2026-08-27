@@ -1,4 +1,4 @@
-"""Unit 3b-2: the application-wide cost ledger -- `TECHNICAL_SPEC.md` §10's
+"""The application-wide cost ledger -- `TECHNICAL_SPEC.md` §10's
 `LIVE_EVALUATION_MAX_USD` gate, and the amended §5 model-request idempotency
 record, unified into one table.
 
@@ -107,14 +107,14 @@ _LOGGER = logging.getLogger(__name__)
 # Sized from this project's own real live-call evidence, not picked to make
 # the arithmetic merely balance:
 #   - The only documented reservation-vs-actual gap on one real settled
-#     request -- $0.024198 actual against a $0.022168 reservation, the
-#     Unit 3b-3 smoke call's INITIAL_PLAN turn recomputed at full output
+#     request -- $0.024198 actual against a $0.022168 reservation, a real
+#     smoke call's INITIAL_PLAN turn recomputed at full output
 #     saturation, under the input ratio since tightened by that same
 #     finding (`TECHNICAL_OVERVIEW.md`, "The smoke call's findings") -- was
 #     about $0.002.
 #   - The largest full live run recorded to date, across every model call
-#     it made, totalled $0.059998 (`LIVE_MODEL_RELIABILITY_FINDINGS.md`,
-#     call 1: `configuration_change`, 4 settled reservations).
+#     it made, totalled $0.059998 (a `configuration_change` run,
+#     4 settled reservations).
 #   - The largest theoretical SINGLE-request reservation under the current
 #     pricing snapshot and token caps -- a proposal turn carrying the full
 #     9,600-token prose budget plus the current 13,404-token tool-schema
@@ -151,7 +151,7 @@ class AmbiguousReservationNotResent(Exception):
     `is_new=False` -- so the caller (`live_model.py`'s `_send`) refuses to
     invoke the provider under it, rather than assume a second send is safe.
 
-    Unit 3b-4 addendum, Group B. `record_reservation_before_request` used to
+    `record_reservation_before_request` used to
     return an existing row indistinguishably from a freshly-inserted one,
     and `_send` invoked the provider unconditionally either way. A crash
     between reserving and settling, followed by a LangGraph resume that
@@ -340,7 +340,7 @@ def _valid_tokens(value: object, name: str) -> int:
 
 def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float, bool]:
     """`(reserved_usd, actual_usd, fully_settled)` for one `run_id` only --
-    the per-run figures `EvaluationRecord` needs (Unit 3c), a different
+    the per-run figures `EvaluationRecord` needs, a different
     question from `_reserved_and_settled_total`'s application-wide ceiling
     sum right below. Reads the same table through the same connection every
     other reservation/settlement call already uses; this adds no new
@@ -470,7 +470,7 @@ def record_reservation_before_request(
     `record_decision_before_resume` establishes for owner decisions,
     applied here to money instead of a decision.
 
-    Unit 3b-4 addendum, Group B. Idempotent bookkeeping is NOT the same
+    Idempotent bookkeeping is NOT the same
     claim as "safe to send again": this function used to return the
     existing row indistinguishably from a freshly-inserted one, and
     `live_model.py`'s `_send` sent the request unconditionally either way

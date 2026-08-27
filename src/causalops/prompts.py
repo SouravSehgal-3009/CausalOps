@@ -1,6 +1,6 @@
 """Stage instructions and the model-visible context text.
 
-The context carries only incident-scoped facts, plus -- since Unit 3a -- retrieved
+The context carries only incident-scoped facts, plus retrieved
 runbook guidance, which is explicitly not incident-scoped (`TECHNICAL_SPEC.md` §6/§7)
 but is still fenced as untrusted data alongside it, in the same fence. Scenario
 names, seeds, and expected causes have no place to appear in either.
@@ -67,10 +67,10 @@ STAGE_INSTRUCTIONS: dict[Stage, str] = {
         "Revise the ranked hypotheses using the evidence so far, then either one "
         "further check proposal or a stop reason."
     ),
-    # F5: the last two sentences are deliberately duplicated in `domain.py`'s
+    # The last two sentences are deliberately duplicated in `domain.py`'s
     # `FinalAssessment.disposition` Field description, for the tool-call
     # JSON schema channel this rendered-prompt text doesn't reach -- see
-    # that field's own "Addendum, F5" comment.
+    # that field's own comment.
     Stage.FINAL_ASSESSMENT: (
         "Give a diagnosis with a matching root cause and cited supporting evidence, "
         "or abstain with UNDETERMINED when the evidence cannot separate the causes. "
@@ -92,7 +92,7 @@ class DeniedCheckNote(NamedTuple):
     guidance: str
 
 
-# Fix F2. Static guidance for every `policy.authorize()` denial reason
+# Static guidance for every `policy.authorize()` denial reason
 # except `RESULT_LIMIT_EXCEEDED`, which is shared by two tools against two
 # different budget ceilings (`query_logs` against `Budgets.log_rows`,
 # `search_runbooks` against `Budgets.runbook_passages`) and so needs the
@@ -163,18 +163,17 @@ def render_context(
     `context.count(FENCE_CLOSE) == 1` stays true whether or not any passage
     is present.
 
-    Fix F2. `denied_checks` defaults to `()` for the same backward-
-    compatible reason `passages` does -- with the default, this function's
-    output is byte-identical to before this fix. Rendered *outside* the
-    untrusted-telemetry fence, between `## Status` and `## Evidence`: a
-    denial is this application's own decision, not recorded telemetry.
-    Each line is deliberately prefixed `"denied: "`, not `"- "` -- the only
-    other place in this tree that scans rendered context text for a
-    leading `"- "` is `models.py`'s `ReplayReasoningModel.
-    evidence_from_last_check`, which extracts an evidence id for replay-
-    fixture substitution; a `"- "`-prefixed denial line would be
-    misinterpreted as an evidence line by that scan the moment a fixture
-    combined a denial with `{{evidence_from_last_check}}`."""
+    `denied_checks` defaults to `()` for the same backward-compatible reason
+    `passages` does -- with the default, this function's output is
+    byte-identical to before this field existed. Rendered *outside* the
+    untrusted-telemetry fence, between `## Status` and `## Evidence`: a denial
+    is this application's own decision, not recorded telemetry. Each line is
+    deliberately prefixed `"denied: "`, not `"- "` -- the only other place in
+    this tree that scans rendered context text for a leading `"- "` is
+    `models.py`'s `ReplayReasoningModel.evidence_from_last_check`, which
+    extracts an evidence id for replay-fixture substitution; a `"- "`-prefixed
+    denial line would be misinterpreted as an evidence line by that scan the
+    moment a fixture combined a denial with `{{evidence_from_last_check}}`."""
     lines = [
         "## Incident",
         f"incident: {packet.incident_id}",
@@ -211,8 +210,8 @@ def render_context(
     for passage in passages:
         # `passage.score` is deliberately not rendered: `bm25()`'s exact
         # value is SQLite-build-dependent (confirmed by this project's own
-        # history -- the Linux/Windows CI split cost Milestone 2 two units
-        # over a `time.monotonic()` reading, and a ranking score carries the
+        # history -- a real Linux/Windows CI mismatch once traced back to a
+        # `time.monotonic()` reading, and a ranking score carries the
         # same platform-dependence risk for a value this file's own digest
         # would otherwise pin). `RunbookPassage.score` still exists on the
         # domain record and in the report for audit; only the model-visible

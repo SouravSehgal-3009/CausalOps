@@ -1,4 +1,4 @@
-"""Unit 3b-2: the reservation math the cost gate depends on.
+"""The reservation math the cost gate depends on.
 
 No provider client, no network, no `sqlite3` -- this module is pure
 arithmetic, and these tests hold it to that.
@@ -29,12 +29,12 @@ def test_a_single_character_estimates_to_at_least_one_token() -> None:
 
 def test_the_ratio_rounds_up_not_down(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ceiling division, not truncation -- must hold for any ratio, not
-    just today's. Unit 3b-3 set `PESSIMISTIC_CHARS_PER_TOKEN` to 1.0, which
-    divides every character count evenly and so cannot exercise rounding
-    on its own; this monkeypatches a divisor that does not divide evenly
-    (3.0, the pre-3b-3 value) so the behaviour this test actually cares
-    about -- `estimate_input_tokens` reads the module-global at call time,
-    confirmed by this monkeypatch taking effect -- stays covered regardless
+    just today's. `PESSIMISTIC_CHARS_PER_TOKEN` is currently set to 1.0, which
+    divides every character count evenly and so cannot exercise rounding on its
+    own; this monkeypatches a divisor that does not divide evenly (3.0, an
+    earlier value) so the behaviour this test actually cares about --
+    `estimate_input_tokens` reads the module-global at call time, confirmed by
+    this monkeypatch taking effect -- stays covered regardless
     of what the real constant currently is."""
     monkeypatch.setattr(pricing, "PESSIMISTIC_CHARS_PER_TOKEN", 3.0)
 
@@ -56,14 +56,14 @@ def test_the_input_cap_preserves_the_intended_9600_character_prose_budget() -> N
     """`MAX_INPUT_TOKENS` bounds prose in TOKENS, but its real job is
     bounding prose in CHARACTERS -- the token figure is only how the
     estimate happens to be expressed, via `PESSIMISTIC_CHARS_PER_TOKEN`.
-    Unit 3b-2 chose 3,200 tokens against a 3.0 ratio (a 9,600-character
-    budget); Unit 3b-3 tightened the ratio to 1.0 for calibration reasons
-    unrelated to how much prose one turn should carry, and moved this cap
+    The original ratio, 3,200 tokens against a 3.0 ratio (a 9,600-character
+    budget), was later tightened to a 1.0 ratio for calibration reasons
+    unrelated to how much prose one turn should carry, and this cap moved
     to 9,600 tokens specifically to leave that character budget unchanged.
     If a future change moves either constant without moving the other to
     match, the *effective* character budget silently changes -- exactly
-    the "the cap would start refusing ordinary runs" failure Unit 3b-2's
-    owner ruling and Unit 3b-3's replan both had to avoid. This assertion
+    the "the cap would start refusing ordinary runs" failure both changes
+    had to avoid. This assertion
     does not derive its expectation from the two constants (that would
     pass no matter how far they drift together); it pins the literal,
     owner-approved 9,600-character figure directly, so a change to either

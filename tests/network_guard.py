@@ -17,7 +17,7 @@ from typing import Any
 
 
 class NetworkAccessRefused(BaseException):
-    """A test (or, from Unit 3b-2 on, a live model adapter) tried to reach a
+    """A test (or a live model adapter) tried to reach a
     destination outside loopback.
 
     Subclasses `BaseException`, not `Exception` -- deliberately, matching

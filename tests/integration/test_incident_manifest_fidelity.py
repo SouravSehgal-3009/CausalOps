@@ -1,10 +1,10 @@
 """The alert's own counts and the ambiguous/saturation log signatures, against
-the real lab -- Lab-defect-fix Unit 4 (W8, W10).
+the real lab.
 
 Marked `docker` for the same reason as `test_configuration_change.py`: these
 assert against the real, live-scraped `logs/*.jsonl` a scenario run leaves
-behind, not a fixture. `--seed evaluation` is used throughout because W8's fix
-and W10's fix are both about what the *evaluation* corpus looks like -- the
+behind, not a fixture. `--seed evaluation` is used throughout because both
+fixes checked here are about what the *evaluation* corpus looks like -- the
 seed the paired evaluation actually runs under.
 """
 
@@ -50,8 +50,8 @@ def gateway_events_in_window(
     generated from (`drive_traffic` drives the gateway, one HTTP round trip
     per row logged here), so this is the real-world check against the alert,
     not a re-derivation through the model-facing `query_logs` tool contract
-    (which cannot see a successful request at all -- see W10's own design
-    note in `LAB_DEFECTS_FIX_PLAN.md`)."""
+    (which cannot see a successful request at all -- a deliberate design
+    choice, not an oversight)."""
     rows = read_jsonl(runs_root(root) / incident_id / "logs" / "gateway.jsonl")
     in_window = []
     for row in rows:
@@ -67,7 +67,7 @@ def gateway_events_in_window(
 def test_alert_counts_match_the_real_gateway_log_over_the_whole_window(
     family: str,
 ) -> None:
-    """W10. `total_requests`/`failed_requests` must describe the whole
+    """`total_requests`/`failed_requests` must describe the whole
     recorded window (baseline + fault), not the fault phase alone -- proven
     against `logs/gateway.jsonl`, the same HTTP round trips `drive_traffic`
     counted to build the alert in the first place."""
@@ -101,7 +101,7 @@ def test_alert_counts_match_the_real_gateway_log_over_the_whole_window(
 
         assert alert_payload["total_requests"] == total_requests, (
             "alert total_requests does not match the real gateway log over "
-            "the whole incident window -- the defect W10 exists to fix"
+            "the whole incident window"
         )
         assert alert_payload["failed_requests"] == failed_requests
     finally:
@@ -112,7 +112,7 @@ def test_alert_counts_match_the_real_gateway_log_over_the_whole_window(
 def test_ambiguous_telemetry_shows_both_fault_signals_under_the_evaluation_seed() -> (
     None
 ):
-    """W8. Before this unit's fix, the evaluation seed's `pool_capacity: 7`
+    """Before this fix, the evaluation seed's `pool_capacity: 7`
     meant every fault request exhausted the pool before the retry loop that
     would ever hit `response_delay_seconds` even ran -- the family
     degenerated to a `resource_pool_saturation` clone with the opposite
@@ -139,8 +139,8 @@ def test_ambiguous_telemetry_shows_both_fault_signals_under_the_evaluation_seed(
 
 
 def test_resource_pool_saturation_shows_only_pool_exhaustion() -> None:
-    """W8's distinguishability control. `resource_pool_saturation`'s own
-    evaluation-seed `pool_capacity` (7, unchanged by this unit) must keep
+    """The distinguishability control. `resource_pool_saturation`'s own
+    evaluation-seed `pool_capacity` (7, unchanged by this fix) must keep
     producing pool exhaustion only -- proof that fixing `ambiguous_telemetry`
     did not blur the family it used to collapse into. `response_delay_seconds`
     is never configured for this family at all, so `upstream_timeout` cannot

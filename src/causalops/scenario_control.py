@@ -48,7 +48,7 @@ WINDOW_LEAD_IN = timedelta(minutes=5)
 REQUEST_TIMEOUT_SECONDS = 5
 # Traffic is paced so Prometheus records more than one scrape of it.
 REQUEST_PAUSE_SECONDS = 0.2
-# Lab-defect-fix Unit 2, W3. `lab/prometheus.yml`'s `scrape_interval: 5s` --
+# `lab/prometheus.yml`'s `scrape_interval: 5s` --
 # two full scrape intervals, plus margin, before `window_end` is stamped, so
 # at least one scrape has observed the post-fault state and a `rate()` query
 # has a real denominator (`rate()` needs two samples inside its lookback).
@@ -89,7 +89,7 @@ class LabReasonCode(StrEnum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     BASELINE_NOT_HEALTHY = "BASELINE_NOT_HEALTHY"
     FAULT_NOT_OBSERVED = "FAULT_NOT_OBSERVED"
-    # Unit 3b-4 addendum, C5. A stored JSON artifact (`incident.json`,
+    # A stored JSON artifact (`incident.json`,
     # `report.json`) exists but could not be turned back into the typed
     # record it is supposed to hold -- unreadable (permissions, a file
     # that vanished after an earlier existence check), not valid UTF-8, or
@@ -120,7 +120,7 @@ def run_paths(root: Path, incident_id: str) -> RunPaths:
 
 
 def validated_run_paths(root: Path, incident_id: str) -> RunPaths:
-    """Unit 3b-4 addendum, C1. Builds `incident_id`'s run directory path
+    """Builds `incident_id`'s run directory path
     only after confirming it cannot escape `runs_root(root)` -- the check
     `reset_scenario` below already had, extracted so a second caller
     (`cli.py`'s `run_investigate_command`) does not hand-copy the same two
@@ -178,11 +178,11 @@ def write_json(path: Path, value: object) -> None:
     """Writes `value` to `path` in one atomic replace, never a
     truncate-then-write in place.
 
-    Lab-defect-fix Unit 5, W12. `path.write_text` truncates before writing a
+    `path.write_text` truncates before writing a
     byte of the new content -- a concurrent reader (every lab service reads
     this same file on every request, each from its own thread) can observe a
     torn file: empty, or old bytes followed by new bytes, neither valid JSON.
-    Reproduced by this file's own concurrency test below. Mirrors
+    Reproduced directly by a real concurrency test. Mirrors
     `run_records.py`'s `write_jsonl`: build the complete content in a sibling
     temporary file first, then atomically rename it onto `path`
     (`Path.replace`, atomic on POSIX). A reader always sees either the
@@ -371,9 +371,9 @@ def _resolved_change_summary(
 ) -> str:
     """Render a config-carrying change entry's summary from the value the
     lab actually applied (`faulted_config`, after `apply_seed_variant`'s
-    overrides) -- Lab-defect-fix Unit 4, W9.
+    overrides).
 
-    Two distinct cases now diverge, where an earlier round of this fix
+    Two distinct cases diverge here, where an earlier version
     conflated them into one silent fallback:
 
     - An entry naming no `config_key` at all keeps its own static
@@ -383,8 +383,8 @@ def _resolved_change_summary(
     - An entry naming a `config_key` that is absent from `faulted_config`
       is almost certainly a scenario-authoring typo, not a legitimate
       no-config-value case -- falling back to static prose here would
-      silently recreate the exact stale-summary defect this unit exists
-      to fix, just triggered by a misspelled key instead of a missing
+      silently recreate the exact stale-summary defect this function
+      exists to fix, just triggered by a misspelled key instead of a missing
       resolution step. This raises `LabError(UNKNOWN_CONFIG_KEY, ...)`
       instead, so a typo fails scenario startup loudly rather than
       shipping a quietly wrong summary.
@@ -523,12 +523,12 @@ def start_scenario(
                 LabReasonCode.FAULT_NOT_OBSERVED,
                 f"{incident_id}: the fault produced no failing request",
             )
-        # Lab-defect-fix Unit 2, W3. Let telemetry settle before stamping
+        # Let telemetry settle before stamping
         # `window_end` -- see `SCRAPE_SETTLE_SECONDS`'s own comment for why.
         sleeper(SCRAPE_SETTLE_SECONDS)
         window_end = clock()
         write_manifests(paths, definition, window_end)
-        # Lab-defect-fix Unit 4, W10. `window_start` opens `WINDOW_LEAD_IN`
+        # `window_start` opens `WINDOW_LEAD_IN`
         # before the baseline phase even runs, so the alert's own window
         # covers baseline + fault, not fault alone -- `total_requests` must
         # count both. `healthy` is not folded into `failed_requests`: the

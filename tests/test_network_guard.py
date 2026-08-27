@@ -11,7 +11,7 @@ import pytest
 
 from network_guard import NetworkAccessRefused
 
-# P2-3's regression test starts here, not inside a test function: it proves
+# This regression test starts here, not inside a test function: it proves
 # the guard is active during COLLECTION (module import), not only once the
 # first test function starts running. Under the pre-fix autouse-fixture
 # form, this connect attempt -- which runs the moment this file is
@@ -31,7 +31,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _collection_time_probe
 
 
 def test_the_guard_is_active_during_collection_not_only_after_the_first_test() -> None:
-    """P2-3's regression test, continued: asserts on what the module-level
+    """This regression test, continued: asserts on what the module-level
     probe above captured at import time. Must be `NetworkAccessRefused`
     specifically, not merely "some exception" -- a real `TimeoutError` (the
     pre-fix result) would also make `_COLLECTION_TIME_RESULT` non-`None`,

@@ -83,7 +83,7 @@ class RunbookIndex:
 
     def __init__(self, corpus_path: Path = CORPUS_PATH) -> None:
         loaded = json.loads(corpus_path.read_text(encoding="utf-8"))
-        # Unit 3c. `corpus_version` is the JSON's own top-level key -- a
+        # `corpus_version` is the JSON's own top-level key -- a
         # string in `runbook_corpus.json` today (`"1"`), passed through
         # `str()` here (a no-op on an already-string value) to match every
         # other "_version" field in this codebase

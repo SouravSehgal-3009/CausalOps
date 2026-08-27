@@ -19,12 +19,12 @@ from causalops.evidence import (
 )
 
 
-# Kept for defense in depth alongside `evidence.py`'s own module-level
-# `assert` -- that assertion runs once at import time and would be stripped
-# under `python -O`; this test runs every time `pytest` does and cannot be
-# silently skipped by an interpreter flag. Unit 3a made the gap this guards
-# real: a `RunbookCheckOutcome` has no `kind` field (so nothing motivates a
-# new `EvidenceKind.RUNBOOK` member any more), but nothing stops a future
+# Kept for defense in depth alongside `evidence.py`'s own module-level `assert`
+# -- that assertion runs once at import time and would be stripped under
+# `python -O`; this test runs every time `pytest` does and cannot be silently
+# skipped by an interpreter flag. Runbook retrieval made the gap this guards
+# real: a `RunbookCheckOutcome` has no `kind` field (so nothing motivates a new
+# `EvidenceKind.RUNBOOK` member any more), but nothing stops a future
 # `EvidenceKind` addition from landing without a matching quota, and
 # `context_evidence()`'s `CONTEXT_QUOTAS[record.kind]` lookup below is
 # unguarded -- confirmed the only such lookup in `src/` during review.
@@ -137,7 +137,7 @@ def test_trim_to_bytes_pops_rows_and_keeps_the_count_field_in_sync() -> None:
 
 
 def test_trim_to_bytes_falls_back_to_shrinking_a_scalar_field() -> None:
-    """Unit 3b-4 addendum, C3. Before this fix, once `rows` reached zero the
+    """Before this fix, once `rows` reached zero the
     trimming loop stopped even if `fits(payload)` was still `False` --
     reproducing `run_changes_check`'s bug directly against `trim_to_bytes`
     itself, with no `RunPaths`/telemetry scaffolding needed: a single

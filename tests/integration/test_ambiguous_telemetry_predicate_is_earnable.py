@@ -1,11 +1,10 @@
-"""F5's new `ambiguous_telemetry` required-evidence predicates, against the
-real lab -- Lab-defect-fix Unit B, follow-up to `LAB_DEFECTS_FIX_PLAN.md`.
+"""`ambiguous_telemetry`'s required-evidence predicates, against the real lab.
 
 `tests/integration/test_incident_manifest_fidelity.py::
 test_ambiguous_telemetry_shows_both_fault_signals_under_the_evaluation_seed`
 already proves the underlying 5/5 `pool_exhausted`/`upstream_timeout` split
 exists in `logs/orders.jsonl` -- but it reads that file directly off disk,
-bypassing the `query_logs` tool backend entirely. F5's own predicates are
+bypassing the `query_logs` tool backend entirely. These predicates are
 satisfied only if an investigator can reach both event codes *through the
 registered tool call* (`run_logs_check`, the same backend the policy-wrapped
 `query_logs` tool ultimately dispatches to). This test proves that -- a

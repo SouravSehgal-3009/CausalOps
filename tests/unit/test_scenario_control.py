@@ -63,7 +63,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             scenarios / f"{family}.json",
         )
     monkeypatch.setattr(scenario_control, "REQUEST_PAUSE_SECONDS", 0.0)
-    # Lab-defect-fix Unit 2, W3. Same reason as `REQUEST_PAUSE_SECONDS`
+    # Same reason as `REQUEST_PAUSE_SECONDS`
     # above: every `start_scenario(...)` call in this file goes through
     # this fixture and uses the default (real) `sleeper`, which reads this
     # module-level constant fresh on every call -- zeroing it here keeps
@@ -220,7 +220,7 @@ def test_recorded_changes_fall_inside_the_recorded_window(project: Path) -> None
 def test_start_scenario_settles_before_stamping_window_end(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Lab-defect-fix Unit 2, W3. The `project` fixture zeroes
+    """The `project` fixture zeroes
     `SCRAPE_SETTLE_SECONDS` for every other test in this file (so the suite
     does not spend 12 real seconds per scenario start); this test restores
     the real constant and passes a recording `sleeper` explicitly instead,
@@ -255,7 +255,7 @@ def test_start_scenario_settles_before_stamping_window_end(
 def test_w9_change_summary_reflects_the_resolved_config_value(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Lab-defect-fix Unit 4, W9. Under the evaluation seed's override
+    """Under the evaluation seed's override
     (`pool_capacity` 9 -> 7 for `resource_pool_saturation`), the rendered
     change summary must state the value actually applied, not the
     scenario file's static prose -- which still says `9`, this family's
@@ -277,7 +277,7 @@ def test_w9_change_summary_reflects_the_resolved_config_value(
 def test_w9_a_change_entry_with_no_config_key_keeps_its_static_summary(
     project: Path,
 ) -> None:
-    """Lab-defect-fix Unit 4, W9. An entry naming no `config_key` (image
+    """An entry naming no `config_key` (image
     rebuilds, dependency bumps) has no resolved config value to render
     from and must keep its own static prose, unaffected by the fix."""
     incident_id = start_scenario(project, FAMILY, "development")
@@ -290,10 +290,10 @@ def test_w9_a_change_entry_with_no_config_key_keeps_its_static_summary(
 
 
 def test_a_change_entry_naming_an_unknown_config_key_raises() -> None:
-    """Lab-defect-fix Unit 4, Codex round. `_resolved_change_summary`'s
+    """`_resolved_change_summary`'s
     `config_key not in faulted_config` branch used to degrade silently to
     the entry's static `summary` text -- but that silent fallback can
-    recreate the exact stale-summary defect this unit exists to fix, just
+    recreate the exact stale-summary defect this function exists to fix, just
     triggered by a scenario-authoring typo instead of a missing
     resolution step. A declared-but-unmatched `config_key` must now raise
     `LabError(UNKNOWN_CONFIG_KEY, ...)` instead, so a typo fails scenario
@@ -319,7 +319,7 @@ def test_a_change_entry_naming_an_unknown_config_key_raises() -> None:
 
 
 def test_every_declared_config_key_resolves_in_its_own_faulted_config() -> None:
-    """Lab-defect-fix Unit 4, Codex round. A corpus-wide self-check: for
+    """A corpus-wide self-check: for
     every checked-in scenario file, under its base (un-seeded) config and
     every declared `seed_variants` entry, every change entry's declared
     `config_key` (when present) must actually resolve in the resulting
@@ -350,7 +350,7 @@ def test_every_declared_config_key_resolves_in_its_own_faulted_config() -> None:
 def test_w10_alert_total_requests_covers_the_whole_window(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Lab-defect-fix Unit 4, W10. `window_start` opens `WINDOW_LEAD_IN`
+    """`window_start` opens `WINDOW_LEAD_IN`
     before the healthy baseline phase even runs, so the alert's own
     window covers baseline *and* fault -- `total_requests` must count
     both, not just the fault phase `build_incident` used to be passed.
@@ -479,7 +479,7 @@ def _attempt_claim(
 
 
 def test_two_racing_claims_only_one_succeeds(tmp_path: Path) -> None:
-    """Both reviewers proved by hand, in ad-hoc scripts never committed to the
+    """Proved by hand, in ad-hoc scripts never committed to the
     suite, that `_claim_scenario` inside `_scenario_lock` correctly
     serializes two contenders racing for the same active-scenario slot via
     SQLite's `BEGIN IMMEDIATE`. This puts that proof in the shipped suite,
@@ -669,7 +669,7 @@ def test_apply_seed_variant_requires_matching_offset_and_change_counts() -> None
 def test_write_json_never_exposes_a_torn_read_under_concurrent_reads(
     tmp_path: Path,
 ) -> None:
-    """Lab-defect-fix Unit 5, W12. Real threads, no mocked timing: a
+    """Real threads, no mocked timing: a
     concurrent reader must never observe a torn `write_json` -- neither an
     empty file, invalid JSON, nor a value that is not exactly one of the two
     payloads being written. Measured against the pre-fix `write_text`-based

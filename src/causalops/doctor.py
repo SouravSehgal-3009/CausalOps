@@ -65,9 +65,9 @@ class ProjectPaths(BaseModel):
 
     @property
     def checkpoints_db(self) -> Path:
-        """`cli.py` spelled this path independently at two call sites
-        (`_sqlite_checkpointer`'s caller and `run_decision_command`) before
-        Unit 2d, with no shared name to keep them from drifting apart. One
+        """`cli.py` used to spell this path independently at two call sites
+        (`_sqlite_checkpointer`'s caller and `run_decision_command`),
+        with no shared name to keep them from drifting apart. One
         accessor here, next to `runs`/`results` above."""
         return self.results / "checkpoints.db"
 
@@ -282,7 +282,7 @@ def check_checkpoint_database(paths: ProjectPaths) -> CheckResult:
     and `causalops approve`/`reject` both open -- is a database this machine
     can actually read.
 
-    Unit 2d. Distinct from `check_writable_directories` above: that check
+    Distinct from `check_writable_directories` above: that check
     proves `results/` accepts a *new* file; it says nothing about whether an
     *existing* `checkpoints.db` is readable, locked, or corrupt. It is also
     the one thing `cli.py`'s own connection-open translation cannot catch --
@@ -367,7 +367,7 @@ def check_api_key(environment: Mapping[str, str]) -> CheckResult:
         )
     return CheckResult(
         name="api_key",
-        # Unit 3b-2, owner-ruled: FAIL -> WARN. `replay` runs entirely
+        # A warning, not a hard failure: `replay` runs entirely
         # without this key -- `causalops investigate --model replay` was
         # never actually blocked by its absence, so treating it as a hard
         # `doctor` failure overstated what was wrong. It is still surfaced,

@@ -257,8 +257,8 @@ def test_the_loop_guard_skips_a_second_turn_once_the_check_budget_is_spent(
 def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report() -> (
     None
 ):
-    """The graph-level demonstration of the fix for the hazard the pre-edit
-    report raised: a crash inside `dispatch_tool` must not lose the
+    """The graph-level demonstration of the fix for a real hazard: a crash
+    inside `dispatch_tool` must not lose the
     `RESERVED` receipt `ReservationLedger.reserve()` already wrote, the way
     it would if the crash were left to propagate out of `invoke()` instead
     of being caught inside the node. Mirrors
@@ -301,7 +301,7 @@ def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report
 
 
 def test_a_real_crashed_receipt_scores_as_unsettled() -> None:
-    """`ControlCounts.unsettled` (Unit 2d) closes the gap the test above
+    """`ControlCounts.unsettled` closes the gap the test above
     demonstrates at the receipt level -- this scores the *same kind* of
     crash-produced report through the real scorer, not a hand-built
     `ToolReceipt` fixture (`test_evaluation.py`'s own `unsettled` tests use
@@ -330,8 +330,8 @@ def test_an_unwrapped_tool_proposal_is_refused_before_a_backend_is_reached(
     registered-but-unwrapped tool must not reach any backend --
     `dispatch_tool` looks the tool up inside the same `try` that calls the
     wrapper, so a missing entry is contained exactly like a backend crash.
-    Milestone 2's `search_runbooks` will be exactly this shape again before
-    it, too, gets a wrapper."""
+    A newly-registered tool with no wrapper yet would be exactly this shape
+    again, until it too gets one."""
     script = {
         "initial_plan": [plan_json(proposal=metric_proposal())],
         "final_assessment": [assessment_json()],
@@ -425,8 +425,8 @@ def test_a_denied_proposal_never_reaches_the_backend_through_the_graph(
 def test_a_duplicate_denial_still_leaves_the_investigation_its_second_check(
     tmp_path: Path,
 ) -> None:
-    """P1-1's original regression test, superseded by lab-defect-fix Unit 3
-    (W1/Q2): the now-retired `workflow.py`'s loop called `plan_second_check()`
+    """The original regression test for this behavior, superseded by a
+    later fix: the now-retired `workflow.py`'s loop called `plan_second_check()`
     at most once, from `run()`, regardless of whether the second proposal
     was allowed or denied -- there was no third ask. `route_after_normalize`
     reproduced that with a `model_turn < 2` cap, which meant a *denied*
@@ -435,7 +435,7 @@ def test_a_duplicate_denial_still_leaves_the_investigation_its_second_check(
     first-ever proposal was denied and which never got another chance at
     any evidence at all.
 
-    Unit 3 drops the `< 2` term (Q2): a denial does not spend a check slot
+    That `< 2` term was dropped: a denial does not spend a check slot
     (`ReservationLedger.slots_left()`), so as long as budget remains the
     graph now asks a further `HYPOTHESIS_UPDATE` turn after a denial rather
     than stopping. This test's own point flips with it: instead of proving
@@ -536,7 +536,7 @@ def test_two_denied_first_proposals_still_leave_the_model_a_third_chance_to_chec
 def test_a_turn_0_denial_s_guidance_still_appears_in_a_later_turn(
     tmp_path: Path,
 ) -> None:
-    """Fix F2. Every context render is stateless, with no conversation
+    """Every context render is stateless, with no conversation
     history -- a proposal denied on turn 0 must still show up as a
     `## Denied checks` note on turn 1's own render, or the model has no
     way to learn why its own first proposal produced no evidence.
@@ -638,15 +638,14 @@ def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
 
 
 def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) -> None:
-    """W11 (lab-defect-fix Unit 1). `investigate` writes its
-    `proposal_recorded` event regardless of what `dispatch_tool` later does
-    with the proposal -- a denial's hypotheses, evidence gap, and expected
-    observation must survive even though the check itself never ran. Before
-    this unit a denied turn's reasoning simply vanished, which is precisely
-    how the tool-selection-bias investigation's W1 defect (an incident-
-    window denial costing a run its own proposal, with no evidence-check
-    slot spent to show for it) stayed invisible in `events.jsonl` until a
-    fresh live reproduction was run to find it."""
+    """`investigate` writes its `proposal_recorded` event regardless of what
+    `dispatch_tool` later does with the proposal -- a denial's hypotheses,
+    evidence gap, and expected observation must survive even though the check
+    itself never ran. Before this existed a denied turn's reasoning simply
+    vanished, which is precisely how a real defect (an incident-window denial
+    costing a run its own proposal, with no evidence-check slot spent to show
+    for it) stayed invisible in `events.jsonl` until a fresh live reproduction
+    was run to find it."""
     out_of_scope = ToolProposal(
         arguments=QueryLogsArguments(
             log_filter=LogFilter.ERRORS_ONLY,
@@ -683,8 +682,7 @@ def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) 
     assert first.fields["arguments"] is not None
     assert len(first.fields["hypotheses"]) >= 2
     # A stop-reason turn still has ranked hypotheses to record, but no
-    # proposal-specific fields -- the deliberate scope call from this unit's
-    # pre-edit report.
+    # proposal-specific fields -- a deliberate scope call, not an oversight.
     assert second.fields["proposal_turn"] == 1
     assert second.fields["tool"] is None
     assert second.fields["evidence_gap"] is None
@@ -702,7 +700,7 @@ def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) 
 def test_investigates_own_proposal_turn_matches_dispatch_tools_check_finished_event(
     tmp_path: Path,
 ) -> None:
-    """The plan's own specified acceptance test for the canonical
+    """The specified acceptance test for the canonical
     `proposal_turn` convention: for a run with two proposals, each
     `investigate` turn's own `proposal_recorded.proposal_turn` equals the
     `proposal_turn` on the `check_finished` event `dispatch_tool` emits for
@@ -741,14 +739,13 @@ def test_investigates_own_proposal_turn_matches_dispatch_tools_check_finished_ev
 
 
 def test_rebuild_receipts_raises_on_an_incident_id_mismatch() -> None:
-    """W16 (lab-defect-fix Unit 1). A receipt dump reconstructed from a
+    """A receipt dump reconstructed from a
     corrupted checkpoint whose `incident_id` disagrees with the thread's own
     `state["incident_id"]` must raise loudly, never be silently dropped -- a
-    dropped receipt would hand back a check slot that was actually spent.
-    Not a reachable cross-incident leak on any live/replay/resume path
-    (`LAB_DEFECTS_FIX_PLAN.md` §2.2 traces why: `thread_id` *is* the
-    `incident_id`, and every receipt this codebase produces is stamped from
-    that same thread's own state at reserve/deny time) -- this proves the
+    dropped receipt would hand back a check slot that was actually spent. Not a
+    reachable cross-incident leak on any live/replay/resume path (`thread_id`
+    *is* the `incident_id`, and every receipt this codebase produces is stamped
+    from that same thread's own state at reserve/deny time) -- this proves the
     tripwire itself, using a hand-corrupted state dict no real path can
     produce."""
     mismatched_receipt = ToolReceipt(
@@ -820,7 +817,7 @@ class _RaisingModel:
 
 
 def test_a_crashing_model_still_reports_the_spent_call() -> None:
-    """P1-2's regression test. `investigate`'s `ask_once` calls
+    """`investigate`'s `ask_once` calls
     `counters.record_call` *before* `model.propose`, so a raising model must
     still leave `model_calls_used == 1` in the final report, not 0 -- the
     call was spent even though it never returned. Before the fix, this
@@ -847,7 +844,7 @@ def test_a_crashing_model_still_reports_the_spent_call() -> None:
 
 
 def test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash() -> None:
-    """P2-2's regression test. `NetworkAccessRefused` (`network_guard.py`)
+    """`NetworkAccessRefused` (`network_guard.py`)
     subclasses `BaseException`, not `Exception`, precisely so a guard
     violation raised from inside `model.propose()` is NOT caught by
     `investigate`'s blanket `except Exception:` -- unlike an ordinary crash
@@ -870,7 +867,7 @@ def test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash() -
 
 
 def test_a_cost_ceiling_refusal_reports_its_own_reason_not_internal_error() -> None:
-    """Unit 3b-2. `graph.py`'s `investigate` node catches `CostCeilingExceeded`
+    """`graph.py`'s `investigate` node catches `CostCeilingExceeded`
     ahead of its blanket `except Exception:`, the same "specific, actionable
     reason before the generic catch-all" shape
     `test_a_network_guard_violation_escapes_uncaught_unlike_an_ordinary_crash`
@@ -929,8 +926,8 @@ def _sample_cost_ledger_row(state: str) -> CostLedgerRow:
 
 
 def test_an_ambiguous_reservation_refusal_reports_its_own_reason() -> None:
-    """Post-freeze review, P2-2. `AmbiguousReservationNotResent`
-    (`cost_ledger.py`, Unit 3b-4 addendum's Group B) is the third
+    """`AmbiguousReservationNotResent`
+    (`cost_ledger.py`) is the third
     refuse-before/instead-of-sending exception `live_model.py`'s `_send`
     can raise, alongside `CostCeilingExceeded`/`InputTooLarge` above --
     same shape, same `graph.py` except-tuple, previously with zero test
@@ -954,10 +951,10 @@ class _RaisesOnlyOnFinalAssessment:
     """Wraps a real `ReplayToolCallingModel`, forwarding every `propose`
     call unchanged (so INVESTIGATE proceeds normally, and completes, all
     the way to FINAL_ASSESSMENT) but raising on `respond` -- the only way
-    to reach P2-2's FINAL_ASSESSMENT-specific exception-tuple catch
+    to reach the FINAL_ASSESSMENT-specific exception-tuple catch
     (`graph.py`'s `final_assessment` node, `except (CostCeilingExceeded,
-    InputTooLarge, AmbiguousReservationNotResent)` as of the Unit 3b-4
-    addendum). `_RaisingModel` above cannot reach that code path: it
+    InputTooLarge, AmbiguousReservationNotResent)`). `_RaisingModel` above
+    cannot reach that code path: it
     raises on `propose` too, so the run never gets past INVESTIGATE's own
     turn 0 to reach FINAL_ASSESSMENT at all."""
 
@@ -973,7 +970,7 @@ class _RaisesOnlyOnFinalAssessment:
 
 
 def test_a_cost_ceiling_refusal_at_final_assessment_reports_its_own_reason() -> None:
-    """P2-2's regression test. Mutation-proven: changing `final_assessment`'s
+    """Mutation-proven: changing `final_assessment`'s
     `except (CostCeilingExceeded, InputTooLarge)` tuple to
     `(ZeroDivisionError,)` left the full suite green before this test
     existed -- the INVESTIGATE-side test above cannot catch that mutation,
@@ -996,7 +993,7 @@ def test_a_cost_ceiling_refusal_at_final_assessment_reports_its_own_reason() -> 
 def test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason() -> (
     None
 ):
-    """Post-freeze review, P2-2, the FINAL_ASSESSMENT-side sibling of
+    """The FINAL_ASSESSMENT-side sibling of
     `test_an_ambiguous_reservation_refusal_reports_its_own_reason` above --
     same reasoning as the cost-ceiling pair: the INVESTIGATE-side test
     alone cannot exercise `final_assessment`'s own
@@ -1018,7 +1015,7 @@ def test_an_ambiguous_reservation_refusal_at_final_assessment_reports_its_reason
 
 
 def test_money_refusal_reason_code_maps_all_three_and_raises_on_a_fourth() -> None:
-    """Post-freeze review, P3-5. Direct unit coverage of
+    """Direct unit coverage of
     `_money_refusal_reason_code` itself, not just the graph-level behaviour
     the tests above already prove -- the two tests above only ever pass one
     of the three known refusal types, so neither could catch the bare
@@ -1126,8 +1123,8 @@ def test_a_malformed_single_tool_call_consumes_a_repair_then_fail_safe(
     enum value or over-length rationale field would. Proves `ask_once`
     routes that failure through the ordinary repair-then-fail-safe path
     instead of crashing -- reverting `graph.py`'s `if proposal is None:
-    return None, reason` back to `raise AssertionError(reason)` (the
-    pre-3b-1 behaviour) must fail this test, since that reversion is
+    return None, reason` back to `raise AssertionError(reason)` (an
+    earlier, stricter behaviour) must fail this test, since that reversion is
     exactly what it exists to catch."""
     scripted = plan_json(proposal=logs_proposal())
     inner = ReplayToolCallingModel(
@@ -1154,22 +1151,20 @@ def test_a_graphbubbleup_escape_still_syncs_the_callers_recorder() -> None:
     holding nothing at all: the seed event goes to `seed_recorder`, not
     `recorder`, and every node's own events live only in state.
 
-    This branch is **not** where Milestone 2b's pause lands, and this test
-    must not be read as proving it is -- confirmed twice, independently
-    (once while planning Milestone 2, once by this unit's correctness
-    review), against the installed LangGraph: a real `interrupt()` call does
-    not make `.invoke()` raise. The Pregel loop catches `GraphInterrupt`
-    itself and `.invoke()` returns *normally*, with an `__interrupt__` key
-    in the output, so 2b's pause handling has to be written against that
+    This branch is **not** where an ordinary interrupt-triggered pause lands,
+    and this test must not be read as proving it is -- confirmed twice,
+    independently, against the installed LangGraph: a real `interrupt()` call
+    does not make `.invoke()` raise. The Pregel loop catches `GraphInterrupt`
+    itself and `.invoke()` returns *normally*, with an `__interrupt__` key in
+    the output, so an ordinary pause's handling has to be written against that
     normal return, not this `except`. What this branch actually guards is a
     `GraphBubbleUp` that genuinely escapes `.invoke()` uncaught -- this
-    codebase does not build anything that raises one today, so it is
-    presently unreached in production, but the three `except GraphBubbleUp:
-    raise` guards inside `investigate`/`dispatch_tool`/`final_assessment`
-    (one per node, not counting this function's own outer handler below,
-    which is the branch this test exercises) exist so that if one ever
-    does, it is not swallowed by those nodes' own blanket
-    `except Exception:` and misreported as a crash.
+    codebase does not build anything that raises one today, so it is presently
+    unreached in production, but the three `except GraphBubbleUp: raise` guards
+    inside `investigate`/`dispatch_tool`/`final_assessment` (one per node, not
+    counting this function's own outer handler below, which is the branch this
+    test exercises) exist so that if one ever does, it is not swallowed by
+    those nodes' own blanket `except Exception:` and misreported as a crash.
 
     A raw `GraphBubbleUp`, raised directly from a node below rather than via
     `interrupt()`, is a faithful stand-in for that escape: confirmed against
@@ -1211,7 +1206,7 @@ def test_a_checkpoint_read_failure_does_not_replace_the_graphbubbleup_signal(
     against a malformed or partial checkpoint. Any of those replacing the
     original `GraphBubbleUp` would turn a pause or a parent command into an
     unhandled database error `main` cannot format into `FAIL <CODE>
-    <message>` -- confirmed missing by a reviewer's mutation that narrowed
+    <message>` -- confirmed missing by a mutation that narrowed
     the guard to `except ZeroDivisionError:` and found the exact same 316
     tests green either way, since nothing before this test could see the
     difference.
@@ -1249,7 +1244,7 @@ def test_a_checkpoint_read_failure_does_not_replace_the_graphbubbleup_signal(
     assert caught.value.__context__ is None
 
 
-# --- Unit 1d-1/1d-2: behaviours `graph.py` already implements but that, until
+# --- Behaviours `graph.py` already implements but that, until
 # now, only `test_workflow.py` proved. Each port below asserts the same
 # *property* its loop original does, not a copied-over literal, since the two
 # orchestrators' numbers can legitimately differ (see `_build_report`'s two
@@ -1260,7 +1255,7 @@ def test_a_checkpoint_read_failure_does_not_replace_the_graphbubbleup_signal(
 # orchestrator-independent: a stage-response script with no `{{...}}`
 # placeholders, so the exact same checked-in file `test_workflow.py` used
 # works for the graph too. `workflow.py` and `test_workflow.py` were deleted
-# in Unit 1d-2, once every behaviour they alone proved had a port here.
+# once every behaviour they alone proved had a port here.
 
 
 def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
@@ -1271,7 +1266,7 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
     propose -- an abstention that still spent the model call the denied
     proposal used.
 
-    Unit 2b: an abstention with an unspent check slot (nothing was executed,
+    An abstention with an unspent check slot (nothing was executed,
     so the full budget remains) is exactly `INSUFFICIENT_EVIDENCE_WITH_
     CHECK_REMAINING`, so this scenario now pauses rather than reaching
     `final_report` directly. The receipt/backend assertions below are
@@ -1300,14 +1295,14 @@ def test_a_denied_proposal_costs_a_model_call_but_no_check_slot() -> None:
 def test_a_scored_run_suppresses_escalation_while_an_ordinary_run_still_escalates() -> (
     None
 ):
-    """Unit 3c's mandatory confinement test. `service_out_of_scope.json`
+    """The mandatory confinement test for scored runs. `service_out_of_scope.json`
     denies its own proposal and abstains with a check slot still open --
     `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`, the same trigger
     `test_a_denied_proposal_costs_a_model_call_but_no_check_slot` above
     already proves fires under this exact fixture. Run twice, unmodified
     except for one flag: an ORDINARY run (the default,
     `suppress_escalation=False`) must still pause exactly as it did before
-    this unit -- proving the flag's absence changes nothing -- while a
+    this flag existed -- proving the flag's absence changes nothing -- while a
     SCORED run (`suppress_escalation=True`) on the identical
     fixture/registry shape must reach a terminal report with no escalation
     recorded at all. Both assertions live in one test because the claim is
@@ -1336,7 +1331,7 @@ def test_a_scored_run_suppresses_escalation_while_an_ordinary_run_still_escalate
 
 
 def test_a_no_tool_baseline_never_offers_a_domain_tool() -> None:
-    """Unit 3c's no-tool baseline: `build_graph(no_tool_baseline=True)`
+    """The no-tool baseline: `build_graph(no_tool_baseline=True)`
     never adds the `investigate`/`dispatch_tool`/`normalize_evidence` nodes
     at all, so the model must never receive an `INITIAL_PLAN` or
     `HYPOTHESIS_UPDATE` request -- only the one `FINAL_ASSESSMENT`
@@ -1390,7 +1385,7 @@ def test_a_scripted_abstention_stops_early_and_abstains() -> None:
     ported: `correct_abstention.json` proposes one `query_metric` check, then
     stops and abstains rather than diagnosing.
 
-    Unit 2b: one executed check out of a two-check budget still leaves a
+    One executed check out of a two-check budget still leaves a
     slot open, so this abstention is also `INSUFFICIENT_EVIDENCE_WITH_
     CHECK_REMAINING` and now pauses instead of finalizing -- see the sibling
     test above for the same change on a zero-executed-checks abstention."""
@@ -1440,7 +1435,7 @@ def test_a_repair_tells_the_model_what_was_wrong() -> None:
 
 def test_a_run_with_no_repair_budget_stops_at_the_first_invalid_response() -> None:
     """`test_workflow.py::test_a_run_with_no_repair_budget_stops_at_the_first_invalid_response`,
-    ported. Also covers Unit 2a's `investigate`'s `stopped_state` -- its
+    ported. Also covers `investigate`'s `stopped_state` -- its
     return is the one that carries `stage_stopped`/`invalid_response` into
     state, and no other test in this file asserts on events recorded along
     that specific return path, so a missing `"events"` key there would not
@@ -1504,7 +1499,7 @@ def test_a_naive_window_from_the_model_still_produces_a_report(tmp_path: Path) -
 
 def test_a_cited_evidence_id_that_does_not_exist_fails_safe() -> None:
     """`test_workflow.py::test_a_cited_evidence_id_that_does_not_exist_fails_safe`,
-    ported. Also covers Unit 2a's `final_assessment`'s `failed_state` -- its
+    ported. Also covers `final_assessment`'s `failed_state` -- its
     return is the one that carries `forged_citation` into state, and no
     other test in this file asserts on events recorded along that specific
     return path, so a missing `"events"` key there would not otherwise be
@@ -1560,7 +1555,7 @@ def test_citing_a_real_same_incident_id_as_contrary_reaches_its_terminal_disposi
     above: a real, same-incident evidence id cited as contrary is not a
     forgery.
 
-    Unit 2b: this scenario also happens to satisfy two escalation triggers
+    This scenario also happens to satisfy two escalation triggers
     at once (an abstention with a full, unspent check budget, and a
     non-empty `contrary_evidence_ids`), so it now pauses rather than
     reaching `final_report`. That pause is itself still the proof this test
@@ -1599,14 +1594,13 @@ def test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output(
     tmp_path: Path,
 ) -> None:
     """`test_workflow.py::test_a_forged_id_in_a_hypothesis_citation_never_reaches_later_output`,
-    ported, then narrowed by lab-defect-fix Unit 1 (W11). A hypothesis
+    ported, then narrowed once hypotheses became persisted data. A hypothesis
     citation is never validated against the evidence store, so a forged id
     inside a hypothesis's own `supporting_evidence_ids`/`contrary_evidence_ids`
     must still never reach later model context or the final report -- those
     two assertions are unchanged from the port.
 
-    What changed under Unit 1, deliberately (owner decision Q3,
-    `LAB_DEFECTS_FIX_PLAN.md` §5): every turn's ranked hypotheses -- forged
+    What changed, deliberately: every turn's ranked hypotheses -- forged
     citations and all, since `Hypothesis` carries no separate sanitized
     projection -- are now persisted verbatim into that turn's own
     `proposal_recorded` event, as declared typed data the model submitted
@@ -1825,7 +1819,7 @@ def test_a_settle_then_crash_still_carries_evidence_into_the_final_graph_report(
 def test_events_stay_continuous_across_a_second_dispatch_and_normalize_pass(
     tmp_path: Path,
 ) -> None:
-    """Unit 2a moved every node's events into `state["events"]`: each node
+    """Every node's events live in `state["events"]`: each node
     rebuilds a local recorder from that list, records its own events into
     the copy, and must return the full extended list on every one of its
     return paths, or that node's events vanish from state the moment the
@@ -1858,10 +1852,10 @@ def test_events_stay_continuous_across_a_second_dispatch_and_normalize_pass(
     )
 
 
-# --- Unit 2b: the escalation interrupt. `_escalate` runs a scripted scenario
+# --- The escalation interrupt. `_escalate` runs a scripted scenario
 # to its first pause and hands back everything a test needs to resume it
 # directly against the raw LangGraph API -- `run_graph_investigation` has no
-# resume parameter of its own (see its own docstring for why: 2b's approved
+# resume parameter of its own (see its own docstring for why: the approved
 # boundary is graph-level resume driven from tests, not a second production
 # entry point), so every resume below goes through `Command(resume=...)`
 # against a `compiled` graph and `config` this helper already built with the
@@ -2075,7 +2069,7 @@ def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
     not None: return "final_report"` guard). Forcing that state here would
     mean fabricating a receipt shape the graph itself cannot produce.
 
-    Lab-defect-fix Unit 3/Q2: turn 0's denial spends no check slot, so with
+    Turn 0's denial spends no check slot, so with
     the `model_turn < 2` cap removed, one allowed check at turn 1 still
     leaves both a check slot and model-call headroom, and the graph asks a
     third `HYPOTHESIS_UPDATE` turn rather than going straight to
@@ -2121,8 +2115,8 @@ def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
 def test_a_zero_passage_runbook_search_triggers_retrieval_coverage_insufficient(
     tmp_path: Path,
 ) -> None:
-    """`TECHNICAL_SPEC.md` §8's fourth trigger, reachable for the first time
-    in Unit 3a. A `search_runbooks` call that is allowed and settles but
+    """`TECHNICAL_SPEC.md` §8's fourth trigger.
+    A `search_runbooks` call that is allowed and settles but
     returns zero passages must pause the run even though the diagnosis
     itself is otherwise ordinary -- `DIAGNOSED`, no contrary citations, no
     remaining-budget abstention -- isolating this trigger from the other
@@ -2230,17 +2224,16 @@ def test_a_non_empty_runbook_search_does_not_escalate(tmp_path: Path) -> None:
 def test_an_unresolved_runbook_citation_is_a_limitation_not_a_failure(
     tmp_path: Path,
 ) -> None:
-    """Owner-approved redesign of this unit's original pre-edit proposal:
-    both reviewers rejected routing a forged runbook citation through
-    `ReasonCode.FORGED_EVIDENCE_REFERENCE`, because that reason nulls the
-    assessment (`final_assessment`'s own `failed_state`) and would turn a
-    correct, fully evidence-backed diagnosis into `FAILED_SAFE` over a
-    citation that cannot affect whether the diagnosis is right --
-    `evaluation.py`'s `diagnosis_correct` reads only `report.root_cause`.
-    A model that cites a `passage_id` this run never actually retrieved
-    (a hallucinated reference, not the real evidence-forgery threat) must
-    still reach `DIAGNOSED`, with the gap named in `limitations` instead --
-    and, per review, in the audit trail too: `final_report`'s own
+    """A deliberate design choice, not the naive one: routing a forged
+    runbook citation through `ReasonCode.FORGED_EVIDENCE_REFERENCE` was
+    rejected, because that reason nulls the assessment (`final_assessment`'s
+    own `failed_state`) and would turn a correct, fully evidence-backed
+    diagnosis into `FAILED_SAFE` over a citation that cannot affect whether the
+    diagnosis is right -- `evaluation.py`'s `diagnosis_correct` reads only
+    `report.root_cause`. A model that cites a `passage_id` this run never
+    actually retrieved (a hallucinated reference, not the real evidence-forgery
+    threat) must still reach `DIAGNOSED`, with the gap named in `limitations`
+    instead -- and in the audit trail too: `final_report`'s own
     `runbook_citation_unresolved` event, with its count, not just the
     owner-readable limitation text."""
     script = {
@@ -2328,12 +2321,12 @@ def test_a_genuinely_retrieved_citation_is_not_flagged_as_unresolved(
 def test_resuming_does_not_repeat_the_model_call_the_pause_already_spent(
     tmp_path: Path,
 ) -> None:
-    """A probe against the installed LangGraph (recorded in this unit's
-    pre-edit report) showed only the interrupted node re-running on
-    resume, not the whole graph. This is the operationally meaningful form
-    of that claim: `final_assessment` -- the node whose model call produced
-    the assessment `escalation_interrupt` is now pausing on -- must not run
-    a second time and spend a second model call when the pause resumes."""
+    """A probe against the installed LangGraph showed only the interrupted node
+    re-running on resume, not the whole graph. This is the operationally
+    meaningful form of that claim: `final_assessment` -- the node whose model
+    call produced the assessment `escalation_interrupt` is now pausing on --
+    must not run a second time and spend a second model call when the pause
+    resumes."""
     script = {
         "initial_plan": [plan_json(stop_reason="the alert is enough")],
         "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
@@ -2416,12 +2409,12 @@ def test_rejecting_an_escalation_keeps_the_assessment_and_records_reject(
 def test_an_unrecognised_resume_decision_re_pauses_instead_of_bricking_the_run(
     tmp_path: Path,
 ) -> None:
-    """A reviewer reproduced this against a real `SqliteSaver`: an earlier
+    """Reproduced directly against a real `SqliteSaver`: an earlier
     version of this node raised on a bad decision, and because LangGraph
     persists a resume value against the interrupt id and replays it on
     every later resume of that same interrupt, the raise recurred on every
     subsequent attempt -- a typo permanently bricked the thread, with no
-    finalized artifact either, since 2b never finalizes on pause. The fix
+    finalized artifact either, since a paused run never finalizes. The fix
     is to re-interrupt instead of raising, so the recovery this test
     proves is the property that actually matters: a bad decision re-pauses
     the same thread, and a later valid decision still settles it.
@@ -2430,10 +2423,10 @@ def test_an_unrecognised_resume_decision_re_pauses_instead_of_bricking_the_run(
     `while decision not in (...): decision = interrupt(...)` apart from
     `if decision not in (...): decision = interrupt(...)` -- both handle
     exactly one retry. Only a second consecutive bad resume distinguishes
-    them, and a reviewer measured the `if` variant failing that second
+    them, and direct measurement showed the `if` variant failing that second
     resume with a bare `AssertionError` out of `_build_report`, no report,
     no recoverable artifact -- the exact bricking class this fix exists to
-    prevent, and the class 2c's real owner input will hit routinely, since
+    prevent, and the class real owner input will hit routinely, since
     two typos in a row is ordinary."""
     script = {
         "initial_plan": [plan_json(stop_reason="the alert is enough")],
@@ -2458,12 +2451,12 @@ def test_an_unrecognised_resume_decision_re_pauses_instead_of_bricking_the_run(
 def test_a_bare_accept_string_re_pauses_under_the_unit_2c_resume_contract(
     tmp_path: Path,
 ) -> None:
-    """Unit 2c changes what a *valid* resume value looks like: a mapping
+    """A *valid* resume value is a mapping
     with `decision`/`rejection_note` keys, not a bare string. A plain
-    `Command(resume="accept")` -- exactly what settled every escalation
-    test before this unit -- must now re-pause instead of settling, the
-    same way a typo does. `resume_graph_run` (this file's own helper)
-    already sends the compound shape; this test proves the *old* shape is
+    `Command(resume="accept")` -- exactly what settled every escalation test
+    before this contract existed -- must now re-pause instead of settling, the
+    same way a typo does. `resume_graph_run` (this file's own helper) already
+    sends the compound shape; this test proves the *old* shape is
     rejected, which nothing else in this suite checks directly."""
     script = {
         "initial_plan": [plan_json(stop_reason="the alert is enough")],
@@ -2511,7 +2504,7 @@ def test_an_accept_carrying_a_rejection_note_re_pauses(tmp_path: Path) -> None:
 
 
 def test_a_whitespace_only_rejection_note_re_pauses(tmp_path: Path) -> None:
-    """The exact reproduction a reviewer measured: `{"decision": "reject",
+    """The exact reproduction measured directly: `{"decision": "reject",
     "rejection_note": "   "}` must not settle with a whitespace-only note
     -- `_parse_resume_decision` strips before the emptiness check, the same
     normalization `causalops.approvals.OwnerDecision` already applies at

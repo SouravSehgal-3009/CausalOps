@@ -60,21 +60,21 @@ from causalops.scenario_control import (
 from causalops.system_probe import SystemProbe
 from causalops.telemetry import RunPaths
 
-# Unit 3b-2 builds the live adapter but deliberately not this specific
+# The live adapter deliberately does not add this specific
 # check: the authenticated `GET /v1/models/claude-sonnet-5` metadata request
 # `TECHNICAL_OVERVIEW.md`'s "Tests specified for the live Claude adapter"
 # section describes is a second, routine network call from a command
 # (`doctor`) an owner runs far more casually than `investigate --model
 # claude` -- adding it here would give this project a second, easy-to-trip
-# path to the network beyond the one deliberate smoke call 3b-2 exists to
-# make safe. Deferred, not forgotten; not yet scheduled to a specific unit.
+# path to the network beyond the one deliberate smoke call the live adapter
+# exists to make safe. Deferred, not forgotten.
 MODEL_CHECK_NOTE = (
     "Not checked: causalops doctor never calls the network. The "
     "authenticated claude-sonnet-5 metadata request is deliberately not "
     "part of any command yet."
 )
 
-# Unit 2b. `0` already means success and `1` already means `FAILED_SAFE`/a
+# `0` already means success and `1` already means `FAILED_SAFE`/a
 # `LabError`/`RunRecordError` refusal (see `main`'s `except` clause below);
 # `argparse` itself exits `2` on a usage error before `main`'s own body ever
 # runs. An escalated, paused investigation is none of those three, so it
@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         "investigate", help="Investigate one opaque incident ID."
     )
     investigation.add_argument("incident_id")
-    # Unit 3b-2. No default, still `required=True`: a live run is never
+    # No default, still `required=True`: a live run is never
     # accidental. `"claude"` is a CLI-facing dispatch keyword, not the real
     # model name -- `live_setup.build_model_and_registry` maps it to
     # `live_model.MODEL_NAME` ("claude-sonnet-5") for the report/artifact
@@ -209,7 +209,7 @@ def _sqlite_checkpointer(db_path: Path) -> Iterator[SqliteSaver]:
     doesn't expose a `serde` parameter, so the connection is opened directly,
     matching what that classmethod does internally.
 
-    Unit 2d: the `mkdir`/`connect` pair below is wrapped so a locked, full,
+    The `mkdir`/`connect` pair below is wrapped so a locked, full,
     missing-parent, or permission-denied database surfaces as `FAIL
     STORE_UNAVAILABLE <message>` (`main`'s contract) instead of a raw
     traceback -- measured against a read-only `results/` directory, where
@@ -277,7 +277,7 @@ def _write_investigation_artifacts(
 ) -> Path:
     """Finalizes one settled investigation's artifacts -- shared by
     `run_investigate_command` (a fresh settle) and `run_decision_command`
-    (Unit 2c's approve/reject settle), so this write happens in exactly one
+    (an approve/reject settle), so this write happens in exactly one
     place regardless of which command produced the terminal result."""
     return finalize_investigation(
         root / "results",
@@ -306,7 +306,7 @@ def _load_stored_artifact[Artifact: BaseModel](
     this project's `FAIL <REASON_CODE> <message>` contract instead of a
     raw traceback.
 
-    Unit 3b-4 addendum, C5. Three call sites used to call `read_text()`
+    Three call sites used to call `read_text()`
     and `model_validate_json()` back to back with nothing catching what
     either could raise: a missing or permission-denied file (`OSError`,
     `FileNotFoundError` included), invalid UTF-8 (`UnicodeDecodeError`),
@@ -353,19 +353,18 @@ def _load_verified_incident(
     `run_investigate_command` and `run_decision_command` need before they
     can touch `runs/<incident_id>/incident.json` at all.
 
-    Post-freeze review, P2-3. `run_decision_command` (the resume path)
+    `run_decision_command` (the resume path)
     used to build `RunPaths` directly from `incident_id`, with neither
-    `validated_run_paths`'s path-escape check (C1, above) nor the
-    identity check below -- both landed on `run_investigate_command` only
-    in the round that fixed C1, the exact instance-not-class scoping error
-    this whole investigation exists to close, found again in the round
-    specifically meant to close that class. Resuming is arguably
+    `validated_run_paths`'s path-escape check (see below) nor the
+    identity check below -- both landed on `run_investigate_command` only,
+    the same instance-not-class scoping mistake found again even in the
+    very fix meant to close that class of mistake. Resuming is arguably
     higher-stakes than starting fresh: its `incident.scope`/`evidence` feed
     straight into `build_graph(...)` to continue an investigation the
     owner already approved, where a fresh `investigate` call only starts
     a new one.
     """
-    # Unit 3b-4 addendum, C1. `validated_run_paths` refuses a `../`-style
+    # `validated_run_paths` refuses a `../`-style
     # or otherwise non-`isalnum()` argument before any file read -- this
     # used to build the path directly from an unvalidated positional CLI
     # argument, unlike `reset_scenario`, which already had this check.
@@ -375,7 +374,7 @@ def _load_verified_incident(
             LabReasonCode.INCIDENT_NOT_FOUND, f"no run directory for {incident_id}"
         )
     incident = _load_stored_artifact(StoredIncident, paths.incident_file)
-    # Post-freeze review, P1: this check alone compares only
+    # This check alone compares only
     # `scope.incident_id` against the directory name -- but
     # `StoredIncident.check_identity_agrees` (`domain.py`) already ran
     # inside `_load_stored_artifact` just above, and guarantees
@@ -413,7 +412,7 @@ def run_investigate_command(
         )
     if isinstance(result, EscalatedInvestigation):
         # No terminal report exists yet for a paused run -- print what the
-        # owner needs to resume it (`causalops approve`/`reject`, Unit 2c)
+        # owner needs to resume it (`causalops approve`/`reject`)
         # and stop, without ever calling `finalize_investigation`. That call
         # refuses a second write for an already-finalized investigation id
         # (`RESULT_ALREADY_FINALIZED`); calling it now, on a run that has not
@@ -430,18 +429,18 @@ def run_investigate_command(
 def _resolve_thread_incident_and_model(
     checkpointer: SqliteSaver, thread_id: str
 ) -> tuple[str, Literal["replay", "claude"]]:
-    """The only durable link from a bare thread id to its incident: nothing
-    on disk maps one to the other outside the checkpoint itself --
-    `investigation_id` is a fresh `uuid4().hex` and `results/investigations/
-    <id>/` does not exist yet for a paused run. Reads with no graph built,
-    the same pattern `test_a_second_connection_reads_back_the_finished_run`
-    established in Unit 2a.
+    """The only durable link from a bare thread id to its incident: nothing on
+    disk maps one to the other outside the checkpoint itself --
+    `investigation_id` is a fresh `uuid4().hex` and
+    `results/investigations/<id>/` does not exist yet for a paused run. Reads
+    with no graph built, the same pattern
+    `test_a_second_connection_reads_back_the_finished_run` already uses.
 
-    Unit 3b-2 also resolves which model this thread's original `investigate`
+    Also resolves which model this thread's original `investigate`
     call used, from the same checkpoint read: `GraphState["model_name"]`
     round-trips through `channel_values` exactly the way `incident_id`
-    already does. This is the fix for the bug 3b-1's handoff recorded at
-    `cli.py:531` -- a resumed live run used to be relabelled `"replay"` in
+    already does. This is the fix for a real bug: a resumed live run used
+    to be relabelled `"replay"` in
     its own artifact because nothing durable said otherwise. A checkpoint
     written before this field existed has no `model_name` key at all and
     defaults to `REPLAY_MODEL_NAME`: it can only ever have been a replay
@@ -491,7 +490,7 @@ def run_decision_command(
     3. Otherwise -- a first decision, or a matching decision whose resume
        never finished (a crash between the record write and finalize) --
        resolve the incident, build the model/registry/graph, and check for
-       a pending interrupt (Unit 2b's measured trap: `.interrupts`, never
+       a pending interrupt (a measured trap: `.interrupts`, never
        `.next`, since a re-paused run and a settled run both show `.next
        == ()`).
     4. A first decision with no pending interrupt is refused
@@ -517,7 +516,7 @@ def run_decision_command(
     # this function ever got the chance to report the `THREAD_NOT_FOUND`
     # this really is.
     #
-    # Unit 2d: wrapped for the same reason and the same scope as
+    # Wrapped for the same reason and the same scope as
     # `_sqlite_checkpointer` above -- a locked, missing-parent, or
     # permission-denied database is translated to `STORE_UNAVAILABLE`; a
     # corrupt-but-openable existing file is not (see that function's
@@ -548,8 +547,8 @@ def run_decision_command(
             # store's own prior output, but it is still a file on disk a
             # corrupted write or a hand-edited byte could make unreadable
             # -- refused the same way a corrupt `owner_decisions` row is
-            # above, not surfaced as an uncaught traceback. Unit 3b-4
-            # addendum, C5: this used to catch only `ValidationError`,
+            # above, not surfaced as an uncaught traceback. This used to
+            # catch only `ValidationError`,
             # missing an unreadable file or invalid UTF-8 --
             # `_load_stored_artifact` closes both, and reports
             # `CORRUPT_ARTIFACT` rather than `STORE_UNAVAILABLE` (this
@@ -563,8 +562,8 @@ def run_decision_command(
             incident_id, model_choice = _resolve_thread_incident_and_model(
                 checkpointer, thread_id
             )
-            # Post-freeze review, P2-3: this resume path used to build
-            # `RunPaths` directly from `incident_id`, without either C1's
+            # This resume path used to build
+            # `RunPaths` directly from `incident_id`, without either the
             # path-escape check or the identity check -- see
             # `_load_verified_incident`'s own docstring.
             paths, incident = _load_verified_incident(root, incident_id)

@@ -79,7 +79,7 @@ def test_metrics_carry_the_active_incident_label(runs: Path) -> None:
 def test_the_latency_histogram_has_boundaries_near_the_lab_s_real_range(
     runs: Path,
 ) -> None:
-    """Lab-defect-fix Unit 2, W6. Proves the ladder is actually wired into
+    """Proves the ladder is actually wired into
     the exposed `/metrics` text, not just declared -- `histogram_quantile`
     reads bucket boundaries (`le=` labels) off exactly this output. Checks
     for boundaries near both landmarks this ladder was derived from
@@ -114,7 +114,7 @@ def test_configuration_is_read_from_the_active_run(runs: Path) -> None:
 
 
 def test_read_lab_config_returns_empty_on_malformed_json(runs: Path) -> None:
-    """Lab-defect-fix Unit 5, W12. A reader hitting `config.json` mid-write
+    """A reader hitting `config.json` mid-write
     (before `write_json` was made atomic, or from any other partial write)
     must fail safe -- an empty configuration -- not raise `JSONDecodeError`
     and crash the request the lab service is handling."""
@@ -173,7 +173,7 @@ def pool_attempts_per_capacity_value(exposed: str, incident: str) -> float | Non
 def test_orders_exhausts_its_pool_past_capacity(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix F1 (revised). `causalops_pool_attempts_per_capacity` (slot
+    """`causalops_pool_attempts_per_capacity` (slot
     acquisition attempts / capacity) replaces the old raw
     `causalops_pool_in_use` cumulative-count gauge, which never actually
     measured pool occupancy -- see `orders.py::handle`'s own comment. The
@@ -213,10 +213,10 @@ def test_orders_exhausts_its_pool_past_capacity(
 def test_orders_publishes_no_attempts_per_capacity_when_pool_capacity_is_unset(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix F1. No `pool_capacity` configured -> no attempts-per-capacity
+    """No `pool_capacity` configured -> no attempts-per-capacity
     ratio can be computed, and none is published -- not a sample of `0` or
     `None`, no sample line at all, matching a `configuration_change`-style
-    scenario before this unit's fixture mitigation added `pool_capacity`
+    scenario before a fixture mitigation added `pool_capacity`
     to its own `faulted_config`."""
     import orders
 
@@ -235,8 +235,8 @@ def test_orders_publishes_no_attempts_per_capacity_when_pool_capacity_is_unset(
 def test_orders_publishes_no_attempts_per_capacity_when_pool_capacity_is_zero(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix F1. `pool_capacity: 0` is unreachable by any of the four real
-    scenario files today, but a real gap in the plan's original unguarded
+    """`pool_capacity: 0` is unreachable by any of the four real
+    scenario files today, but a real gap in the original unguarded
     `slots_requested / int(capacity)` -- this proves the added
     `int(capacity) > 0` guard actually prevents the `ZeroDivisionError`
     (this test would raise, not fail an assertion, if the guard were

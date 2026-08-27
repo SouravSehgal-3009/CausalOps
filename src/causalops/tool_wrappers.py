@@ -1,18 +1,17 @@
 """The only path from a parsed tool proposal to a backend.
 
-`TECHNICAL_SPEC.md` §5 makes a direct backend binding a P0 trust-boundary
+`TECHNICAL_SPEC.md` §5 makes a direct backend binding a critical trust-boundary
 violation: a dispatch node may reach a backend only through a policy wrapper,
 never a bare backend function. This module is that wrapper for all five
-registered tools. Unit 1a proved the shape against `query_logs` and a real
-backend first; `_make_wrapper` below is that same dispatch body generalised
-over which tool, which argument type, and which backend seam -- proven under
-`mypy --strict` including the negative case (a backend typed for the wrong
-tool is a type error, not a runtime surprise) before it replaced the four
-near-identical copies four factories would have been. Unit 3a added a fifth
-tool, `search_runbooks`, and one branch inside `_make_wrapper`'s own dispatch
-body (on the *type* of result its `run_check` seam returns) rather than a
-second factory -- the plan's own owner decision, "one wrapper factory, one
-dispatch path."
+registered tools. The shape was proven against `query_logs` and a real backend
+first; `_make_wrapper` below is that same dispatch body generalised over which
+tool, which argument type, and which backend seam -- proven under `mypy
+--strict` including the negative case (a backend typed for the wrong tool is a
+type error, not a runtime surprise) before it replaced the four near-identical
+copies four factories would have been. A fifth tool, `search_runbooks`, was
+added later as one branch inside `_make_wrapper`'s own dispatch body (on the
+*type* of result its `run_check` seam returns) rather than a second factory --
+"one wrapper factory, one dispatch path."
 
 Nothing here imports `causalops.telemetry` or `causalops.prometheus` -- see
 `tests/security/test_tool_boundary.py` for the AST test that checks that, plus
@@ -25,10 +24,17 @@ The now-retired `workflow.py` called `record_tool_executed()` only after
 `run_check` returned, so a backend that raised there left no receipt at all --
 the crash was invisible in `receipts.jsonl`. Reserving before dispatch makes
 that crash visible in-process: the call to the backend below is deliberately
-outside any `try`/`except`, so a raising backend still leaves a `RESERVED` receipt in
-`ledger.receipts()`. Durability across a process restart -- so the crash is
-visible after the fact too, not just to a caller still holding the ledger --
-is Milestone 2's job, once graph state is checkpointed to SQLite.
+outside any `try`/`except`, so a raising backend still leaves a `RESERVED`
+receipt in `ledger.receipts()`. That receipt is durable across a process
+restart too, not just visible to a caller still holding the ledger:
+`graph.py`'s `dispatch_tool` node catches the backend's exception, folds
+`ledger.receipts()` into the state it returns, and LangGraph's checkpointer
+commits that state before the node's frame is gone -- so a fresh process
+resuming the thread sees the same `RESERVED` receipt through
+`_rebuild_receipts`. What is not covered: a crash severe enough that
+`dispatch_tool` itself never returns (a `kill -9`, not a raised exception) --
+`graph.py`'s own `except Exception` handler in `_make_dispatch_tool` records
+that narrower gap in a comment beside it.
 """
 
 from collections.abc import Callable, Sequence
@@ -94,11 +100,11 @@ class ReservationLedger:
     `slots_left()` counts only receipts whose `policy_result` is `ALLOWED`
     (`RESERVED` or `SETTLED`, either way), so it cannot drift from the
     receipt list and a denial cannot spend budget it never used. This whole
-    class is a stopgap regardless: once Milestone 2 checkpoints graph state
-    to SQLite, the receipts themselves are what has to survive a restart, and
-    this bookkeeping becomes free functions over a `receipts:
-    tuple[ToolReceipt, ...]` tuple living in graph state -- no separate
-    ledger object required.
+    class is a stopgap regardless: graph state is now checkpointed to
+    SQLite, so the receipts themselves are what actually has to survive a
+    restart -- collapsing this bookkeeping into free functions over a
+    `receipts: tuple[ToolReceipt, ...]` tuple living in graph state, with no
+    separate ledger object, remains undone.
     """
 
     def __init__(self, executed_tools_budget: int) -> None:
@@ -151,7 +157,7 @@ class ReservationLedger:
         `arguments` is the effective (as-dispatched) proposal, required, not
         defaulted: every real reservation has one, and a caller that omits it
         should fail at the call site, not produce a receipt silently missing
-        the data lab-defect-fix Unit 1 added this parameter to capture.
+        the data this parameter exists to capture.
         """
         if self.slots_left() <= 0:
             return None
@@ -265,7 +271,7 @@ class DispatchResult(BaseModel):
     Defaulted so the seven other call sites that only ever look at `receipt`
     or `evidence` are unaffected.
 
-    `passages`/`retrieval_mode` are Unit 3a's own additions, for exactly one
+    `passages`/`retrieval_mode` exist for exactly one
     tool: `search_runbooks`. `_make_wrapper` below branches on the *type* of
     result its `run_check` seam returns (`RunbookCheckOutcome` vs.
     `CheckOutcome`) to decide which of `evidence` or `passages` to populate
@@ -404,8 +410,8 @@ def _make_wrapper[ArgsT: BaseModel](
     """Builds the one path from a parsed proposal for `tool` to a backend.
 
     `run_check` is the backend seam, mirroring `telemetry.py`'s own private
-    `_registered_check_runner`'s closure pattern (Unit 3b-4 addendum, C6:
-    made private there, since nothing in `cli.py` calls it) -- this module
+    `_registered_check_runner`'s closure pattern (made private there, since
+    nothing in `cli.py` calls it) -- this module
     needs no import of `telemetry.py` or `prometheus.py` themselves, which
     is exactly what the AST import test checks.
 
@@ -436,7 +442,7 @@ def _make_wrapper[ArgsT: BaseModel](
     instance actually expects and actually got, never `tool`, so it stays
     informative even under that kind of construction-time mismatch.
 
-    Unit 3a widens `run_check`'s return type to `CheckOutcome |
+    `run_check`'s return type is widened to `CheckOutcome |
     RunbookCheckOutcome` -- this factory is shared by all five registered
     tools, and `dispatch` below branches on which one of those two shapes
     came back to decide whether the result is incident evidence or runbook
@@ -469,7 +475,7 @@ def _make_wrapper[ArgsT: BaseModel](
                 f"{tool.value} wrapper expects {arguments_type.__name__}, "
                 f"got {type(proposal.arguments).__name__}"
             )
-        # Lab-defect-fix Unit 3, W1. `effective_arguments` stays the local,
+        # `effective_arguments` stays the local,
         # `ArgsT`-narrowed variable `resolve_effective_window` returned --
         # `effective_proposal.arguments` below is the same value but
         # statically widened back to the `ToolArguments` union by
@@ -489,7 +495,7 @@ def _make_wrapper[ArgsT: BaseModel](
         # to let the same proposal be retried. `authorize` fingerprints the
         # *effective* proposal, so two differently-rounded raw requests for
         # the same effective window now correctly collide as
-        # `DUPLICATE_PROPOSAL` -- a semantic change from before this unit,
+        # `DUPLICATE_PROPOSAL` -- a semantic change from an earlier version,
         # covered by its own test.
         seen_fingerprints.add(decision.fingerprint)
         if decision.result is PolicyResult.DENIED:

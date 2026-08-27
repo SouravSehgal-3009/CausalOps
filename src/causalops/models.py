@@ -27,7 +27,7 @@ class Stage(StrEnum):
 class ModelRequest(BaseModel):
     """One stage's full ask.
 
-    `run_id`/`graph_phase`/`model_turn`/`context_digest` (Unit 3b-2) are
+    `run_id`/`graph_phase`/`model_turn`/`context_digest` are
     `TECHNICAL_SPEC.md` §5's amended model-request idempotency key --
     `run_id + graph_phase + model_turn + context_digest` -- carried on the
     request itself rather than threaded through `ToolCallingModel.propose`/

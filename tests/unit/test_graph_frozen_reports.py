@@ -1,14 +1,14 @@
 """The graph reproduces the loop's own recorded outcome on five scripts.
 
-Through Unit 1c, this file ran the loop and the graph side by side and
-compared their live output (`TECHNICAL_SPEC.md` §12's bounded tool-graph
-parity gate for retiring `workflow.py`). That gate is now met -- a reviewer's
+Earlier in this project's history, this file ran the loop and the graph side by
+side and compared their live output (`TECHNICAL_SPEC.md` §12's bounded
+tool-graph parity gate for retiring `workflow.py`). That gate is now met -- a
 144-pair differential sweep found zero divergence across 13 dimensions -- and
-Unit 1d-1 converts this file accordingly: each scenario below now runs the
-graph alone, against literal values captured from the loop's actual last-known
-output while both orchestrators were still callable side by side. Unit 1d-2
-deletes `workflow.py` entirely; this file's job from that point on is a
-regression pin on the graph's own behaviour, not a comparison.
+this file was converted accordingly: each scenario below now runs the graph
+alone, against literal values captured from the loop's actual last-known output
+while both orchestrators were still callable side by side. `workflow.py` was
+later deleted entirely; this file's job from that point on is a regression pin
+on the graph's own behaviour, not a comparison.
 
 **One property has no successor and is dropped outright, not reworded**: "the
 loop and the graph asked the same stages in the same order" was a genuine
@@ -19,11 +19,12 @@ than the original, and is named as such rather than presented as equivalent.
 
 `graph_single_check.json` covers the single-check happy path; three throwaway
 scripts cover branch cases it cannot reach (a first-turn denial that still
-permits a second turn, a second-turn denial that must not -- P1-1's
-regression, pinned here at the orchestrator level -- and a model that crashes
-mid-run, P1-2's); `lab_diagnosis.json` covers the two-executed-check, two-tool
-case none of the single-check scripts reach. Every scenario runs against the
-same real backends `cli.py` wires, not spies, matching Unit 1c's coverage.
+permits a second turn, a second-turn denial that must not -- a real regression,
+pinned here at the orchestrator level -- and a model that crashes mid-run,
+another real regression); `lab_diagnosis.json` covers the two-executed-check,
+two-tool case none of the single-check scripts reach. Every scenario runs
+against the same real backends `cli.py` wires, not spies, matching this file's
+own established coverage.
 
 **Every dispatch attempt mints receipt/evidence ids through `new_opaque_id()`
 (`evidence.py:37`).** The id-normalisation harness below
@@ -47,7 +48,7 @@ What each test pins, and what it does not:
   `RunRecorder` produced, as ordered `(name, fields)` pairs -- except
   `check_finished`'s `duration_ms`, dropped for the reason below.
   `proposal_denied`/`check_finished` also carry `proposal_turn` and
-  `receipt_id` as of lab-defect-fix Unit 1 (W11, see the note below);
+  `receipt_id`, added later (see the note below);
   both are pinned like every other field here, not excluded, since the
   counting id generator two paragraphs down makes `receipt_id`
   deterministic the same way it already does for `evidence_ids`/
@@ -66,14 +67,15 @@ What each test pins, and what it does not:
   `0` was never a frozen fact about the graph; it was an assertion that the
   test machine is fast. This file's own stated contract is why fixing it
   here is legitimate rather than a quiet literal update -- see
-  `TECHNICAL_OVERVIEW.md`'s Milestone 2 section for the full record. No
-  other literal moved at that unit: ids, digests, disposition, receipt
+  `TECHNICAL_OVERVIEW.md`'s own record of this fix for the full account. No
+  other literal moved alongside this fix: ids, digests, disposition, receipt
   shapes and evidence kinds were unaffected, and
   `test_a_simulated_slow_machine_still_matches_the_frozen_report` below
   reproduces the Windows measurement directly so the fix is provable on any
   machine, not just a slow one.
 
-**Unit 3a moves every `final_context_digest` literal below, and nothing
+**The runbook-guidance `SYSTEM_TEXT` edit moves every `final_context_digest`
+literal below, and nothing
 else.** `SYSTEM_TEXT` (`prompts.py`) gained one sentence distinguishing
 runbook guidance from incident evidence, so the model correctly cites
 retrieved passages separately once `search_runbooks` exists. The digest is
@@ -85,9 +87,9 @@ below ever proposes `search_runbooks` (confirmed: no fixture script
 references it), so ids, disposition, receipt shapes, evidence kinds, event
 vocabulary and `duration_ms` are all unaffected -- only the digest moved.
 
-**Post-review strict-schema round moves every `final_context_digest`
+**A later strict-schema `SYSTEM_TEXT` edit moves every `final_context_digest`
 literal below a second time, and nothing else** -- the same mechanism as
-Unit 3a's own note above. `SYSTEM_TEXT` (`prompts.py`) gained one sentence
+the note above. `SYSTEM_TEXT` (`prompts.py`) gained one sentence
 telling the model to answer a tool call with no accompanying narrative
 text, closing a real risk `live_model.py`'s `_has_visible_content` guard
 otherwise leaves open (a stray sentence beside a genuine tool call would
@@ -98,9 +100,9 @@ in this file again, confirmed by running the suite before and after and
 updating only the six `final_context_digest` literals to match -- no other
 field in this file changed.
 
-**A later round moves every `final_context_digest` literal below a third
+**A further edit moves every `final_context_digest` literal below a third
 time, and nothing else** -- the same mechanism as the two notes above.
-The sentence the previous round added was ambiguous: "respond with the
+The sentence the previous edit added was ambiguous: "respond with the
 tool call alone" reads naturally either as "no narrative text alongside
 the tool call" (the intended meaning) or as "make only one tool call"
 (wrong -- `live_model.py` requires exactly one native call on every
@@ -114,7 +116,7 @@ running the suite before and after and updating only the six
 `final_context_digest` literals to match -- no other field in this file
 changed.
 
-**Lab-defect-fix Unit 1 (W11) adds two fields to `proposal_denied` and
+**The proposal-turn/receipt-id addition adds two fields to `proposal_denied` and
 `check_finished`, and moves no digest.** `dispatch_tool` (`graph.py`) now
 stamps both events with `proposal_turn` (the zero-based `investigate` turn
 that produced the dispatched proposal) and `receipt_id` (the settled or
@@ -129,7 +131,7 @@ six `dispatch_events(...)` literals moved, gaining `proposal_turn`/
 values read directly off each scenario's own already-deterministic id
 sequence (`_install_counting_ids` below) rather than guessed.
 
-**Lab-defect-fix Unit 3 (W1/Q2) moves every `final_context_digest` literal
+**The window-clamp edit moves every `final_context_digest` literal
 below a fourth time, moves the hardcoded `Versions` literal in
 `assert_report_matches_frozen`, and changes the stage sequence and
 `model_calls_used` for two of the five scenarios.** `SYSTEM_TEXT`
@@ -143,7 +145,7 @@ guard), so `assert_report_matches_frozen`'s hardcoded `Versions(...)`
 literal now reads `"3"`/`"3"`/`"3"` instead of `"2"`/`"2"`/`"2"`.
 
 Separately, and not a digest effect: `route_after_normalize` dropped its
-`model_turn < 2` term (Q2), so a denial that spends no check slot no longer
+`model_turn < 2` term, so a denial that spends no check slot no longer
 caps an investigation at two `INVESTIGATE` turns by itself -- only running
 out of check slots, model-call headroom, wall clock, or `budgets.
 model_calls` turns does. Two of the five scenarios below (`after_a_first_
@@ -160,7 +162,8 @@ after: `receipt_ids`/`evidence_ids`/`dispatch_events(...)` are unaffected
 for both -- the added turn produces no proposal, so it mints no receipt or
 evidence id and stamps no new dispatch event.
 
-**Lab-defect-fix Unit 4 (W18) moves every `final_context_digest` literal
+**The `CONFIG_CHANGE`-labeling `SYSTEM_TEXT` edit moves every
+`final_context_digest` literal
 below a fifth time, and moves the hardcoded `Versions` literal's
 `prompt_version` field, and nothing else.** `SYSTEM_TEXT` (`prompts.py`)
 gained one sentence stating the `CONFIG_CHANGE` label convention
@@ -168,14 +171,14 @@ gained one sentence stating the `CONFIG_CHANGE` label convention
 move above -- confirmed by running the suite before and after: only the
 six `final_context_digest` literals and `assert_report_matches_frozen`'s
 `prompt_version="3"` (now `"4"`) changed; `POLICY_VERSION`/
-`TOOL_REGISTRY_VERSION` are untouched by this unit, so their two fields
+`TOOL_REGISTRY_VERSION` are untouched by this edit, so their two fields
 in that same `Versions(...)` literal stay `"3"`/`"3"`. No scenario below
 proposes `list_recent_changes` or reaches `FINAL_ASSESSMENT` with a
 `CONFIG_CHANGE` root cause other than the two already-`CONFIG_CHANGE`
 scenarios' existing frozen output, so stage sequence, ids, disposition,
 receipt shapes, evidence kinds, and event vocabulary are all unaffected.
 
-**A Codex review round on Unit 4 found the sentence above still let a
+**A follow-up correction to that labeling edit found the sentence above still let a
 resource-pool or downstream-timeout condition triggered by a
 configuration change be mislabeled `CONFIG_CHANGE`, since "proximate
 reason requests are failing" alone did not say which of two competing
@@ -185,74 +188,70 @@ explicitly: the more specific label wins whenever its own evidence is
 present, and `CONFIG_CHANGE` applies only when no more specific label
 fits. This moves every `final_context_digest` literal below a sixth
 time and `assert_report_matches_frozen`'s `prompt_version="4"` (now
-`"5"`), and nothing else -- confirmed the same way as every prior round:
+`"5"`), and nothing else -- confirmed the same way as every prior edit:
 `POLICY_VERSION`/`TOOL_REGISTRY_VERSION` stay `"3"`/`"3"`, and no
 scenario below changes stage sequence, ids, disposition, receipt shapes,
 evidence kinds, or event vocabulary.
 
-**Instrumentation/feedback-truthfulness Unit A (F1/F2/F3) bumps all
-three versions at once, but moves `final_context_digest` for only two
-of the six scenarios below.** F2 (`prompts.py`) adds an optional
-`## Denied checks` section to `render_context`, rendered only when at
-least one denied receipt has accumulated so far -- with the default
-empty sequence every other call site still passes, rendered output is
-byte-identical to before, so a scenario that never denies a proposal
-renders no differently and its digest does not move. Only `after_a_
-first_turn_denial` and `after_a_repeated_proposal` -- the two scenarios
-below whose script contains a real `DENIED` receipt -- pick up the new
-section on every turn after the denial, moving their own
-`final_context_digest` literal (confirmed by running the suite before
-and after: exactly these two, and no others, failed on
-`final_context_digest`). `assert_report_matches_frozen`'s
-`prompt_version="5"` becomes `"6"`. F3 (`policy.py`) only changes
-`PolicyDecision.message` text, which reaches `events.jsonl`, never
-`render_context` -- confirmed no digest moves from F3 alone.
-`policy_version="3"` becomes `"4"`. F1 (`tools.py`/`prometheus.py`)
-renames `MetricTemplate.RESOURCE_POOL_IN_USE` to `RESOURCE_POOL_
-UTILIZATION`, which appears only in `QueryMetricArguments`'s own tool
-schema (pinned separately, in `test_live_model.py`), never in this
-file's rendered context text or any replay fixture (grep-confirmed) --
-`tool_registry_version="3"` becomes `"4"` with no digest movement of
-its own. Net effect on this file: `assert_report_matches_frozen`'s
-`Versions(...)` literal moves all three fields at once
-(`prompt_version="6"`, `policy_version="4"`, `tool_registry_version=
-"4"`), while only the two denial scenarios' `final_context_digest`
-literals move -- the other four scenarios' literals, and every stage
-sequence/id/disposition/receipt-shape/evidence-kind/event-vocabulary
-assertion in the file, are unaffected.
+**A later batch of three edits bumps all three versions at once, but moves
+`final_context_digest` for only two of the six scenarios below.** The
+denied-checks-section edit (`prompts.py`) adds an optional `## Denied checks`
+section to `render_context`, rendered only when at least one denied receipt has
+accumulated so far -- with the default empty sequence every other call site
+still passes, rendered output is byte-identical to before, so a scenario that
+never denies a proposal renders no differently and its digest does not move.
+Only `after_a_ first_turn_denial` and `after_a_repeated_proposal` -- the two
+scenarios below whose script contains a real `DENIED` receipt -- pick up the
+new section on every turn after the denial, moving their own
+`final_context_digest` literal (confirmed by running the suite before and
+after: exactly these two, and no others, failed on `final_context_digest`).
+`assert_report_matches_frozen`'s `prompt_version="5"` becomes `"6"`. The
+denial-message-text edit (`policy.py`) only changes `PolicyDecision.message`
+text, which reaches `events.jsonl`, never `render_context` -- confirmed no
+digest moves from that edit alone. `policy_version="3"` becomes `"4"`. The
+metric-template-rename edit (`tools.py`/`prometheus.py`) renames
+`MetricTemplate.RESOURCE_POOL_IN_USE` to `RESOURCE_POOL_ UTILIZATION`, which
+appears only in `QueryMetricArguments`'s own tool schema (pinned separately, in
+`test_live_model.py`), never in this file's rendered context text or any replay
+fixture (grep-confirmed) -- `tool_registry_version="3"` becomes `"4"` with no
+digest movement of its own. Net effect on this file:
+`assert_report_matches_frozen`'s `Versions(...)` literal moves all three fields
+at once (`prompt_version="6"`, `policy_version="4"`, `tool_registry_version=
+"4"`), while only the two denial scenarios' `final_context_digest` literals
+move -- the other four scenarios' literals, and every stage
+sequence/id/disposition/receipt-shape/evidence-kind/event-vocabulary assertion
+in the file, are unaffected.
 
-**A planning-subagent review round on this same unit added a corrective
-action to `UNKNOWN_SERVICE`'s denial-guidance sentence** (`prompts.py`'s
-`_STATIC_DENIAL_GUIDANCE`, "use one of the services already named
-above") -- safe to add since the service list is already rendered in
-`render_context`'s own `## Incident` section above where this text
-appears, but it moves `after_a_first_turn_denial`'s `final_context_
-digest` a SECOND time within this same unit (that scenario's denial is
-`UNKNOWN_SERVICE`; `after_a_repeated_proposal`'s is `DUPLICATE_
-PROPOSAL`, untouched by this wording change, so its digest does not
-move again). No further version bump: this unit's existing `prompt_
-version="6"` already accounts for it, since it is one more edit to the
-same `prompts.py` module already bumped above. Confirmed the same way
-as every prior round: running the suite before and after this specific
-wording change showed exactly one new failure
-(`after_a_first_turn_denial`, `final_context_digest` only), and every
-other field/scenario in the file is unaffected.
+**A follow-up correction added a corrective action to `UNKNOWN_SERVICE`'s
+denial-guidance sentence** (`prompts.py`'s `_STATIC_DENIAL_GUIDANCE`, "use one
+of the services already named above") -- safe to add since the service list is
+already rendered in `render_context`'s own `## Incident` section above where
+this text appears, but it moves `after_a_first_turn_denial`'s `final_context_
+digest` a SECOND time within this same batch of edits (that scenario's denial
+is `UNKNOWN_SERVICE`; `after_a_repeated_proposal`'s is `DUPLICATE_ PROPOSAL`,
+untouched by this wording change, so its digest does not move again). No
+further version bump: the existing `prompt_ version="6"` already accounts for
+it, since it is one more edit to the same `prompts.py` module already bumped
+above. Confirmed the same way as every prior edit: running the suite before and
+after this specific wording change showed exactly one new failure
+(`after_a_first_turn_denial`, `final_context_digest` only), and every other
+field/scenario in the file is unaffected.
 
-**A later round revised F1 a second time**, after an external review found
-the original "utilization" ratio could still exceed 1.0 (the raw slot
-count is incremented before the exhaustion check, so `in_use` can exceed
-`capacity`) -- an honest-boundedness claim a value like `1.5` quietly
-broke. `MetricTemplate.RESOURCE_POOL_UTILIZATION` was renamed to
-`RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`, an honestly-unbounded-above name
-for the same numbers. Same reasoning as the original F1 entry above still
-applies: this template id appears only in `QueryMetricArguments`'s own
-tool schema (pinned separately in `test_live_model.py`), never in this
-file's rendered context text or any replay fixture (grep-confirmed) --
-`tool_registry_version="4"` becomes `"5"` with no digest movement of its
-own, confirmed by running the suite before and after this specific rename
-and observing zero new `final_context_digest` failures.
+**A later edit revised the metric-template rename a second time**, after
+independent review found the original "utilization" ratio could still exceed
+1.0 (the raw slot count is incremented before the exhaustion check, so `in_use`
+can exceed `capacity`) -- an honest-boundedness claim a value like `1.5`
+quietly broke. `MetricTemplate.RESOURCE_POOL_UTILIZATION` was renamed to
+`RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`, an honestly-unbounded-above name for the
+same numbers. Same reasoning as the original rename above still applies: this
+template id appears only in `QueryMetricArguments`'s own tool schema (pinned
+separately in `test_live_model.py`), never in this file's rendered context text
+or any replay fixture (grep-confirmed) -- `tool_registry_version="4"` becomes
+`"5"` with no digest movement of its own, confirmed by running the suite before
+and after this specific rename and observing zero new `final_context_digest`
+failures.
 
-**Instrumentation/feedback-truthfulness Unit B (F5) bumps `prompt_version`
+**The abstention-citation `STAGE_INSTRUCTIONS` edit bumps `prompt_version`
 alone, and moves `final_context_digest` for five of the six scenarios
 below -- not all six.** `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`
 (`prompts.py`) gained one sentence requiring an abstention to still cite
@@ -275,22 +274,22 @@ exactly five of six tests failed on `final_context_digest`, and the sixth
 failed only on `assert_report_matches_frozen`'s `Versions(...)` pin, which
 moves for all six regardless of which turn's digest changed, since
 `PROMPT_VERSION` is a single global constant. `POLICY_VERSION`/
-`TOOL_REGISTRY_VERSION` are untouched by this unit, so those two fields in
+`TOOL_REGISTRY_VERSION` are untouched by this edit, so those two fields in
 that same `Versions(...)` literal stay `"4"`/`"5"`; `prompt_version="6"`
 becomes `"7"`. No scenario below proposes `query_logs` against
 `ambiguous_telemetry` or reaches a disposition this predicate change could
 affect, so stage sequence, ids, disposition, receipt shapes, evidence
 kinds, and event vocabulary are all unaffected.
 
-**Lab-defect-fix F8 moves `final_context_digest` for exactly two of the
-six scenarios below, and no version.** Unlike every digest move above,
-this one is not a `SYSTEM_TEXT`/`STAGE_INSTRUCTIONS` edit -- F8 changed
-`run_changes_check`'s (`telemetry.py`) own returned `.summary` string to
-embed real change content instead of a bare count, so `render_context`'s
+**The change-content-in-summary fix moves `final_context_digest` for exactly
+two of the six scenarios below, and no version.** Unlike every digest move
+above, this one is not a `SYSTEM_TEXT`/`STAGE_INSTRUCTIONS` edit -- this fix
+changed `run_changes_check`'s (`telemetry.py`) own returned `.summary` string
+to embed real change content instead of a bare count, so `render_context`'s
 rendered `## Evidence` section differs on any turn that already has a
-`CHANGE`-kind evidence record, which feeds directly into `context_text`
-and so into the digest. Only the two scenarios that call `write_changes`/
-propose `list_recent_changes` -- `test_the_graph_reproduces_the_frozen_
+`CHANGE`-kind evidence record, which feeds directly into `context_text` and so
+into the digest. Only the two scenarios that call `write_changes`/ propose
+`list_recent_changes` -- `test_the_graph_reproduces_the_frozen_
 report_for_two_executed_checks` and `test_a_simulated_slow_machine_still_
 matches_the_frozen_report`, both built on `LAB_DIAGNOSIS_FIXTURE` with
 `change_row(1)`'s default `"config update"` summary -- ever render that
@@ -300,11 +299,11 @@ nothing else. No version constant changes: `SYSTEM_TEXT`/`STAGE_
 INSTRUCTIONS`/every tool schema are untouched, so `prompt_version`/
 `policy_version`/`tool_registry_version` all stay at their prior values
 (`"7"`/`"4"`/`"5"`) and `assert_report_matches_frozen`'s `Versions(...)`
-literal is unchanged. Stage sequence, ids, disposition, receipt shapes,
-and event vocabulary are unaffected for all six scenarios -- F8 only
-changes what a `CHANGE` evidence record's `.summary` field says, never
-whether a check executes, what it returns as its typed payload, or which
-ids the counting-id harness mints.
+literal is unchanged. Stage sequence, ids, disposition, receipt shapes, and
+event vocabulary are unaffected for all six scenarios -- this fix only changes
+what a `CHANGE` evidence record's `.summary` field says, never whether a check
+executes, what it returns as its typed payload, or which ids the counting-id
+harness mints.
 """
 
 from pathlib import Path
@@ -528,7 +527,7 @@ def run_once(
     function, not inlined per test, since all five scenarios wire the same
     real four-tool registry the same way.
 
-    Unit 2b: two of the five scenarios this function serves escalate (a
+    Two of the five scenarios this function serves escalate (a
     `query_logs` receipt that comes back `UNAVAILABLE` because those two
     scripts never call `write_orders_error_row`, reaching a diagnosis
     anyway). Rather than weaken this file's frozen-literal pin for those
@@ -627,9 +626,9 @@ def assert_report_matches_frozen(
     assert report.final_context_digest == final_context_digest
     assert report.evidence_ids == evidence_ids
     assert report.receipt_ids == receipt_ids
-    # Unit 3a, added on review: no scenario in this file ever dispatches
+    # No scenario in this file ever dispatches
     # `search_runbooks`, so every one of these five reports must show
-    # retrieval never ran. Correctness's M15 proved these were unguarded --
+    # retrieval never ran. Direct testing proved these were unguarded --
     # seeding `retrieval_mode` as `FTS5_LEXICAL` at `graph.py`'s
     # `initial_state` construction left the full suite green with no
     # assertion anywhere catching it, even though the resulting report would
@@ -637,7 +636,7 @@ def assert_report_matches_frozen(
     # project.
     assert report.retrieval_mode is RetrievalMode.DISABLED
     assert report.runbook_passage_ids == ()
-    # Unit 3a, added on review: nothing else in this file pinned `versions`
+    # Nothing else in this file pinned `versions`
     # at all, so a future prompt/policy/tool-registry edit could ship
     # without its version bump and nothing here would notice -- the same
     # defect class as the `retrieval_mode` seed above, on a §10
@@ -659,7 +658,7 @@ def assert_report_matches_frozen(
 def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Through Unit 1c this test ran the loop beside the graph on
+    """Earlier in this project's history, this test ran the loop beside the graph on
     `graph_single_check.json` and compared their live output; the values
     below are that comparison's last agreement, frozen."""
     paths = RunPaths(root=tmp_path)
@@ -722,12 +721,12 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
 def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P1-1's regression, pinned at the orchestrator level: an out-of-scope
+    """A real regression, pinned at the orchestrator level: an out-of-scope
     proposal on turn 0, denied, still permits a second turn --
     `plan_second_check()`'s graph equivalent gates on whether turn 0
     *proposed* something, not on whether it was *allowed*.
 
-    Lab-defect-fix Unit 3/Q2: turn 1's proposal is `ALLOWED` (it spends a
+    Turn 1's proposal is `ALLOWED` (it spends a
     slot even though its outcome comes back `TOOL_UNAVAILABLE`, since
     `ReservationLedger.slots_left()` counts by `policy_result`, not
     `outcome`), but a slot and model-call headroom both still remain
@@ -803,11 +802,11 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
 def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P1-1's other regression, pinned at the orchestrator level: the same
+    """Another real regression, pinned at the orchestrator level: the same
     proposal scripted verbatim for both turns. Turn 0 executes; turn 1's
     proposal fingerprints identically and is denied as a duplicate.
 
-    Lab-defect-fix Unit 3/Q2: with `model_turn < 2` gone, one duplicate
+    With `model_turn < 2` gone, one duplicate
     denial (no slot spent) no longer stops the run at two turns as long as
     a slot and model-call headroom remain -- the router asks a third
     `HYPOTHESIS_UPDATE` turn rather than the phantom-third-turn concern this
@@ -890,7 +889,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
 def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P1-2's regression, pinned at the orchestrator level: `investigate`'s
+    """A real regression, pinned at the orchestrator level: `investigate`'s
     `ask_once` calls `counters.record_call` *before* `model.propose`, so a
     raising model must still leave `model_calls_used == 2` in the final
     report, not 1 -- the second call was spent even though it never
@@ -942,8 +941,8 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
 ) -> None:
     """`lab_diagnosis.json` proposes `query_logs` then `list_recent_changes`:
     two executed checks across two tools, the only scenario here that is not
-    a single-`query_logs` script -- proof that the three tools Unit 1c
-    wrapped agreed with the loop too, not just that the shape held when
+    a single-`query_logs` script -- proof that the other wrapped tools
+    agreed with the loop too, not just that the shape held when
     `query_logs` was the only tool involved."""
     paths = RunPaths(root=tmp_path)
     write_orders_error_row(paths)

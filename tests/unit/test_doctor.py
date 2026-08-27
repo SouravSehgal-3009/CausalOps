@@ -235,8 +235,8 @@ def test_missing_docker_fails(tmp_path: Path) -> None:
 
 
 def test_missing_api_key_warns_but_does_not_fail(tmp_path: Path) -> None:
-    # Unit 3b-2, owner-ruled: FAIL -> WARN. `replay` runs entirely without
-    # this key, so its absence is surfaced but no longer fails `doctor`
+    # A warning, not a hard failure: `replay` runs entirely without
+    # this key, so its absence is surfaced but does not fail `doctor`
     # outright -- `test_doctor_report_with_no_failures_is_ok` (below) is the
     # confinement test proving a report with only this WARN still reports
     # `doctor: OK`.
@@ -425,8 +425,8 @@ def test_every_failure_is_reported_together(tmp_path: Path) -> None:
 
     report = run_doctor(ProjectPaths(root=tmp_path), probe, {})
 
-    # `MISSING_API_KEY` is deliberately absent here (Unit 3b-2, owner-ruled
-    # FAIL -> WARN): `report.failures` counts `FAIL` only, and the missing
+    # `MISSING_API_KEY` is deliberately absent here (a WARN, not a FAIL):
+    # `report.failures` counts `FAIL` only, and the missing
     # key still shows up as a `WARN`, asserted separately below.
     assert {check.reason_code for check in report.failures} == {
         DoctorReasonCode.UNSUPPORTED_OS,

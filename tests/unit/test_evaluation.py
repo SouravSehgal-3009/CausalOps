@@ -334,7 +334,8 @@ def test_a_wrong_cause_or_disposition_scores_false() -> None:
 def test_correct_and_grounded_requires_both_a_right_answer_and_grounded_citations() -> (
     None
 ):
-    """F6's own full truth table. The non-obvious case (`diagnosis_correct=
+    """The full truth table for `correct_and_grounded`. The non-obvious
+    case (`diagnosis_correct=
     True`, `citations_sufficient=False` -> `correct_and_grounded=False`) is
     the entire reason this field exists apart from either input alone: a
     right answer resting on citations that don't actually satisfy the
@@ -416,8 +417,8 @@ def test_control_behaviour_counts_denials_by_kind() -> None:
 
 
 def test_control_counts_a_reserved_receipt_as_unsettled() -> None:
-    """A check that spent budget and crashed before settling must be
-    visible to the scorer -- before this unit, `ControlCounts` had no field
+    """A check that spent budget and crashed before settling must be visible
+    to the scorer -- before this field existed, `ControlCounts` had no field
     that could hold it at all."""
     evidence = timeout_evidence()
     report = diagnosed_report((evidence.evidence_id,))
@@ -501,7 +502,7 @@ def test_efficiency_reports_what_the_run_actually_spent() -> None:
 def reproducibility_manifest_kwargs() -> dict[str, JsonValue]:
     """The §10 reproducibility fields `EvaluationRecord` requires beyond the
     scoring triple every test above already builds -- one place to keep
-    them so a field this unit adds only has to be threaded through here,
+    them so a newly added field only has to be threaded through here,
     not at every call site that builds a record."""
     return {
         "git_sha": "0" * 40,
@@ -1064,16 +1065,16 @@ def test_a_stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable() -
 def test_a_pre_f6_record_missing_correct_and_grounded_still_summarizes_correctly() -> (
     None
 ):
-    """F6's own read-compatibility test, the same shape as F4's `test_a_
-    stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable`
+    """The read-compatibility test for `correct_and_grounded`, the same shape as
+    `test_a_stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable`
     immediately above. `correct_and_grounded` is a brand-new field, so a
-    `records.jsonl` line written before F6 landed simply has no
-    `correct_and_grounded` key at all under `scores` -- a literal JSON
-    string reproducing that exact pre-F6 shape must still validate (the
-    plain `bool | None = None` default), and `summarize_evaluation` must
-    still produce the mathematically correct count from it, since the
-    summary-level count is re-derived fresh from `diagnosis_correct`/
-    `citations_sufficient`, never from the stored per-record field."""
+    `records.jsonl` line written before this field existed simply has no
+    `correct_and_grounded` key at all under `scores` -- a literal JSON string
+    reproducing that exact older shape must still validate (the plain `bool |
+    None = None` default), and `summarize_evaluation` must still produce the
+    mathematically correct count from it, since the summary-level count is
+    re-derived fresh from `diagnosis_correct`/`citations_sufficient`, never
+    from the stored per-record field."""
     pre_f6_record = (
         '{"schema_version": "1", "scorer_version": "3", '
         '"run_key": "incident-1/causalops/tool_enabled", '
@@ -1288,15 +1289,15 @@ def test_summarize_evaluation_reports_the_distinct_scorer_versions_present() -> 
 def test_every_scenario_family_declares_at_least_one_required_evidence_predicate() -> (
     None
 ):
-    """F5's own corpus-wide guard. No such check existed before this unit --
+    """A corpus-wide guard. No such check existed before this test --
     an earlier research pass assumed one did, but a repository-wide search
-    turned up nothing. Before F5, `ambiguous_telemetry` declared an empty
-    `predicates` array (`all(())` being vacuously `True` in Python is the
-    exact bug F4 fixed a `citations_sufficient` score around); this test
-    keeps that regression from silently returning, for `ambiguous_telemetry`
-    or any future scenario family, by loading every checked-in scenario
-    file directly rather than trusting a fixed family list to stay in
-    sync."""
+    turned up nothing. Before this fix, `ambiguous_telemetry` declared an empty
+    `predicates` array (`all(())` being vacuously `True` in Python is the exact
+    bug an earlier fix corrected a `citations_sufficient` score around); this
+    test keeps that regression from silently returning, for
+    `ambiguous_telemetry` or any future scenario family, by loading every
+    checked-in scenario file directly rather than trusting a fixed family list
+    to stay in sync."""
     repository = Path(__file__).resolve().parents[2]
     scenario_files = sorted((repository / "lab" / "scenarios").glob("*.json"))
 

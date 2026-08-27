@@ -34,11 +34,11 @@ CONTEXT_QUOTAS: dict[EvidenceKind, int] = {
 }
 
 # `context_evidence` below does an unguarded `CONTEXT_QUOTAS[record.kind]`
-# lookup -- the only unguarded per-kind lookup in `src/` (confirmed by
-# review during Unit 3a). A new `EvidenceKind` member added without a
+# lookup -- the only unguarded per-kind lookup in `src/`. A new
+# `EvidenceKind` member added without a
 # matching entry here would not fail at the point it was added; it would
 # crash the first investigation that ever produced evidence of that kind.
-# Unit 3a removed the *motive* for that (no `EvidenceKind.RUNBOOK` --
+# Runbook retrieval removed the *motive* for that (no `EvidenceKind.RUNBOOK` --
 # `RunbookCheckOutcome` has no `kind` field to populate one with) but not
 # the *capability* -- nothing stops a future kind from being added here
 # without its quota. This assertion is that guard, checked at import time
@@ -126,7 +126,7 @@ def trim_to_bytes(
     an owner reading the payload after trimming must see a count that
     actually matches what `payload[rows_key]` holds.
 
-    Lab-defect-fix Unit 2, W4. Pops from the front (`kept.pop(0)`), not the
+    Pops from the front (`kept.pop(0)`), not the
     end, so that whenever `rows` arrives in oldest-to-newest order --
     already true for `prometheus.py`'s samples and `telemetry.py`'s log
     rows, and true for `run_changes_check`'s changes once it sorts them
@@ -139,15 +139,15 @@ def trim_to_bytes(
     topology snapshot has no chronological order for "newest" to mean
     anything about.
 
-    Unit 3b-4 addendum, C3. Dropping rows alone cannot help when the
+    Dropping rows alone cannot help when the
     payload's real weight is a SCALAR field assembled from those rows
     before this function ever sees them (`run_changes_check`'s
     `summaries`, joined from every matched change's own summary text,
     before `trim_to_bytes` is called at all). Once `rows` is fully
-    emptied, the loop below has nothing left to drop -- before this fix,
+    emptied, the loop below has nothing left to drop -- previously
     the function returned there regardless of whether `fits(payload)` was
     actually `True`, silently shipping an over-budget result. This
-    function's contract, post-fix, is `fits(payload)` on return WHENEVER
+    function's contract now is `fits(payload)` on return WHENEVER
     the overage is text this function can shrink -- once the row list is
     exhausted, it falls back to shrinking the largest remaining
     string-valued field (by half, repeatedly) instead of stopping. That

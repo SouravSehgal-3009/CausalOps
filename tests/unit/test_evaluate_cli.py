@@ -1,4 +1,4 @@
-"""Unit 3c: `causalops-evaluate`'s own pure helpers and orchestration.
+"""`causalops-evaluate`'s own pure helpers and orchestration.
 
 `run_evaluation`'s real path always builds a live `LiveClaudeModel`
 (`causalops.live_setup.build_model_and_registry` with `model_choice="claude"`
@@ -792,8 +792,8 @@ def test_main_writes_a_summary_alongside_records(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    # Item 2 (round 3), refined by the retrieval-mode fix, refined again by
-    # the round-5 fix that removed the cross-mode `combined` benchmark
+    # Refined by the retrieval-mode fix, and again by
+    # a later fix that removed the cross-mode `combined` benchmark
     # figure entirely: `main()` prints one block per `(arm, retrieval_mode)`
     # group plus a plain trailing record count -- every run here is the
     # replay fixture's fake model, which never calls `search_runbooks`, so

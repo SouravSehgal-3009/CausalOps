@@ -1,4 +1,4 @@
-"""Unit 3b-2: `LiveClaudeModel` against a fake `ChatAnthropic`-shaped client.
+"""`LiveClaudeModel` against a fake `ChatAnthropic`-shaped client.
 
 No test in this file constructs a real `langchain_anthropic.ChatAnthropic`
 -- every `LiveClaudeModel` here is built with `client=FakeChatAnthropic(...)`
@@ -7,15 +7,14 @@ a network call, and `tests/conftest.py`'s loopback-only guard is never even
 exercised by this file. `sqlite3.connect(":memory:")` stands in for
 `checkpoints.db`.
 
-The owner's standing instruction for this unit: "make the refusal path as
-well tested as the success path." The refusal-path tests below
-(`test_the_cost_ceiling_refuses_before_sending`,
+The refusal path is tested as thoroughly as the success path. The refusal-path
+tests below (`test_the_cost_ceiling_refuses_before_sending`,
 `test_an_oversized_request_refuses_before_reserving_or_sending`,
 `test_a_failed_send_leaves_the_reservation_reserved`,
-`test_missing_usage_metadata_leaves_the_reservation_reserved`) each assert
-not just that the right exception is raised, but that nothing was sent
-and/or nothing was wrongly settled -- the two ways a gate can look like it
-refused while actually letting the spend through.
+`test_missing_usage_metadata_leaves_the_reservation_reserved`) each assert not
+just that the right exception is raised, but that nothing was sent and/or
+nothing was wrongly settled -- the two ways a gate can look like it refused
+while actually letting the spend through.
 """
 
 import json
@@ -240,7 +239,7 @@ def test_propose_binds_the_stop_tool_and_all_five_domain_tools(
 def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
-    """P1-1's regression test. Before this unit's fix, `_send` reserved
+    """Before this fix, `_send` reserved
     against prose alone, never the current ~13,404-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
@@ -297,7 +296,7 @@ def test_the_stop_tool_definition_requires_a_non_null_stop_reason(
 def test_the_final_assessment_tool_definition_drops_schema_version_and_description(
     conn: sqlite3.Connection,
 ) -> None:
-    """P2-5's regression test for `FinalAssessment`. Verified present in
+    """Verified present in
     `FinalAssessment.model_json_schema()`'s own `properties` before this
     fix and correctly absent from every domain tool and `StopRecord`
     already -- this closes the one place it still leaked."""
@@ -333,28 +332,28 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    # Lab-defect-fix Unit 3, W1: `QueryMetricArguments`/`QueryLogsArguments`/
+    # `QueryMetricArguments`/`QueryLogsArguments`/
     # `ListRecentChangesArguments` each gained two optional window fields
     # with their own descriptions, so the emitted schema grew from 12,011 to
-    # 12,824 bytes -- not a drift, the mechanical cost of Q1's window
+    # 12,824 bytes -- not a drift, the mechanical cost of the window
     # contract, five-fold-duplicated the same way `_domain_tool_definitions`'s
     # own docstring already explains for `HypothesesRecord`'s schema.
-    # Fix F1 (revised): `MetricTemplate.RESOURCE_POOL_UTILIZATION`
+    # `MetricTemplate.RESOURCE_POOL_UTILIZATION`
     # ("resource_pool_utilization", 25 chars, a false claim of boundedness)
-    # renamed to `RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`
+    # was renamed to `RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`
     # ("resource_pool_attempts_per_capacity", 35 chars, honestly unbounded
-    # above) inside `QueryMetricArguments`'s own schema -- this is the
-    # second growth of this same pinned literal within this one
-    # remediation unit (12,824 -> 12,829 for F1's original rename, now
-    # 12,829 -> 12,839 for this revised rename). Fix F9: `QueryMetricArguments.
-    # service`/`QueryLogsArguments.service` each gained a `Field(description=...)`
+    # above) inside `QueryMetricArguments`'s own schema -- this pinned
+    # literal grew twice for that rename (12,824 -> 12,829 for the
+    # original rename, then 12,829 -> 12,839 once the name was further
+    # revised). `QueryMetricArguments.
+    # service`/`QueryLogsArguments.service` each later gained a `Field(description=...)`
     # naming which service records which metric/log category -- each appears
     # once, in only its own tool's schema (query_metric, query_logs), not
     # duplicated across all five domain tools the way `HypothesesRecord` is.
-    # A third growth (12,839 -> 13,404), a real drift this pin exists to
+    # A third growth (12,839 -> 13,404) is a real drift this pin exists to
     # catch each time, not one to explain away.
     assert len(payload) == 13_404
-    # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
+    # `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
     assert estimate_input_tokens(payload) == 13_404
@@ -363,7 +362,7 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     conn: sqlite3.Connection,
 ) -> None:
-    """Post-freeze review, N1. The test above pins ONLY `propose()`'s
+    """The test above pins ONLY `propose()`'s
     payload (`_stop_tool_definition()` plus the five `_domain_tool_
     definitions()`) -- `_final_assessment_tool_definition()` is never in
     that binding (confirmed by reading `propose()`/`respond()` directly:
@@ -373,13 +372,13 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     usd` on every FINAL_ASSESSMENT turn exactly the way `propose()`'s is
     on every INVESTIGATE turn, had no test noticing if it drifted.
 
-    Instrumentation/feedback-truthfulness Unit B (F5) moves this from 2,292
-    to 2,422: `FinalAssessment.disposition`'s `Field(description=...)` in
-    `domain.py` gained one sentence requiring an abstention to still cite
-    the evidence that made the causes indistinguishable, and that
-    description is part of `_final_assessment_tool_definition()`'s own
-    schema, unlike `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`'s matching
-    sentence, which reaches the rendered prompt, not this tool payload."""
+    This moved from 2,292 to 2,422: `FinalAssessment.disposition`'s
+    `Field(description=...)` in `domain.py` gained one sentence requiring an
+    abstention to still cite the evidence that made the causes
+    indistinguishable, and that description is part of
+    `_final_assessment_tool_definition()`'s own schema, unlike
+    `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`'s matching sentence, which
+    reaches the rendered prompt, not this tool payload."""
     call = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args={
@@ -426,8 +425,8 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     """The "Default limits" table cites how large a FINAL_ASSESSMENT turn's
     prose gets with no evidence added,
     to argue folding the tool schema into `MAX_INPUT_TOKENS` would refuse
-    ordinary runs. Unit 3b-2's version of that figure ("512 tokens") was
-    never pinned by a test, and Unit 3b-3's review could not reproduce it
+    ordinary runs. An earlier version of that figure ("512 tokens") was
+    never pinned by a test, and could not be reproduced later
     from the real `render_context`/`Budgets` call site `graph.py`'s
     `_render_stage_request` actually uses -- the closest reconstruction,
     at the OLD 3.0 ratio, was 427 tokens, not a match. Rather than carry
@@ -457,23 +456,21 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
 
-    # Lab-defect-fix Unit 3, W1: `SYSTEM_TEXT` gained one sentence stating
-    # the window default/clamp contract, so this prose figure moved from
-    # 1,392 to 1,561. Lab-defect-fix Unit 4, W18: `SYSTEM_TEXT` gained one
-    # more sentence stating the CONFIG_CHANGE label convention, moving it
-    # again, from 1,561 to 1,747. A Codex review round on Unit 4 rewrote
-    # that same sentence to state the label-priority rule explicitly
-    # (a more specific label wins over CONFIG_CHANGE when its own evidence
-    # is present), moving it a third time, from 1,747 to 1,895 -- the same
-    # mechanism `test_graph_frozen_reports.py`'s own module docstring
-    # already documents for `final_context_digest`. Instrumentation/
-    # feedback-truthfulness Unit B (F5) moves it a fourth time, from 1,895
-    # to 2,025: `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]` gained one
-    # sentence requiring an abstention to still cite the evidence that made
-    # the causes indistinguishable, and `context_text` above renders that
-    # exact stage's instructions.
+    # `SYSTEM_TEXT` gained one sentence stating the window default/clamp
+    # contract, so this prose figure moved from 1,392 to 1,561. `SYSTEM_TEXT`
+    # then gained one more sentence stating the CONFIG_CHANGE label convention,
+    # moving it again, from 1,561 to 1,747. That same sentence was later
+    # rewritten to state the label-priority rule explicitly (a more specific
+    # label wins over CONFIG_CHANGE when its own evidence is present), moving
+    # it a third time, from 1,747 to 1,895 -- the same mechanism
+    # `test_graph_frozen_reports.py`'s own module docstring already documents
+    # for `final_context_digest`. It moved a fourth time, from 1,895 to 2,025:
+    # `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]` gained one sentence
+    # requiring an abstention to still cite the evidence that made the causes
+    # indistinguishable, and `context_text` above renders that exact stage's
+    # instructions.
     assert len(total) == 2_025
-    # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
+    # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
     assert estimate_input_tokens(total) == 2_025
 
@@ -951,7 +948,7 @@ def test_respond_refuses_an_unsupported_block_alongside_tool_use(
 def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
     conn: sqlite3.Connection,
 ) -> None:
-    """Unit 3b-4 addendum, C4. Before this fix, `next(...)` silently took
+    """Before this fix, `next(...)` silently took
     the FIRST of two `record_final_assessment` calls, discarding the
     second -- including a second call that DISAGREES with the first, which
     is exactly what these two do (`DIAGNOSED` vs `INSUFFICIENT_EVIDENCE`).
@@ -992,12 +989,12 @@ def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
 def test_respond_refuses_a_matching_call_alongside_an_unbound_extra_call(
     conn: sqlite3.Connection,
 ) -> None:
-    """Post-freeze review, Finding 3. C4's own fix above checked only
+    """The fix above checked only
     `len(matching_calls) != 1` -- a turn with exactly one `record_final_
     assessment` call AND some other tool name `respond()` never bound
     (`_final_assessment_tool_definition()` is the only tool offered) would
     have passed that check, silently dropping the extra call the same way
-    C4 was built to stop happening for a second MATCHING call. Not proven
+    that fix was built to stop happening for a second MATCHING call. Not proven
     reachable against a real provider offline, per the installed
     `langchain-anthropic` source correctness read -- but the fix costs one
     more length check, so it is applied regardless."""
@@ -1044,7 +1041,7 @@ def test_the_cost_ceiling_refuses_before_sending(conn: sqlite3.Connection) -> No
 def test_a_pending_reservation_refuses_to_resend_without_touching_the_transport(
     conn: sqlite3.Connection,
 ) -> None:
-    """Unit 3b-4 addendum, Group B, codex P1 -- the double-spend bug.
+    """The double-spend bug.
     Simulates the exact scenario `TECHNICAL_SPEC.md` §5's idempotency key
     exists for: a crash between an earlier reserve and its settle, then a
     LangGraph resume that re-renders the identical stage. Pre-inserts a
@@ -1087,7 +1084,7 @@ def test_a_pending_reservation_refuses_to_resend_without_touching_the_transport(
 
 
 def test_a_settled_reservation_also_refuses_to_resend(conn: sqlite3.Connection) -> None:
-    """Post-freeze review, P2-1. The sibling test above only covers a
+    """The sibling test above only covers a
     pre-existing `RESERVED` row; this covers `SETTLED` -- a real, tempting
     future "optimization" is `if not is_new and reservation.state ==
     "RESERVED":`, refusing only the unsettled case and letting a `SETTLED`
@@ -1136,7 +1133,7 @@ def test_a_settled_reservation_also_refuses_to_resend(conn: sqlite3.Connection) 
 def test_a_missing_credential_refuses_before_reserving_or_sending(
     conn: sqlite3.Connection,
 ) -> None:
-    """P3-3's regression test. `_send`'s order used to be estimate -> reserve
+    """`_send`'s order used to be estimate -> reserve
     -> invoke, with no credential check at all -- a broken-key run wrote a
     permanent `RESERVED` row for every attempt before the real `TypeError`
     surfaced deep inside `.invoke()`. Mutation-verified: removing the
@@ -1266,7 +1263,7 @@ def test_two_distinct_turns_settle_two_distinct_rows(conn: sqlite3.Connection) -
 def test_a_repair_turns_estimate_counts_the_correction_header(
     conn: sqlite3.Connection,
 ) -> None:
-    """Post-freeze review, caveat 1 part 1. Before this fix, `_send`
+    """Before this fix, `_send`
     estimated `system_text + context_text + repair_errors` directly --
     23 characters short of what the human message (`content`) actually
     contains once `"\\n\\n## Correction needed\\n"` is spliced in ahead of
@@ -1302,16 +1299,16 @@ def test_a_repair_turns_estimate_counts_the_correction_header(
 
 
 def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> None:
-    """Post-freeze review, caveat 2. Both reviewers rejected asserting on
-    `LiveClaudeModel`'s private `_client` attribute; this asserts on
-    `_build_chat_anthropic`'s own return value instead --
+    """Deliberately asserting on
+    `_build_chat_anthropic`'s own return value, not
+    `LiveClaudeModel`'s private `_client` attribute --
     `default_request_timeout`/`max_tokens`/`max_retries`/`model` are all
     public pydantic fields on `ChatAnthropic` (confirmed against the
     installed `langchain-anthropic` package's own `model_fields`, not a
     private `causalops` attribute). `max_retries` is pinned alongside the
     timeout deliberately: a silent SDK-level retry would send a second
     request under a reservation sized for one, the same failure family
-    P1-1 closed for the reservation math itself. Constructing a
+    the reservation math itself closes. Constructing a
     `ChatAnthropic` performs no I/O -- nothing here reaches
     `tests/conftest.py`'s network guard, and no `ANTHROPIC_API_KEY` is
     needed."""
@@ -1323,24 +1320,22 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
     assert client.model == CHEAP_PRICING.model_name
 
 
-# --- Unit 3b-4, item 5: the schema-vs-application cross-check ------------
+# --- the schema-vs-application cross-check --------------------------------
 #
-# The root-cause investigation behind this unit found five payloads the
-# emitted wire schema ACCEPTS that the application REFUSES -- a class of
-# gap Unit 3b-3's own review could not have caught, because it tested the
-# schema against itself ("is `default` consistent with `required`?"), never
-# against the application code that actually refuses a run. `schema_accepts`
-# below is a small, dependency-free validator over exactly the JSON Schema
-# keywords these seven current tool schemas use -- adapted from
-# `3b4-KEEP-schema_gap_check.py` (the investigation's own working
-# prototype, verified there to reproduce all five contracts) into a real,
-# asserting test. `KNOWN_PROSE_ONLY_CONTRACTS` is the registry every
-# payload the two checks below exercise must be named in, with a pointer to
-# the prose that actually carries the rule -- `test_an_undocumented_prose_
-# only_contract_fails_the_check` demonstrates what happens to one that
-# is not.
+# A root-cause investigation found five payloads the emitted wire schema
+# ACCEPTS that the application REFUSES -- a class of gap an earlier schema-only
+# review could not have caught, because it tested the schema against itself
+# ("is `default` consistent with `required`?"), never against the application
+# code that actually refuses a run. `schema_accepts` below is a small,
+# dependency-free validator over exactly the JSON Schema keywords these seven
+# current tool schemas use -- adapted from an early working prototype, verified
+# there to reproduce all five contracts, into a real, asserting test.
+# `KNOWN_PROSE_ONLY_CONTRACTS` is the registry every payload the two checks
+# below exercise must be named in, with a pointer to the prose that actually
+# carries the rule -- `test_an_undocumented_prose_
+# only_contract_fails_the_check` demonstrates what happens to one that is not.
 #
-# A NAMED LIMIT, post-freeze review, N4: this mechanism checks ONE tool's
+# A NAMED LIMIT: this mechanism checks ONE tool's
 # schema against ONE payload for that same tool -- it structurally cannot
 # express, and so cannot detect, any rule that spans more than one schema
 # or more than one call in a turn. None of these are expressible through
@@ -1355,7 +1350,7 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
 #   run so far, external to any tool's own schema entirely.
 # This is a boundary on what the mechanism CAN see, not an incomplete
 # audit of what it has looked at -- a future engineer should not read the
-# five (now four, item 1 closed one) known contracts as the exhaustive
+# five (now four, one already closed) known contracts as the exhaustive
 # list of every prose-only gap this codebase could ever have, only the
 # ones expressible as one schema's own single-payload shape.
 
@@ -1437,13 +1432,13 @@ def schema_accepts(
     return True, ""
 
 
-# Post-freeze review, P2-4. `schema_accepts` above is a hand-maintained
+# `schema_accepts` above is a hand-maintained
 # mirror of the JSON Schema keywords the seven current emitted tool schemas
 # use, not a general-purpose validator -- and a hand-maintained mirror can
 # silently narrow: `minItems`/`maxItems`/`minimum`/`maximum` were dropped
-# somewhere between `3b4-KEEP-schema_gap_check.py` (the investigation's own
-# scratch script, which already implements all four) and this file, in the
-# WEAKENING direction. Correctness measured the concrete consequence:
+# somewhere between an early scratch prototype (which already implemented
+# all four) and this file, in the
+# WEAKENING direction. Measured the concrete consequence directly:
 # `record_stop` with a single hypothesis, `Hypothesis.rank=0`, and
 # `search_runbooks.limit=999` are all real pydantic rejections that
 # `schema_accepts` reported as "accepted." Nothing among the known
@@ -1453,7 +1448,7 @@ def schema_accepts(
 # false, silently, with no test noticing.
 #
 # The two sets below, plus the walker and the test after them, are the
-# stronger fix the owner chose over just restoring the four keywords:
+# stronger fix chosen over just restoring the four keywords:
 # a coverage assertion that catches the NEXT dropped keyword automatically,
 # not just this one restored by hand.
 _SCHEMA_ACCEPTS_HANDLED_KEYWORDS = frozenset(
@@ -1495,7 +1490,7 @@ _SCHEMA_ACCEPTS_ANNOTATION_KEYWORDS = frozenset(
         "default",
     }
 )
-# Round 8 review, P3. The KEYWORD `"type"` being recognized (above) is a
+# The KEYWORD `"type"` being recognized (above) is a
 # different claim from every VALUE it can take being one `schema_accepts`
 # actually branches on. Today's real schemas only ever use `"null"`,
 # `"object"`, `"array"`, `"string"`, `"integer"` -- all five handled below
@@ -1564,7 +1559,7 @@ def test_schema_accepts_implements_every_keyword_the_real_schemas_use() -> None:
     proving it is sensitive to exactly the class of drift that dropped all
     four keywords between the scratch script and this file.
 
-    Round 8 review, P3. Also asserts on the second half of
+    Also asserts on the second half of
     `_collect_schema_keywords`'s return: every VALUE the real schemas'
     `"type"` keyword takes must be one `schema_accepts` has a branch for,
     not just a keyword the mirror above recognizes by name."""
@@ -1631,16 +1626,15 @@ KNOWN_PROSE_ONLY_CONTRACTS: dict[str, str] = {
 }
 
 
-# Post-freeze review, N2 -- proves the open #27 finding for real.
 # `KNOWN_PROSE_ONLY_CONTRACTS` above only ever pointed at where the
 # documentation prose LIVES, in free text a human reads; nothing ever
-# verified the prose actually EXISTS. Correctness proved the gap with a
+# verified the prose actually EXISTS. Proved the gap with a
 # mutation: deleting `FinalAssessment.disposition`'s `Field(description=
 # ...)` in `domain.py` left all 529 tests green, because the only test
 # that could have noticed (`test_the_tool_payload_size_matches_what_
 # pricingpy_assumes`) measures total payload characters, not any one
 # field's content -- and that test measures `propose()`'s payload only
-# (N1, above), which does not even contain `record_final_assessment`'s
+# (see above), which does not even contain `record_final_assessment`'s
 # schema.
 #
 # Each entry below names the SAME contract from `KNOWN_PROSE_ONLY_
@@ -1669,12 +1663,12 @@ _WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
 }
 
 
-# Round 4 review, F2. The subset check below used to prove only that every
+# The subset check below used to prove only that every
 # PROOF entry is registered -- it never proved the reverse, that every
 # REGISTERED contract has a proof. A fifth prose-only contract added to
 # `KNOWN_PROSE_ONLY_CONTRACTS` without a matching `_WIRE_VISIBLE_PROSE_
 # PROOF` entry would pass silently, with no wire-proof requirement on it
-# at all -- exactly the shape of gap N2 closed for the first four.
+# at all -- exactly the shape of gap already closed for the first four.
 #
 # A registered contract's prose does not always live in a single JSON
 # schema field's `description`, though -- some rules are raised as a
@@ -1686,7 +1680,7 @@ _WIRE_VISIBLE_PROSE_PROOF: dict[str, tuple[str, tuple[str, ...], str]] = {
 # proof requirement without silently defeating this test for a future
 # contract that legitimately needs to.
 #
-# Round 6 review. This registry was a bare `frozenset[str]`, its two
+# This registry was a bare `frozenset[str]`, its two
 # siblings above (`KNOWN_PROSE_ONLY_CONTRACTS`, `_WIRE_VISIBLE_PROSE_
 # PROOF`) both force a reason/pointer alongside every entry; a frozenset
 # has no room for one, so a future exemption added here would carry no
@@ -1719,8 +1713,8 @@ def test_wire_visible_prose_proof_only_names_registered_contracts() -> None:
 
 
 def test_every_wire_proof_exemption_carries_a_real_reason() -> None:
-    """Round 7 review. `_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` became a
-    `dict[str, str]` in round 6 so an exemption could not be added without
+    """`_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF` became a
+    `dict[str, str]` so an exemption could not be added without
     a stated reason, matching its two sibling registries -- but the test
     above only ever reads `set(_PROSE_ONLY_CONTRACTS_WITHOUT_WIRE_PROOF)`,
     the dict's KEYS, and never looks at the values it exists to force. A
@@ -1773,10 +1767,10 @@ def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
 
 
 def test_service_field_descriptions_name_the_real_restriction() -> None:
-    """Fix F9. The model has no way to know which service records which
+    """The model has no way to know which service records which
     metric/log category, and guessed `"inventory"` with real, quantified
-    frequency across two paid live batches (see `UNIT6_FOLLOWUP_PLAN.md`'s
-    F9 design). `query_metric.service` and `query_logs.service` now each
+    frequency across two paid live batches. `query_metric.service` and
+    `query_logs.service` now each
     carry a `Field(description=...)` stating the real per-service
     restriction, so the model can rule out an empty-by-construction guess
     before spending a check on it -- not merely that a `description` key
@@ -1805,7 +1799,7 @@ def assert_documented_prose_only_contract(
     label: str, schema: dict[str, Any], payload: dict[str, Any], *, app_refuses: bool
 ) -> None:
     """The cross-check itself. A payload the schema accepts and the
-    application refuses is exactly the shape of gap this unit's
+    application refuses is exactly the shape of gap the surrounding
     investigation was launched to find; requiring `label` to already be in
     `KNOWN_PROSE_ONLY_CONTRACTS` is what makes a new, undocumented one fail
     this assertion instead of shipping quietly."""
@@ -1888,25 +1882,24 @@ def test_each_known_final_assessment_contract_is_schema_accepted_and_app_refused
 
 
 def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
-    """Demonstrates item 5's mechanism has teeth, using a real, not
-    contrived, gap this unit did not add to `KNOWN_PROSE_ONLY_CONTRACTS`.
+    """Demonstrates the cross-check mechanism has teeth, using a real, not
+    contrived, gap not yet added to `KNOWN_PROSE_ONLY_CONTRACTS`.
 
     `contrary_evidence_ids` was this test's original example -- it fed the
     identical forged-citation check `supporting_evidence_ids` does, but was
-    left undocumented by item 4's first pass. The owner ruled that gap
-    fixed (see `FinalAssessment.contrary_evidence_ids`'s own description in
+    left undocumented at first. That gap is now fixed (see
+    `FinalAssessment.contrary_evidence_ids`'s own description in
     `domain.py`), which correctly makes it disappear from this test too --
     keeping it here after fixing it would demonstrate nothing.
 
-    `search_runbooks.limit` is its replacement, a *different* gap in the
-    same "schema allows more than the application actually admits" family,
-    explicitly recorded as open and NOT in this unit's approved scope
-    (`3b4-approved-scope.md`'s P3-2): the wire schema admits `limit` up to
-    20 (`SearchRunbooksArguments.limit`, `le=20`), but `policy.authorize`
-    denies anything above `Budgets.runbook_passages` (5) with
-    `ReasonCode.RESULT_LIMIT_EXCEEDED` -- a real policy denial, invoked
-    here directly rather than simulated, that this unit does not fix
-    because P3-2 was explicitly ruled out of scope."""
+    `search_runbooks.limit` is its replacement, a *different* gap in the same
+    "schema allows more than the application actually admits" family,
+    explicitly recorded as open and out of scope for now: the wire schema
+    admits `limit` up to 20 (`SearchRunbooksArguments.limit`, `le=20`), but
+    `policy.authorize` denies anything above `Budgets.runbook_passages` (5)
+    with `ReasonCode.RESULT_LIMIT_EXCEEDED` -- a real policy denial, invoked
+    here directly rather than simulated, that is deliberately left unfixed for
+    now."""
     domain_tools = _domain_tool_definitions()
     (search_runbooks_tool,) = [
         tool for tool in domain_tools if tool["name"] == ToolName.SEARCH_RUNBOOKS.value
@@ -1921,7 +1914,6 @@ def test_an_undocumented_prose_only_contract_fails_the_check() -> None:
     }
     label = "search_runbooks: limit above Budgets.runbook_passages"
     assert label not in KNOWN_PROSE_ONLY_CONTRACTS
-
     arguments = SearchRunbooksArguments.model_validate(
         {
             **{

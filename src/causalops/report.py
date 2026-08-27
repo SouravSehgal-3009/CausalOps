@@ -76,15 +76,15 @@ def evidence_section(
 
 
 def guidance_section(report: InvestigationReport) -> list[str]:
-    """§7's asymmetry, closed: incident evidence gets a full section above;
-    guidance was surfaced only as a `retrieval_mode` line in `budget_section`
-    until this section existed. `report.runbook_passage_ids` is every
-    passage this run retrieved (§6's "guidance ... can never prove an
-    incident cause" is why this reads ids, never the assessment's
-    `supporting_evidence_ids` -- guidance and evidence citations stay in
-    their own separate fields, the way `FinalAssessment`'s own docstring
-    already keeps them). `(cited)` marks a passage the model actually named
-    in `runbook_citations`; an unmarked one was retrieved but not used."""
+    """Incident evidence gets a full section above; guidance gets its own
+    section here too, not just a `retrieval_mode` line in `budget_section`.
+    `report.runbook_passage_ids` is every passage this run retrieved --
+    guidance alone can never prove an incident's cause, which is why this
+    reads ids, never the assessment's `supporting_evidence_ids`: guidance
+    and evidence citations stay in their own separate fields, the way
+    `FinalAssessment`'s own docstring already keeps them. `(cited)` marks a
+    passage the model actually named in `runbook_citations`; an unmarked
+    one was retrieved but not used."""
     lines = ["## Guidance it consulted", ""]
     if not report.runbook_passage_ids:
         lines.append("No runbook guidance was retrieved.")

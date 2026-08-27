@@ -32,7 +32,7 @@ from causalops.run_records import (
 
 
 def finished_run() -> tuple[InvestigationResult, RunRecorder]:
-    """Driven through the graph orchestrator (Unit 1d-1): this file's subject
+    """Driven through the graph orchestrator: this file's subject
     is artifact writing, never which orchestrator produced the run, so it
     re-points at `run_graph_investigation` rather than staying tied to the
     retiring loop. `valid_diagnosis.json` has no `{{...}}` placeholders --
@@ -141,9 +141,9 @@ def test_results_live_under_the_investigation_id(tmp_path: Path) -> None:
 def test_a_replay_run_answers_which_window_and_what_was_expected_from_disk_alone(
     tmp_path: Path,
 ) -> None:
-    """The live-reproduction proof lab-defect-fix Unit 1 (W11) exists for.
+    """The live-reproduction proof this persistence exists for.
 
-    The `TOOL_SELECTION_BIAS_FINDINGS.md` investigation had to run a fresh,
+    An earlier investigation had to run a fresh,
     paid, live reproduction against the Docker lab to answer "which window
     produced this zero, and what did the model expect to see" for the
     billed evaluation run's own saved artifacts -- neither question was

@@ -127,7 +127,7 @@ class MechanicalScores(BaseModel):
     # applicability.
     #
     # `= None` here, unlike `citations_sufficient` above: this is a
-    # brand-new field (F5/F6), so a pre-F6 historical `records.jsonl` line
+    # brand-new field, so an older historical `records.jsonl` line
     # never wrote this key at all -- the default lets it validate as `None`
     # on read rather than fail, matching how the value is scored anyway on
     # any record this old. See `test_evaluation.py`'s
@@ -153,7 +153,7 @@ class MechanicalScores(BaseModel):
 
 
 class EvaluationRecord(BaseModel):
-    """One scored run of the Unit 3c paired live comparison.
+    """One scored run of the paired live comparison.
 
     The reproducibility fields below are `TECHNICAL_SPEC.md` §10's own list
     verbatim ("Record Git SHA, clean/dirty status, fixture/prompt/policy/
@@ -168,7 +168,7 @@ class EvaluationRecord(BaseModel):
     field would only ever repeat what `investigation_id` already says.
 
     `extra="forbid"` matches the project-wide tightening every other
-    wire-facing model already carries (Unit `single-turn-tool-protocol`):
+    wire-facing model already carries:
     this record is written to and read back from disk the same way those
     models are, so an unrecognized field on read is a real, actionable
     surprise, not something to silently drop.
@@ -266,7 +266,7 @@ def cited_evidence(
     is a different question from which side it argues, and a contrary
     citation should still be checked for existence.
 
-    Before the incident-id filter (an earlier round's fix), an
+    Before the incident-id filter below existed, an
     `evidence_id` match alone was enough regardless of which incident a
     record belonged to, so `citations_sufficient` could be satisfied by a
     cross-incident record even on a report `citations_are_valid` correctly
@@ -626,17 +626,17 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
         # record this pipeline produces today, the two conditions agree:
         # `score_run` already sets `citations_sufficient=None` exactly when
         # `expected.predicates` is empty, so `is not None` and
-        # `bool(expected.predicates)` pick out the same records. The
-        # difference only matters for a HISTORICAL record saved under the
-        # pre-F4 scorer (`SCORER_VERSION == "2"`), which could still carry a
-        # stale `citations_sufficient=True` on an empty-predicate family --
-        # deriving applicability from the record's own `expected.predicates`
-        # instead re-applies F4's fix on read, so summarizing an old record
-        # doesn't reproduce the exact vacuous-truth bug F4 exists to close.
-        # Both counts are gated on the SAME condition deliberately: gating
-        # only the denominator would let a stale `True` still inflate the
-        # numerator while the record is excluded from the denominator,
-        # producing a numerator that can exceed it.
+        # `bool(expected.predicates)` pick out the same records. The difference
+        # only matters for a HISTORICAL record saved under an earlier scorer
+        # (`SCORER_VERSION == "2"`), which could still carry a stale
+        # `citations_sufficient=True` on an empty-predicate family -- deriving
+        # applicability from the record's own `expected.predicates` instead
+        # re-applies the fix on read, so summarizing an old record doesn't
+        # reproduce the exact vacuous-truth bug this scoring exists to close.
+        # Both counts are gated on the SAME condition deliberately: gating only
+        # the denominator would let a stale `True` still inflate the numerator
+        # while the record is excluded from the denominator, producing a
+        # numerator that can exceed it.
         citations_sufficient_count=sum(
             1
             for record in records

@@ -1,4 +1,4 @@
-"""Unit 3b-2: `LiveClaudeModel`, the live Claude adapter.
+"""`LiveClaudeModel`, the live Claude adapter.
 
 Implements the exact `propose`/`respond` shape `models.py`'s `ToolCallingModel`
 protocol names -- the same shape `ReplayToolCallingModel` implements --
@@ -157,12 +157,12 @@ _DOMAIN_TOOL_SPECS: tuple[tuple[type[BaseModel], ToolName, str], ...] = (
     ),
 )
 
-# Unit 3b-4 addendum, A1: both fields already carried `maxLength: 300`
+# Both fields already carried `maxLength: 300`
 # (provider-unenforced, per the root-cause investigation) without their
-# description ever stating the bound in words -- the same gap item 3 fixed
-# on four other fields, missed here because these two are synthetic
-# properties this module injects rather than a `domain.py` field item 3's
-# sweep was scoped to. More exposed than any of those four: both are
+# description ever stating the bound in words -- the same gap other
+# `domain.py` fields already close, missed here because these two are
+# synthetic properties this module injects rather than a `domain.py`
+# field. More exposed than any of those: both are
 # REQUIRED on every domain-tool call, not once per run.
 _RATIONALE_PROPERTIES: dict[str, JsonValue] = {
     "evidence_gap": {
@@ -216,7 +216,7 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     `HypothesesRecord`'s schema (`hypotheses_schema` and its `$defs`) rather
     than sharing one. The five-fold duplication of that one shared schema
     is essentially the whole size increase from the two-call protocol this
-    project used before Unit 3b-4's single-call rewrite -- not five
+    project used before the single-call rewrite -- not five
     independently large tools.
     """
     definitions: list[dict[str, Any]] = []
@@ -250,7 +250,7 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
 
 
 def _stop_tool_definition() -> dict[str, Any]:
-    # Unit 3b-4, item 6: keeps `Hypothesis.__doc__` ("Rank is not a
+    # Keeps `Hypothesis.__doc__` ("Rank is not a
     # probability") -- genuine guidance about how to fill the field in --
     # while stripping any other class-level docstring `StopRecord`'s own
     # `$defs` might carry (`RootCauseCode` has none today; this keeps the
@@ -270,10 +270,9 @@ def _stop_tool_definition() -> dict[str, Any]:
 
 
 def _final_assessment_schema() -> dict[str, Any]:
-    """Unit 3b-2, P2-5, generalized by Unit 3b-4's item 6. `domain.py`'s
-    `FinalAssessment` -- unlike this module's own `StopRecord` -- is a
-    shared domain model, not written just for this tool definition, so its
-    `model_json_schema()` carries two things this tool's `input_schema`
+    """`domain.py`'s `FinalAssessment` -- unlike this module's own `StopRecord`
+    -- is a shared domain model, not written just for this tool definition, so
+    its `model_json_schema()` carries two things this tool's `input_schema`
     must not ship to Claude as-is:
 
     - `schema_version`: application bookkeeping (`domain.SCHEMA_VERSION`)
@@ -288,7 +287,7 @@ def _final_assessment_schema() -> dict[str, Any]:
       application-side type boundary for a maintainer reading `domain.py`,
       not guidance about how to fill the tool in -- the hand-written
       `"description"` string in `_final_assessment_tool_definition` below,
-      and the field-level `description`s Unit 3b-4 added directly to
+      and the field-level `description`s already added directly to
       `FinalAssessment`'s own fields, already say what Claude needs to
       know.
     """
@@ -308,7 +307,7 @@ def _final_assessment_schema() -> dict[str, Any]:
 def _final_assessment_tool_definition() -> dict[str, Any]:
     return {
         "name": RECORD_FINAL_ASSESSMENT_TOOL_NAME,
-        # Unit 3b-4, item 2: states the same three terminal-disposition
+        # States the same three terminal-disposition
         # invariants `domain.py`'s `check_terminal_invariants` enforces,
         # restated per-field on `disposition`/`root_cause`/
         # `supporting_evidence_ids` themselves (see those fields'
@@ -329,7 +328,7 @@ def _final_assessment_tool_definition() -> dict[str, Any]:
 class MissingCredential(Exception):
     """No `ANTHROPIC_API_KEY` was present when this run started.
 
-    Unit 3b-2, P3-3: raised in `_send`, before *any* reservation, on every
+    Raised in `_send`, before *any* reservation, on every
     turn a credential is missing -- not just the first. `ChatAnthropic()`
     does not raise at construction even with no key (confirmed against the
     installed SDK); the actual failure was a `TypeError` deep inside
@@ -393,7 +392,7 @@ def _has_visible_content(content: object) -> bool:
     -- the ordinary shape once extended thinking is on
     (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}`
     unconditionally) -- burning the run's one repair slot on a wholly valid
-    turn; caught in review before landing, fixed by allow-listing the three
+    turn; fixed by allow-listing the three
     real provider block types explicitly instead of rejecting every list.
     """
     if content in ("", []):
@@ -430,8 +429,8 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     automatic retries anywhere in this project, and the cost gate in
     `_send` already made one deliberate send decision for this
     reservation -- a silent SDK-level retry would send a second request
-    under a reservation sized for one, the same failure mode P1-1 exists
-    to close for the reservation math itself.
+    under a reservation sized for one, the same failure mode the reservation
+    math itself exists to close.
     `thinking`/`reasoning_effort`: Claude Sonnet 5 runs adaptive thinking
     regardless (omitting `thinking` already runs adaptive per the
     installed SDK's own model-support table), set explicitly here so the
@@ -449,7 +448,7 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     assumed) -- `model_config`'s `populate_by_name=True` means the plain
     names work at runtime too, but only the aliases satisfy `mypy src lab`.
 
-    `timeout=MAX_REQUEST_SECONDS` (Unit 3b-2, P2-4): closes
+    `timeout=MAX_REQUEST_SECONDS` closes
     `TECHNICAL_OVERVIEW.md`'s "Default limits" table's own "Model call |
     90 seconds | specified, not enforced" row -- a request that hangs past
     this many seconds raises rather than tying up the process indefinitely,
@@ -493,11 +492,11 @@ class LiveClaudeModel:
         self._pricing = pricing
         self._ceiling_usd = ceiling_usd
         self._clock = clock
-        # Unit 3b-2, P3-3. A plain `bool`, checked by `cli.py` before this
+        # A plain `bool`, checked by `cli.py` before this
         # object is even constructed -- see `MissingCredential`'s docstring
         # for why the check lives there and not here. Defaults `True` so a
         # test-seam construction (`client=` below) that never passes this
-        # keyword keeps behaving exactly as it did before this fix.
+        # keyword keeps behaving as if the credential were always present.
         self._credential_present = credential_present
         # Test seam: `tests/unit/test_live_model.py` passes a fake here so
         # this module's logic (schema derivation, single-call validation,
@@ -514,7 +513,7 @@ class LiveClaudeModel:
         `respond` path below goes through, so the gate cannot be bypassed by
         a future call site that forgets it."""
         if not self._credential_present:
-            # Unit 3b-2, P3-3. Checked first, before the input-cap check and
+            # Checked first, before the input-cap check and
             # before any reservation -- the cheapest possible refusal, on
             # every turn a credential is missing, not just the first. See
             # `MissingCredential`'s docstring for the money bug this closes.
@@ -522,12 +521,12 @@ class LiveClaudeModel:
                 f"{request.stage.value} turn refused: no credential was "
                 "present when this run started"
             )
-        # Unit 3b-2, caveat 1 (post-freeze review). `content` is composed
+        # `content` is composed
         # here, before either the cap check or the reservation below, so
         # both price the *actual* rendered human message -- correction
         # header included when `repair_errors` is set -- rather than a
         # proxy that reconstructs `content` a second time, later, and can
-        # silently drift from what estimation saw. Before this fix, the
+        # silently drift from what estimation saw. An earlier version's
         # estimate summed `system_text + context_text + repair_errors`
         # directly, undercounting the 23 literal characters of
         # `"\n\n## Correction needed\n"` that `content` gets on a repair
@@ -538,20 +537,19 @@ class LiveClaudeModel:
         estimated_input_tokens = estimate_input_tokens(request.system_text + content)
         if estimated_input_tokens > MAX_INPUT_TOKENS:
             raise InputTooLarge(estimated_input_tokens)
-        # Unit 3b-2, P1-1. The reservation must price what actually goes out
+        # The reservation must price what actually goes out
         # on the wire: prose *plus* the tool schema `bind_tools` sends on
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
         # binds `_stop_tool_definition()` plus the five `_domain_tool_
         # definitions()`, 13,404 tokens in the current emitted schema
-        # (Fix F1's revised `MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_
+        # (a `MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_
         # CAPACITY` rename -- from `RESOURCE_POOL_UTILIZATION`, a name that
         # falsely implied boundedness -- added 10 bytes to `query_metric`'s
-        # embedded schema over the prior 12,829; Fix F9 then added a
+        # embedded schema over the prior 12,829; a later change then added a
         # `Field(description=...)` to `QueryMetricArguments.service` and
         # `QueryLogsArguments.service`, growing the figure again, 12,839 ->
-        # 13,404 -- the third growth of this figure within this same
-        # remediation unit);
+        # 13,404, the third growth of this figure to date);
         # `respond()` binds only `_final_assessment_tool_definition()`,
         # 2,292 tokens in the current emitted schema.
         # `test_live_model.py` pins both figures separately, so this
@@ -585,7 +583,7 @@ class LiveClaudeModel:
             requested_at=requested_at,
             ceiling_usd=self._ceiling_usd,
         )
-        # Unit 3b-4 addendum, Group B. `is_new is False` means a reservation
+        # `is_new is False` means a reservation
         # for this exact key already existed BEFORE this call -- a crash
         # between an earlier reserve and its settle, then a resume that
         # re-renders this identical stage, would land here. Checked before
@@ -656,8 +654,8 @@ class LiveClaudeModel:
         # No error channel on `ModelResponse` -- an empty `content` dict
         # fails `FinalAssessment`'s own required-field validation for a
         # genuine, informative reason (`disposition`/`root_cause` missing)
-        # rather than this module fabricating one. Unit 3b-4 addendum, C4:
-        # this used to take the FIRST matching call via `next(...)`,
+        # rather than this module fabricating one. This module used to
+        # take the FIRST matching call via `next(...)`,
         # silently discarding a second, possibly conflicting, call NAMED
         # `record_final_assessment` -- the same rule the proposal path's
         # exact-one-call validation in `propose()` already enforces. Zero
@@ -665,12 +663,12 @@ class LiveClaudeModel:
         # the same repair path, rather than the codebase silently picking
         # a winner.
         #
-        # Post-freeze review, Finding 3: C4's own fix above checked only
-        # the matching-name count, still missing a turn that sends exactly
+        # Checking only the matching-name count is still not enough: a
+        # turn that sends exactly
         # one `record_final_assessment` call ALONGSIDE some other,
-        # unbound tool name -- `len(matching_calls) == 1` alone would pass
-        # that turn through, silently dropping the extra call the same way
-        # C4 was built to stop happening. `message.tool_calls`'s installed
+        # unbound tool name would pass through under a matching-name-only
+        # check, silently dropping the extra call the same way this whole
+        # check exists to prevent. `message.tool_calls`'s installed
         # client (`langchain-anthropic==1.6.1`, confirmed by reading
         # `output_parsers.py:80-92`) copies whatever tool name the
         # provider sends with no validation against the bound list, so
