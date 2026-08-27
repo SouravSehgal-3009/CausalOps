@@ -281,6 +281,30 @@ becomes `"7"`. No scenario below proposes `query_logs` against
 `ambiguous_telemetry` or reaches a disposition this predicate change could
 affect, so stage sequence, ids, disposition, receipt shapes, evidence
 kinds, and event vocabulary are all unaffected.
+
+**Lab-defect-fix F8 moves `final_context_digest` for exactly two of the
+six scenarios below, and no version.** Unlike every digest move above,
+this one is not a `SYSTEM_TEXT`/`STAGE_INSTRUCTIONS` edit -- F8 changed
+`run_changes_check`'s (`telemetry.py`) own returned `.summary` string to
+embed real change content instead of a bare count, so `render_context`'s
+rendered `## Evidence` section differs on any turn that already has a
+`CHANGE`-kind evidence record, which feeds directly into `context_text`
+and so into the digest. Only the two scenarios that call `write_changes`/
+propose `list_recent_changes` -- `test_the_graph_reproduces_the_frozen_
+report_for_two_executed_checks` and `test_a_simulated_slow_machine_still_
+matches_the_frozen_report`, both built on `LAB_DIAGNOSIS_FIXTURE` with
+`change_row(1)`'s default `"config update"` summary -- ever render that
+evidence, so only their two literals move; confirmed by running the suite
+before and after, exactly these two failed on `final_context_digest` and
+nothing else. No version constant changes: `SYSTEM_TEXT`/`STAGE_
+INSTRUCTIONS`/every tool schema are untouched, so `prompt_version`/
+`policy_version`/`tool_registry_version` all stay at their prior values
+(`"7"`/`"4"`/`"5"`) and `assert_report_matches_frozen`'s `Versions(...)`
+literal is unchanged. Stage sequence, ids, disposition, receipt shapes,
+and event vocabulary are unaffected for all six scenarios -- F8 only
+changes what a `CHANGE` evidence record's `.summary` field says, never
+whether a check executes, what it returns as its typed payload, or which
+ids the counting-id harness mints.
 """
 
 from pathlib import Path
@@ -947,7 +971,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "cf92eff3de0e3da29136a5a4c3aa502a560c785bc8f82c5916983c1fc23bd01b"
+            "3786401ae111fc74873d78f9d9da23ddd5eee316fa8ea88c74b964ce7bf1ddd4"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -1048,7 +1072,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "cf92eff3de0e3da29136a5a4c3aa502a560c785bc8f82c5916983c1fc23bd01b"
+            "3786401ae111fc74873d78f9d9da23ddd5eee316fa8ea88c74b964ce7bf1ddd4"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

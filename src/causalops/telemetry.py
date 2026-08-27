@@ -35,6 +35,7 @@ from causalops.tools import (
 )
 
 MAX_LOG_ROWS = 40
+MAX_SUMMARY_CONTENT_CHARS = 220
 
 
 class RunPaths(BaseModel):
@@ -389,11 +390,44 @@ def run_changes_check(
         if payload["truncated"]
         else ""
     )
+    # Lab-defect-fix F8. `payload["summaries"]` (rebuilt above, post-trim)
+    # is the only place the actual change content lives -- `render_context`
+    # (`prompts.py`) puts only this function's returned `.summary` in front
+    # of the model, never `.payload`, so a bare count here made the model
+    # blind to content it had already fetched (confirmed against a real
+    # paid run: the model cited a `list_recent_changes` evidence record as
+    # supporting while its own stated uncertainty said it never saw change
+    # content -- true, given what it was shown). Capped and truncated with
+    # an explicit marker so this can never approach `Evidence.summary`'s
+    # hard `max_length=400` (`domain.py`) -- `build_evidence`
+    # (`tool_wrappers.py`) constructs `Evidence` outside any try/except by
+    # design, so an over-length summary here would not fail safely, it
+    # would crash the whole investigation.
+    content = str(payload["summaries"])
+    if len(content) > MAX_SUMMARY_CONTENT_CHARS:
+        content = content[:MAX_SUMMARY_CONTENT_CHARS] + "..."
+    content_note = f": {content}" if content else ""
+    summary = (
+        f"{payload['change_count']} recent changes on "
+        f"{arguments.service}{truncated_note}{content_note}"
+    )
+    # Defensive, matching this function's own established pattern
+    # (`assert fits(payload)` above): confirmed unreachable today given the
+    # cap above (`change_count` is bounded well under 4 digits by
+    # `trim_to_bytes`'s own row cap, `arguments.service` is a short
+    # identifier, `truncated_note` is a short fixed template, and
+    # `content_note` is capped at `MAX_SUMMARY_CONTENT_CHARS` plus the fixed
+    # `"..."` truncation marker and the `": "` prefix) --
+    # kept anyway so a future change to any of those pieces fails loudly
+    # here instead of silently corrupting the evidence record it produces.
+    assert len(summary) <= 400, (
+        f"changes summary of {len(summary)} chars exceeds Evidence.summary's "
+        "max_length=400 bound"
+    )
     return executed_check(
         EvidenceKind.CHANGE,
         source,
-        f"{payload['change_count']} recent changes on "
-        f"{arguments.service}{truncated_note}",
+        summary,
         payload,
         started,
     )

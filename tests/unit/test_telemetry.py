@@ -29,7 +29,7 @@ from causalops.domain import (
     ToolOutcome,
     ToolProposal,
 )
-from causalops.evidence import MAX_RESULT_BYTES
+from causalops.evidence import MAX_RESULT_BYTES, build_evidence
 from causalops.prometheus import (
     MAX_METRIC_SAMPLES,
     METRIC_STEP_SECONDS,
@@ -1018,6 +1018,58 @@ def test_changes_summaries_only_name_changes_still_present_after_trimming(
             )
 
 
+def test_a_pathologically_long_changes_summary_still_builds_valid_evidence(
+    tmp_path: Path,
+) -> None:
+    """Lab-defect-fix F8. `run_changes_check`'s summary now embeds up to
+    `MAX_SUMMARY_CONTENT_CHARS` of real change content, capped and marked
+    with "..." -- this proves the cap actually holds against `Evidence.
+    summary`'s hard `max_length=400` bound (`domain.py`), not just against
+    this function's own internal assert. `build_evidence`
+    (`tool_wrappers.py:556`) constructs `Evidence` with no try/except around
+    it by design, so a summary this function ever let through over 400
+    chars would not fail safely -- it would crash the whole investigation.
+    Reuses the same 30-change, 300-char-summary fixture shape as
+    `test_changes_summaries_only_name_changes_still_present_after_trimming`
+    above, which already proves the payload itself stays inside
+    `MAX_RESULT_BYTES`; this test's own claim is narrower and different --
+    that the returned `.summary` string specifically survives the trip
+    through `build_evidence` into a real `Evidence` record."""
+    paths = RunPaths(root=tmp_path)
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": "orders",
+                    "summary": f"change-{index:03d}: " + "s" * 300,
+                }
+                for index in range(30)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service="orders", window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert len(outcome.summary) <= 400
+    evidence = build_evidence(
+        incident_id=INCIDENT_ID,
+        kind=outcome.kind,
+        source=outcome.source,
+        observed_at=WINDOW_END,
+        summary=outcome.summary,
+        payload=outcome.payload,
+    )
+    assert evidence.summary == outcome.summary
+
+
 def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(
     tmp_path: Path,
 ) -> None:
@@ -1121,6 +1173,12 @@ def test_recent_changes_are_filtered_by_service_and_window(tmp_path: Path) -> No
 
     assert outcome.payload["change_count"] == 1
     assert "require_order_token" in str(outcome.payload["summaries"])
+    # Lab-defect-fix F8. `render_context` (`prompts.py`) only ever shows the
+    # model `Evidence.summary`, never `.payload` -- a model that correctly
+    # calls `list_recent_changes` and gets the right evidence still could
+    # not see what it said until the change content itself reached this
+    # field too, not just the structured payload.
+    assert "require_order_token" in outcome.summary
 
 
 def test_topology_reads_the_run_manifest(tmp_path: Path) -> None:
