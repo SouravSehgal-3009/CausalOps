@@ -2519,7 +2519,7 @@ from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
 the original figure and survived the rewrite to the new one. The valid
 example is a HYPOTHESIS_UPDATE after runbook retrieval: one check remains,
 it can retain all five `Budgets.runbook_passages`, and its proposal-tool
-binding is 12,839 characters/tokens. By
+binding is 13,404 characters/tokens. By
 contrast, FINAL_ASSESSMENT binds its 2,292-token schema, and its
 5,577-character full-runbook context fits the resulting 7,308-token folded
 headroom. `test_live_model.py`'s
@@ -2530,7 +2530,7 @@ prose plus tools does not, and proves the fake transport is still sent. Unit
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 12,839, which is already larger than the 9,600-token prose cap. Folding
+is 13,404, which is already larger than the 9,600-token prose cap. Folding
 proposal schemas into that cap would therefore refuse even an empty proposal
 request; final-assessment schemas do not have that problem. The test derives
 the proposal-stage folded headroom from emitted definitions instead of
@@ -2864,7 +2864,7 @@ round.
   payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
   unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
   assumes`, pinned the final schema at **2,261 characters/tokens** at that
-  historical point. The current single-call proposal measurement is 12,839 for
+  historical point. The current single-call proposal measurement is 13,404 for
   proposals and 2,292 for final assessments; `_send` names them separately.
 - **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
   mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
@@ -3140,7 +3140,7 @@ line is intentionally skipped individually so valid log rows still produce evide
 `settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
 caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
 
-**Post-review single-call schema update.** Current proposal tool schemas are 12,839 serialized
+**Post-review single-call schema update.** Current proposal tool schemas are 13,404 serialized
 characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
 schema is 2,292. The gap between the two is mechanical, not five independently large tools:
 Anthropic tool schemas are self-contained, with no cross-tool `$ref`, so each of the five
@@ -3671,6 +3671,11 @@ bounded-looking ratio. The `in_use > capacity` exhaustion check and the
 `TOOL_REGISTRY_VERSION` moves `"4"` → `"5"`; the rename adds another 10 bytes
 to `query_metric`'s embedded schema (12,829 → 12,839). Zero fixtures reference
 any `resource_pool_*` template id (grep-confirmed), so no frozen digest moves.
+Fix F9 later added a `Field(description=...)` to `QueryMetricArguments.service`
+and `QueryLogsArguments.service`, naming which service records which metric/
+log category for the model; `TOOL_REGISTRY_VERSION` moves `"5"` → `"6"`, and
+the two new descriptions grow the embedded schema a third time in this same
+lineage (12,829 → 12,839 → 13,404).
 
 **Frozen-report impact.** `tests/unit/test_graph_frozen_reports.py`'s shared
 `Versions(...)` literal moves all three fields at once. Only the two scenarios
@@ -3678,6 +3683,27 @@ whose script contains a real `DENIED` receipt move their own
 `final_context_digest` (F2's new section renders only when a denial has actually
 occurred); the other four scenarios, and F1/F3 alone, move no digest — confirmed
 by running the suite before and after each fix.
+
+### Addendum — F9, the model couldn't tell which service publishes which metric/log
+
+**On top of Unit A's F1 above, this same remediation arc later added F9.** Adversarial
+expert review of two real paid live evaluation batches found the model repeatedly
+guessed the wrong `service` argument on `query_metric`/`query_logs` calls — most often
+`"inventory"`, a service that publishes none of the four `query_logs` categories and
+none of `resource_pool_attempts_per_capacity`'s single-publisher metric — in 3 of the 8
+real tool-enabled runs across those two batches, each time burning half the run's
+two-check evidence budget on a call that could never return a signal. Neither argument's
+schema said anything about which service records what: `QueryMetricArguments.service`
+and `QueryLogsArguments.service` were both a bare `str`, with the per-service
+restriction knowable only from `lab/services/*.py`'s own source, never surfaced to the
+model. Both fields now carry a `Field(description=...)` stating the real restriction in
+prose — which service is the sole publisher of which metric template, and which
+services log which of the four log categories. `ListRecentChangesArguments.service`
+deliberately stays undescribed: unlike a metric or log category, which service records
+a change entry is scenario-specific fault data, not fixed lab architecture — describing
+it would leak evaluation ground truth into the tool schema itself. `TOOL_REGISTRY_
+VERSION` moves `"5"` → `"6"` (the byte-count mechanics of this schema growth are
+recorded in Unit A's F1 (revised) paragraph above, not repeated here).
 
 ## Superseded v1 evaluation design
 

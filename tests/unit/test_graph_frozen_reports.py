@@ -652,7 +652,7 @@ def assert_report_matches_frozen(
         schema_version="1",
         prompt_version="7",
         policy_version="4",
-        tool_registry_version="5",
+        tool_registry_version="6",
     )
 
 

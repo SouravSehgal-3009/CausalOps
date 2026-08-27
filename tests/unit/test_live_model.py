@@ -241,12 +241,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the current ~12,839-token tool schema `bind_tools`
+    against prose alone, never the current ~13,404-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~12,839" restates
+    the pinned, directly-measured figure this comment's "~13,404" restates
     in prose."""
     model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
@@ -346,13 +346,18 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     # above) inside `QueryMetricArguments`'s own schema -- this is the
     # second growth of this same pinned literal within this one
     # remediation unit (12,824 -> 12,829 for F1's original rename, now
-    # 12,829 -> 12,839 for this revised rename), a real drift this pin
-    # exists to catch each time, not one to explain away.
-    assert len(payload) == 12_839
+    # 12,829 -> 12,839 for this revised rename). Fix F9: `QueryMetricArguments.
+    # service`/`QueryLogsArguments.service` each gained a `Field(description=...)`
+    # naming which service records which metric/log category -- each appears
+    # once, in only its own tool's schema (query_metric, query_logs), not
+    # duplicated across all five domain tools the way `HypothesesRecord` is.
+    # A third growth (12,839 -> 13,404), a real drift this pin exists to
+    # catch each time, not one to explain away.
+    assert len(payload) == 13_404
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 12_839
+    assert estimate_input_tokens(payload) == 13_404
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
@@ -1765,6 +1770,35 @@ def test_the_registrys_pointed_at_descriptions_are_actually_present() -> None:
             f"schema to carry {expected_substring!r} in its description, "
             f"found {description!r}"
         )
+
+
+def test_service_field_descriptions_name_the_real_restriction() -> None:
+    """Fix F9. The model has no way to know which service records which
+    metric/log category, and guessed `"inventory"` with real, quantified
+    frequency across two paid live batches (see `UNIT6_FOLLOWUP_PLAN.md`'s
+    F9 design). `query_metric.service` and `query_logs.service` now each
+    carry a `Field(description=...)` stating the real per-service
+    restriction, so the model can rule out an empty-by-construction guess
+    before spending a check on it -- not merely that a `description` key
+    exists (an empty or unrelated string would pass a weaker check)."""
+    tools = {tool["name"]: tool["input_schema"] for tool in _domain_tool_definitions()}
+
+    metric_service_description = tools[ToolName.QUERY_METRIC]["properties"]["service"][
+        "description"
+    ]
+    assert "resource_pool_attempts_per_capacity" in metric_service_description
+    assert "only by orders" in metric_service_description
+    assert "gateway_error_rate" in metric_service_description
+    assert "recorded only by gateway/orders" in metric_service_description
+    assert "gateway_latency_p95" in metric_service_description
+    assert "every service" in metric_service_description
+
+    logs_service_description = tools[ToolName.QUERY_LOGS]["properties"]["service"][
+        "description"
+    ]
+    assert "orders logs all four categories" in logs_service_description
+    assert "never pool_exhaustion or config_reload" in logs_service_description
+    assert "inventory logs none of the four categories" in logs_service_description
 
 
 def assert_documented_prose_only_contract(

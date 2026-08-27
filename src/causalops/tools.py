@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "5"
+TOOL_REGISTRY_VERSION = "6"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -84,7 +84,14 @@ class QueryMetricArguments(BaseModel):
 
     tool: Literal[ToolName.QUERY_METRIC] = ToolName.QUERY_METRIC
     template: MetricTemplate
-    service: str
+    service: str = Field(
+        description=(
+            "Which service emitted this metric. resource_pool_attempts_per_capacity "
+            "is recorded only by orders. gateway_error_rate/downstream_timeout_rate "
+            "are recorded only by gateway/orders -- inventory's requests never fail "
+            "or time out. gateway_latency_p95 is recorded by every service."
+        )
+    )
     # Lab-defect-fix Unit 3, W1. Optional, not required: the model that just
     # wants "the incident" -- every observed case -- no longer has to
     # retype the window verbatim. `tool_wrappers.resolve_effective_window`
@@ -110,7 +117,14 @@ class QueryLogsArguments(BaseModel):
 
     tool: Literal[ToolName.QUERY_LOGS] = ToolName.QUERY_LOGS
     log_filter: LogFilter
-    service: str
+    service: str = Field(
+        description=(
+            "Which service to read logs from. orders logs all four categories "
+            "(errors_only/timeouts_only/pool_exhaustion/config_reload). gateway logs "
+            "errors_only/timeouts_only only, never pool_exhaustion or config_reload. "
+            "inventory logs none of the four categories."
+        )
+    )
     # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
     # above for the full rationale -- identical here.
     window_start: UtcDatetime | None = Field(
@@ -132,6 +146,11 @@ class ListRecentChangesArguments(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: Literal[ToolName.LIST_RECENT_CHANGES] = ToolName.LIST_RECENT_CHANGES
+    # Unlike the service/log restrictions on QueryMetricArguments.service and
+    # QueryLogsArguments.service above, which service records a change is
+    # scenario-specific fault data, not fixed lab architecture -- describing
+    # it here would leak evaluation ground truth into the tool schema, so
+    # this field deliberately stays undescribed.
     service: str
     # Lab-defect-fix Unit 3, W1. See `QueryMetricArguments.window_start`
     # above for the full rationale -- identical here.
