@@ -19,7 +19,11 @@ from pathlib import Path
 import pytest
 
 from causalops.domain import MetricSampleStatus, StoredIncident, ToolOutcome
-from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
+from causalops.prometheus import (
+    DEFAULT_PROMETHEUS_URL,
+    METRIC_QUERIES,
+    run_metric_check,
+)
 from causalops.scenario_control import reset_scenario, runs_root, start_scenario
 from causalops.tools import MetricTemplate, QueryMetricArguments
 
@@ -38,11 +42,18 @@ def test_the_renamed_gauge_returns_real_samples_from_the_running_lab() -> None:
     """`lab/services/orders.py` publishes `causalops_pool_attempts_per_
     capacity`; `causalops/prometheus.py`'s `METRIC_QUERIES` entry for
     `MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_CAPACITY` must query that
-    exact name. Asserting `status == SAMPLED` and `sample_count > 0` proves
-    the two sides actually agree today -- a stale name on either side would
-    make Prometheus return an empty series, which reads as `NO_RETURNED_
-    SERIES`/`sample_count == 0`, not an error, so nothing short of a real
-    query against a real Prometheus with real scraped data can catch it."""
+    exact name. `status == SAMPLED` and `sample_count > 0` alone are not
+    enough: this test runs against an already-running lab, never rebuilt
+    per-test, so a stale-on-BOTH-sides scenario (an old PromQL string still
+    querying an old gauge name, neither side renamed) would also return
+    real samples and pass those two checks -- they only prove *some* query
+    the app and the lab still agree on returned data, not that the app
+    queried the *new* name specifically. The `payload["promql"]` assertion
+    below is what actually proves that: it pins the exact query string sent
+    to Prometheus, built from the checked-in `METRIC_QUERIES` template
+    rather than a hardcoded literal, so it breaks loudly (not silently) if
+    the template is ever reformatted without the gauge name itself
+    changing."""
     incident_id = start_scenario(REPOSITORY, FAMILY, "evaluation")
 
     try:
@@ -58,6 +69,9 @@ def test_the_renamed_gauge_returns_real_samples_from_the_running_lab() -> None:
         outcome = run_metric_check(arguments, scope, DEFAULT_PROMETHEUS_URL, timeout=10)
 
         assert outcome.outcome is ToolOutcome.EXECUTED
+        template = METRIC_QUERIES[MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_CAPACITY]
+        expected_promql = template.format(service="orders", incident=scope.incident_id)
+        assert outcome.payload["promql"] == expected_promql
         assert outcome.payload["status"] == MetricSampleStatus.SAMPLED.value
         sample_count = outcome.payload["sample_count"]
         assert isinstance(sample_count, int)
