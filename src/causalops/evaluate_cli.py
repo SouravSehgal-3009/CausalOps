@@ -438,6 +438,9 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
     total = summary.total_records
     lines = [
         f"evaluation summary: {total} record(s)",
+        f"  correct_and_grounded:{summary.correct_and_grounded_count}/"
+        f"{summary.citations_sufficient_applicable_count} "
+        f"({summary.citations_sufficient_applicable_count}/{total} applicable)",
         f"  diagnosis_correct:   {summary.diagnosis_correct_count}/{total}",
         f"  disposition_correct: {summary.disposition_correct_count}/{total}",
         f"  citations_valid:     {summary.citations_valid_count}/{total}",

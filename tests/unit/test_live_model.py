@@ -366,7 +366,15 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
     one figure per-stage while only ONE of the two stages was
     ever actually pinned; `respond()`'s payload, priced by `reservation_
     usd` on every FINAL_ASSESSMENT turn exactly the way `propose()`'s is
-    on every INVESTIGATE turn, had no test noticing if it drifted."""
+    on every INVESTIGATE turn, had no test noticing if it drifted.
+
+    Instrumentation/feedback-truthfulness Unit B (F5) moves this from 2,292
+    to 2,422: `FinalAssessment.disposition`'s `Field(description=...)` in
+    `domain.py` gained one sentence requiring an abstention to still cite
+    the evidence that made the causes indistinguishable, and that
+    description is part of `_final_assessment_tool_definition()`'s own
+    schema, unlike `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`'s matching
+    sentence, which reaches the rendered prompt, not this tool payload."""
     call = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args={
@@ -384,8 +392,8 @@ def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    assert len(payload) == 2_292
-    assert estimate_input_tokens(payload) == 2_292
+    assert len(payload) == 2_422
+    assert estimate_input_tokens(payload) == 2_422
 
 
 def test_domain_tool_schemas_use_native_names_and_require_hypotheses(
@@ -453,11 +461,16 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # (a more specific label wins over CONFIG_CHANGE when its own evidence
     # is present), moving it a third time, from 1,747 to 1,895 -- the same
     # mechanism `test_graph_frozen_reports.py`'s own module docstring
-    # already documents for `final_context_digest`.
-    assert len(total) == 1_895
+    # already documents for `final_context_digest`. Instrumentation/
+    # feedback-truthfulness Unit B (F5) moves it a fourth time, from 1,895
+    # to 2,025: `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]` gained one
+    # sentence requiring an abstention to still cite the evidence that made
+    # the causes indistinguishable, and `context_text` above renders that
+    # exact stage's instructions.
+    assert len(total) == 2_025
     # Unit 3b-3: ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 1_895
+    assert estimate_input_tokens(total) == 2_025
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(

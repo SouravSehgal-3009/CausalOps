@@ -33,7 +33,22 @@
   "expected": {
     "root_cause": "UNDETERMINED",
     "disposition": "INSUFFICIENT_EVIDENCE",
-    "predicates": []
+    "predicates": [
+      {
+        "source": "query_logs",
+        "kind": "LOG",
+        "field": "event_codes",
+        "operator": "CONTAINS",
+        "value": "pool_exhausted"
+      },
+      {
+        "source": "query_logs",
+        "kind": "LOG",
+        "field": "event_codes",
+        "operator": "CONTAINS",
+        "value": "upstream_timeout"
+      }
+    ]
   },
   "seed_variants": {
     "development": {

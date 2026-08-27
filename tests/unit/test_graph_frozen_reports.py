@@ -251,6 +251,36 @@ file's rendered context text or any replay fixture (grep-confirmed) --
 `tool_registry_version="4"` becomes `"5"` with no digest movement of its
 own, confirmed by running the suite before and after this specific rename
 and observing zero new `final_context_digest` failures.
+
+**Instrumentation/feedback-truthfulness Unit B (F5) bumps `prompt_version`
+alone, and moves `final_context_digest` for five of the six scenarios
+below -- not all six.** `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`
+(`prompts.py`) gained one sentence requiring an abstention to still cite
+the evidence that made the causes indistinguishable. `context_text` is
+built as `f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}"`
+(`_render_stage_request`), so this only shifts a turn whose OWN stage is
+`FINAL_ASSESSMENT` -- unlike every earlier `SYSTEM_TEXT` edit above, which
+shifted every turn in every scenario because `system_text` is stage-
+independent. Five of the six scenarios below reach `Stage.FINAL_ASSESSMENT`
+on their last turn and pin `final_context_digest` from that turn, so their
+literals move. The sixth, `test_the_graph_reproduces_the_frozen_report_
+when_the_second_call_raises`, does not: `investigate`'s `ask_once`
+(`graph.py`) sets `stage = Stage.INITIAL_PLAN if turn_index == 0 else
+Stage.HYPOTHESIS_UPDATE` -- `investigate` never reaches `Stage.
+FINAL_ASSESSMENT`, which is only ever set inside the separate
+`normalize_evidence` node -- so that scenario's second (raising) call was
+still a `HYPOTHESIS_UPDATE` turn, and its `final_context_digest` is
+unaffected by this edit. Confirmed by running the suite before and after:
+exactly five of six tests failed on `final_context_digest`, and the sixth
+failed only on `assert_report_matches_frozen`'s `Versions(...)` pin, which
+moves for all six regardless of which turn's digest changed, since
+`PROMPT_VERSION` is a single global constant. `POLICY_VERSION`/
+`TOOL_REGISTRY_VERSION` are untouched by this unit, so those two fields in
+that same `Versions(...)` literal stay `"4"`/`"5"`; `prompt_version="6"`
+becomes `"7"`. No scenario below proposes `query_logs` against
+`ambiguous_telemetry` or reaches a disposition this predicate change could
+affect, so stage sequence, ids, disposition, receipt shapes, evidence
+kinds, and event vocabulary are all unaffected.
 """
 
 from pathlib import Path
@@ -596,7 +626,7 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="6",
+        prompt_version="7",
         policy_version="4",
         tool_registry_version="5",
     )
@@ -633,7 +663,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "bc0d229be4f04e14a6a735879f0c257882b72fe799ba34d16c48ab3ee5da255f"
+            "5e23922a6e074e97bff9f8ddfe95f387fca4e7ea279e36a1ef76f7013b7c66b5"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -709,7 +739,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "32e4c97f72244ee52722358c2282c111405f3e970a3ffd6dc17adf356b70af62"
+            "1d148df5d5178a0a0018f548ee8264c07091353fca5e5357046b22c2fc384d58"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -790,7 +820,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "76b6d21a16c7a42570ca9db0b81fc85dffd1049cfd98b2246f7d528ef76e31a6"
+            "c5763dbd66a075b22af00959f33f4bd28ca0162cedd688e49fd4a5c11af2f36f"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -917,7 +947,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "cd113fafea822d8e09caca9f141ddb92758a2bf80cf2e523d3a3243a5cb951b8"
+            "cf92eff3de0e3da29136a5a4c3aa502a560c785bc8f82c5916983c1fc23bd01b"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -1018,7 +1048,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "cd113fafea822d8e09caca9f141ddb92758a2bf80cf2e523d3a3243a5cb951b8"
+            "cf92eff3de0e3da29136a5a4c3aa502a560c785bc8f82c5916983c1fc23bd01b"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

@@ -20,7 +20,7 @@ from causalops.domain import (
 from causalops.models import Stage
 from causalops.tools import ToolName
 
-PROMPT_VERSION = "6"
+PROMPT_VERSION = "7"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -67,9 +67,15 @@ STAGE_INSTRUCTIONS: dict[Stage, str] = {
         "Revise the ranked hypotheses using the evidence so far, then either one "
         "further check proposal or a stop reason."
     ),
+    # F5: the last two sentences are deliberately duplicated in `domain.py`'s
+    # `FinalAssessment.disposition` Field description, for the tool-call
+    # JSON schema channel this rendered-prompt text doesn't reach -- see
+    # that field's own "Addendum, F5" comment.
     Stage.FINAL_ASSESSMENT: (
         "Give a diagnosis with a matching root cause and cited supporting evidence, "
-        "or abstain with UNDETERMINED when the evidence cannot separate the causes."
+        "or abstain with UNDETERMINED when the evidence cannot separate the causes. "
+        "An abstention must still cite the evidence that made the causes "
+        "indistinguishable in supporting_evidence_ids, not leave it empty."
     ),
 }
 

@@ -25,7 +25,7 @@ from causalops.domain import (
     Versions,
 )
 
-SCORER_VERSION = "3"
+SCORER_VERSION = "4"
 
 OUT_OF_SCOPE_REASONS = frozenset(
     {
@@ -104,17 +104,36 @@ class MechanicalScores(BaseModel):
     # well-posed. `diagnosis_correct` always has a definite answer because
     # every `ExpectedOutcome` names exactly one `root_cause` to compare
     # against. `citations_sufficient` asks whether the cited evidence
-    # satisfies every predicate in `expected.predicates` -- and a family
-    # can legitimately declare none (`ambiguous_telemetry`, the one family
-    # in this corpus with no required-evidence predicate at all). `all(())`
-    # is `True` in Python, so a bare `bool` here silently scored every such
-    # run `citations_sufficient=True`, including a run with a wrong
-    # diagnosis and nothing cited -- there was no predicate to fail. `None`
-    # is the honest third value: "this family declares no required-evidence
-    # predicate, not applicable" is a different fact from "the predicates it
-    # declared were satisfied" (`True`) or "were not" (`False`), and
-    # collapsing it into either would misreport which one actually happened.
+    # satisfies every predicate in `expected.predicates` -- and a family can
+    # legitimately declare none, even though every family in this corpus
+    # today does (a future family could still ship with an empty set).
+    # `all(())` is `True` in Python, so a bare `bool` here silently scored
+    # every such run `citations_sufficient=True`, including a run with a
+    # wrong diagnosis and nothing cited -- there was no predicate to fail.
+    # `None` is the honest third value: "this family declares no
+    # required-evidence predicate, not applicable" is a different fact from
+    # "the predicates it declared were satisfied" (`True`) or "were not"
+    # (`False`), and collapsing it into either would misreport which one
+    # actually happened.
     citations_sufficient: bool | None
+    # `diagnosis_correct AND citations_sufficient`, restated below because
+    # neither field alone answers it: a run can cite grounded, predicate-
+    # satisfying evidence for the WRONG root cause (`citations_sufficient`
+    # true, `diagnosis_correct` false), or reach the right root cause without
+    # citing the evidence that actually justifies it (`diagnosis_correct`
+    # true, `citations_sufficient` false). `None` under the identical
+    # no-predicate condition `citations_sufficient` itself uses -- never
+    # computed independently, so the two fields can never disagree on
+    # applicability.
+    #
+    # `= None` here, unlike `citations_sufficient` above: this is a
+    # brand-new field (F5/F6), so a pre-F6 historical `records.jsonl` line
+    # never wrote this key at all -- the default lets it validate as `None`
+    # on read rather than fail, matching how the value is scored anyway on
+    # any record this old. See `test_evaluation.py`'s
+    # `test_a_pre_f6_record_missing_correct_and_grounded_still_summarizes_
+    # correctly` for the read-compatibility proof.
+    correct_and_grounded: bool | None = None
     control: ControlCounts
     efficiency: Efficiency
 
@@ -355,22 +374,32 @@ def score_run(
     diagnosis_correct = (
         report.assessment is not None and report.root_cause is expected.root_cause
     )
+    # `None` when the family declares no required-evidence predicate at
+    # all -- see `MechanicalScores.citations_sufficient`'s own comment
+    # for why `all(())` being `True` made this the exact vacuous-truth
+    # bug being fixed here (an empty `expected.predicates` tuple used to
+    # score `True` unconditionally, including on a wrong diagnosis).
+    citations_sufficient = (
+        None
+        if not expected.predicates
+        else all(
+            any(satisfies(predicate, record) for record in supported)
+            for predicate in expected.predicates
+        )
+    )
     return MechanicalScores(
         diagnosis_correct=diagnosis_correct,
         disposition_correct=report.disposition is expected.disposition and not rejected,
         citations_valid=citations_are_valid(report, evidence),
-        # `None` when the family declares no required-evidence predicate at
-        # all -- see `MechanicalScores.citations_sufficient`'s own comment
-        # for why `all(())` being `True` made this the exact vacuous-truth
-        # bug being fixed here (an empty `expected.predicates` tuple used to
-        # score `True` unconditionally, including on a wrong diagnosis).
-        citations_sufficient=(
+        citations_sufficient=citations_sufficient,
+        # Gated on the identical `expected.predicates` condition as
+        # `citations_sufficient` above -- computed from that same local, not
+        # a separately re-derived expression -- so the two fields can never
+        # disagree on which records are applicable.
+        correct_and_grounded=(
             None
             if not expected.predicates
-            else all(
-                any(satisfies(predicate, record) for record in supported)
-                for predicate in expected.predicates
-            )
+            else diagnosis_correct and citations_sufficient
         ),
         control=count_control(report, receipts),
         efficiency=Efficiency(
@@ -407,6 +436,15 @@ class EvaluationSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     total_records: int
+    # A run counts here only if it both reached the right root cause AND
+    # cited evidence satisfying every required predicate -- the joint
+    # question neither `diagnosis_correct_count` nor
+    # `citations_sufficient_count` answers alone. Gated on the same
+    # `record.expected.predicates` condition as `citations_sufficient_count`
+    # below, so it shares that count's own `citations_sufficient_applicable_
+    # count` denominator rather than a separate `*_applicable_count` field --
+    # see `summarize_evaluation`'s own comment on this computation.
+    correct_and_grounded_count: int
     diagnosis_correct_count: int
     disposition_correct_count: int
     # `TECHNICAL_SPEC.md` §10 lists "citation validity and citation
@@ -543,6 +581,23 @@ def summarize_evaluation(records: Sequence[EvaluationRecord]) -> EvaluationSumma
     actual_min, actual_max = _min_max(actual_usd_known)
     return EvaluationSummary(
         total_records=len(records),
+        # Re-derived fresh from `diagnosis_correct`/`citations_sufficient`
+        # here, never from a record's own stored `scores.correct_and_
+        # grounded` field -- a historical record saved before this field
+        # existed reads back with `correct_and_grounded=None` (a plain
+        # Pydantic default, not a migration), and trusting that stale/absent
+        # value for the summary count would either undercount it or require
+        # a second special case. Deriving fresh instead means this count is
+        # correct for every record regardless of which scorer version wrote
+        # it, matching `citations_sufficient_count`'s own established
+        # discipline exactly.
+        correct_and_grounded_count=sum(
+            1
+            for record in records
+            if record.expected.predicates
+            and record.scores.diagnosis_correct
+            and record.scores.citations_sufficient is True
+        ),
         diagnosis_correct_count=sum(
             1 for record in records if record.scores.diagnosis_correct
         ),

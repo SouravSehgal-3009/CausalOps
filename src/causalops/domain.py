@@ -603,12 +603,24 @@ class FinalAssessment(BaseModel):
     # the tool's own top-level description -- collapsing to one copy risks
     # losing the guidance entirely if the sibling form is ever silently
     # ignored. Load-bearing redundancy, not duplication to prune.
+    #
+    # Addendum, F5: the final sentence below ("An abstention must still
+    # cite...") is ALSO deliberately duplicated in `prompts.py`'s
+    # `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]`, a different duplication
+    # than A5's above -- that copy reaches the rendered prompt text, this
+    # one reaches only this tool-call JSON schema, so a model needs both to
+    # see the rule regardless of which channel it actually reads. See
+    # `test_live_model.py`'s `test_the_respond_tool_payload_size_matches_
+    # what_pricingpy_assumes` docstring for how this sentence's token cost
+    # is accounted for on each side.
     disposition: ModelDisposition = Field(
         description=(
             "DIAGNOSED requires a root_cause other than UNDETERMINED and at "
             "least one supporting_evidence_ids entry. Use "
             "INSUFFICIENT_EVIDENCE with root_cause UNDETERMINED to abstain "
-            "instead of guessing."
+            "instead of guessing. An abstention must still cite the evidence "
+            "that made the causes indistinguishable in supporting_evidence_ids, "
+            "not leave it empty."
         )
     )
     root_cause: RootCauseCode = Field(

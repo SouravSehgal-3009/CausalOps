@@ -618,6 +618,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     and policy/control aggregates, and never mentions a percentile."""
     summary = EvaluationSummary(
         total_records=2,
+        correct_and_grounded_count=1,
         diagnosis_correct_count=1,
         disposition_correct_count=2,
         citations_valid_count=2,
@@ -656,6 +657,7 @@ def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() ->
     rendered = render_evaluation_summary(summary)
 
     assert "evaluation summary: 2 record(s)" in rendered
+    assert "correct_and_grounded:1/2 (2/2 applicable)" in rendered
     assert "diagnosis_correct:   1/2" in rendered
     assert "disposition_correct: 2/2" in rendered
     assert "citations_valid:     2/2" in rendered
@@ -686,6 +688,7 @@ def test_render_evaluation_summary_shows_the_applicable_denominator_apart() -> N
     record count."""
     summary = EvaluationSummary(
         total_records=3,
+        correct_and_grounded_count=1,
         diagnosis_correct_count=3,
         disposition_correct_count=3,
         citations_valid_count=3,
@@ -700,6 +703,38 @@ def test_render_evaluation_summary_shows_the_applicable_denominator_apart() -> N
     rendered = render_evaluation_summary(summary)
 
     assert "citations_sufficient:1/2 (2/3 applicable)" in rendered
+
+
+def test_render_evaluation_summary_shows_correct_and_grounded_first() -> None:
+    """The approved F6 design: `correct_and_grounded` renders above
+    `diagnosis_correct`, not merely present anywhere in the output -- a
+    precise ordering assertion, since the two metrics answer overlapping
+    questions and a reader scanning top-to-bottom should see the joint
+    metric first."""
+    summary = EvaluationSummary(
+        total_records=2,
+        correct_and_grounded_count=1,
+        diagnosis_correct_count=1,
+        disposition_correct_count=2,
+        citations_valid_count=2,
+        citations_sufficient_count=1,
+        citations_sufficient_applicable_count=2,
+        scorer_versions=("4",),
+        input_tokens_known_count=0,
+        output_tokens_known_count=0,
+        actual_usd_known_count=0,
+    )
+
+    rendered = render_evaluation_summary(summary)
+    lines = rendered.splitlines()
+    correct_and_grounded_index = next(
+        index for index, line in enumerate(lines) if "correct_and_grounded:" in line
+    )
+    diagnosis_correct_index = next(
+        index for index, line in enumerate(lines) if "diagnosis_correct:" in line
+    )
+
+    assert correct_and_grounded_index < diagnosis_correct_index
 
 
 def test_render_evaluation_summary_of_an_empty_batch_says_no_data() -> None:

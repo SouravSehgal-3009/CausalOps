@@ -1,4 +1,6 @@
+import json
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fake_incident import (
@@ -211,6 +213,7 @@ def test_a_correct_cited_diagnosis_scores_on_every_count() -> None:
     assert scores.disposition_correct
     assert scores.citations_valid
     assert scores.citations_sufficient
+    assert scores.correct_and_grounded
 
 
 def test_citing_evidence_that_misses_the_required_fact_is_insufficient() -> None:
@@ -275,11 +278,13 @@ def test_a_predicate_matched_only_by_contrary_evidence_is_insufficient() -> None
 
 def test_no_predicate_family_is_not_applicable_on_a_correct_diagnosis() -> None:
     """The fix this test exists for: `all(())` is `True` in Python, so a
-    family declaring no required-evidence predicate (`ambiguous_telemetry`
-    is the one such family in this corpus today) used to score
+    family declaring no required-evidence predicate at all used to score
     `citations_sufficient=True` unconditionally -- `None` is the honest
     value instead: there was no predicate to satisfy, so this is not a
-    signal about the citations at all."""
+    signal about the citations at all. Every family in this corpus declares
+    at least one predicate today (F5); this test uses a synthetic
+    empty-predicates `ExpectedOutcome` to keep covering the no-predicate
+    case regardless."""
     evidence = timeout_evidence()
     report = diagnosed_report((evidence.evidence_id,))
     expected = expected_diagnosis().model_copy(update={"predicates": ()})
@@ -288,6 +293,7 @@ def test_no_predicate_family_is_not_applicable_on_a_correct_diagnosis() -> None:
 
     assert scores.diagnosis_correct
     assert scores.citations_sufficient is None
+    assert scores.correct_and_grounded is None
 
 
 def test_no_predicate_family_is_not_applicable_on_a_wrong_diagnosis() -> None:
@@ -306,6 +312,7 @@ def test_no_predicate_family_is_not_applicable_on_a_wrong_diagnosis() -> None:
 
     assert not scores.diagnosis_correct
     assert scores.citations_sufficient is None
+    assert scores.correct_and_grounded is None
 
 
 def test_a_wrong_cause_or_disposition_scores_false() -> None:
@@ -322,6 +329,65 @@ def test_a_wrong_cause_or_disposition_scores_false() -> None:
 
     assert not scores.diagnosis_correct
     assert not scores.disposition_correct
+
+
+def test_correct_and_grounded_requires_both_a_right_answer_and_grounded_citations() -> (
+    None
+):
+    """F6's own full truth table. The non-obvious case (`diagnosis_correct=
+    True`, `citations_sufficient=False` -> `correct_and_grounded=False`) is
+    the entire reason this field exists apart from either input alone: a
+    right answer resting on citations that don't actually satisfy the
+    required predicate must not count as grounded."""
+    evidence = timeout_evidence()
+
+    # diagnosis_correct=True, citations_sufficient=True -> True.
+    right_and_grounded = score_run(
+        diagnosed_report((evidence.evidence_id,)),
+        [evidence],
+        [receipt()],
+        expected_diagnosis(),
+    )
+    assert right_and_grounded.diagnosis_correct
+    assert right_and_grounded.citations_sufficient
+    assert right_and_grounded.correct_and_grounded is True
+
+    # diagnosis_correct=True, citations_sufficient=False -> False.
+    weak = packet_evidence()[0]
+    right_but_ungrounded = score_run(
+        diagnosed_report((weak.evidence_id,)),
+        [weak],
+        [receipt()],
+        expected_diagnosis(),
+    )
+    assert right_but_ungrounded.diagnosis_correct
+    assert not right_but_ungrounded.citations_sufficient
+    assert right_but_ungrounded.correct_and_grounded is False
+
+    # diagnosis_correct=False, citations_sufficient=True -> False.
+    expected_other_cause = expected_diagnosis().model_copy(
+        update={"root_cause": RootCauseCode.CONFIG_CHANGE}
+    )
+    wrong_but_grounded = score_run(
+        diagnosed_report((evidence.evidence_id,)),
+        [evidence],
+        [receipt()],
+        expected_other_cause,
+    )
+    assert not wrong_but_grounded.diagnosis_correct
+    assert wrong_but_grounded.citations_sufficient
+    assert wrong_but_grounded.correct_and_grounded is False
+
+    # diagnosis_correct=False, citations_sufficient=False -> False.
+    wrong_and_ungrounded = score_run(
+        diagnosed_report((weak.evidence_id,)),
+        [weak],
+        [receipt()],
+        expected_other_cause,
+    )
+    assert not wrong_and_ungrounded.diagnosis_correct
+    assert not wrong_and_ungrounded.citations_sufficient
+    assert wrong_and_ungrounded.correct_and_grounded is False
 
 
 def test_control_behaviour_counts_denials_by_kind() -> None:
@@ -923,6 +989,10 @@ def test_summarize_evaluation_counts_true_false_and_not_applicable_apart() -> No
     assert summary.total_records == 4
     assert summary.citations_sufficient_count == 2
     assert summary.citations_sufficient_applicable_count == 3
+    # The two applicable-and-true, diagnosis-correct records both count;
+    # the applicable-but-wrong-diagnosis record and the not-applicable
+    # record do not, regardless of their own `citations_sufficient` value.
+    assert summary.correct_and_grounded_count == 2
 
 
 def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
@@ -991,6 +1061,55 @@ def test_a_stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable() -
     assert summary.scorer_versions == ("2",)
 
 
+def test_a_pre_f6_record_missing_correct_and_grounded_still_summarizes_correctly() -> (
+    None
+):
+    """F6's own read-compatibility test, the same shape as F4's `test_a_
+    stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable`
+    immediately above. `correct_and_grounded` is a brand-new field, so a
+    `records.jsonl` line written before F6 landed simply has no
+    `correct_and_grounded` key at all under `scores` -- a literal JSON
+    string reproducing that exact pre-F6 shape must still validate (the
+    plain `bool | None = None` default), and `summarize_evaluation` must
+    still produce the mathematically correct count from it, since the
+    summary-level count is re-derived fresh from `diagnosis_correct`/
+    `citations_sufficient`, never from the stored per-record field."""
+    pre_f6_record = (
+        '{"schema_version": "1", "scorer_version": "3", '
+        '"run_key": "incident-1/causalops/tool_enabled", '
+        '"investigation_id": "inv-1", "incident_id": "incident-1", '
+        '"expected": {"root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION", '
+        '"disposition": "DIAGNOSED", "predicates": [{"source": "query_metric", '
+        '"kind": "METRIC", "template": "downstream_timeout_rate", '
+        '"field": "timeouts_per_minute", "operator": "AT_LEAST", "value": 10}]}, '
+        '"scores": {"diagnosis_correct": true, "disposition_correct": true, '
+        '"citations_valid": true, "citations_sufficient": true, '
+        '"control": {"denied": 0, "duplicate": 0, "out_of_scope": 0, '
+        '"invalid_responses": 0, "unsettled": 0}, '
+        '"efficiency": {"latency_ms": 100, "model_calls": 1, '
+        '"tools_executed": 0, "input_tokens": null, "output_tokens": null}}, '
+        '"git_sha": "' + "0" * 40 + '", "git_dirty": false, '
+        '"versions": {"schema_version": "1", "prompt_version": "1", '
+        '"policy_version": "1", "tool_registry_version": "1"}, '
+        '"retrieval_mode": "disabled", "runbook_corpus_version": "1", '
+        '"fixture_sha256": "' + "a" * 64 + '", '
+        '"model_name": "claude-sonnet-5", '
+        '"pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing", '
+        '"pricing_verified_on": "2026-08-24", "configured_ceiling_usd": 5.0, '
+        '"reserved_usd": 0.01, "actual_usd": 0.008}'
+    )
+
+    record = EvaluationRecord.model_validate_json(pre_f6_record)
+    # Reads back with the plain default -- no migration, no backfill.
+    assert record.scores.correct_and_grounded is None
+
+    summary = summarize_evaluation([record])
+
+    # Re-derived from diagnosis_correct=True and citations_sufficient=True,
+    # not from the absent stored field.
+    assert summary.correct_and_grounded_count == 1
+
+
 def test_citations_sufficient_numerator_never_exceeds_the_denominator() -> None:
     """Guards against a "denominator-only" half-fix: both
     `citations_sufficient_count` and `citations_sufficient_applicable_count`
@@ -1048,6 +1167,15 @@ def test_citations_sufficient_numerator_never_exceeds_the_denominator() -> None:
     )
     assert summary.citations_sufficient_count == 1
     assert summary.citations_sufficient_applicable_count == 2
+    # `correct_and_grounded_count` shares the same denominator and the same
+    # numerator-cannot-exceed-it property: `applicable_true` (diagnosis
+    # correct, citations sufficient) is the only one of the three that
+    # counts.
+    assert (
+        summary.correct_and_grounded_count
+        <= summary.citations_sufficient_applicable_count
+    )
+    assert summary.correct_and_grounded_count == 1
 
 
 def test_summarize_evaluation_matches_the_old_gate_for_score_run_output() -> None:
@@ -1155,3 +1283,30 @@ def test_summarize_evaluation_reports_the_distinct_scorer_versions_present() -> 
     uniform_summary = summarize_evaluation(uniform)
 
     assert uniform_summary.scorer_versions == ("3",)
+
+
+def test_every_scenario_family_declares_at_least_one_required_evidence_predicate() -> (
+    None
+):
+    """F5's own corpus-wide guard. No such check existed before this unit --
+    an earlier research pass assumed one did, but a repository-wide search
+    turned up nothing. Before F5, `ambiguous_telemetry` declared an empty
+    `predicates` array (`all(())` being vacuously `True` in Python is the
+    exact bug F4 fixed a `citations_sufficient` score around); this test
+    keeps that regression from silently returning, for `ambiguous_telemetry`
+    or any future scenario family, by loading every checked-in scenario
+    file directly rather than trusting a fixed family list to stay in
+    sync."""
+    repository = Path(__file__).resolve().parents[2]
+    scenario_files = sorted((repository / "lab" / "scenarios").glob("*.json"))
+
+    assert scenario_files, "expected at least one scenario file under lab/scenarios"
+
+    for scenario_file in scenario_files:
+        scenario = json.loads(scenario_file.read_text(encoding="utf-8"))
+        predicates = scenario["expected"]["predicates"]
+        assert predicates, (
+            f"{scenario_file.name} declares no required-evidence predicate -- "
+            "every family must declare at least one so a wrong diagnosis can "
+            "never score citations_sufficient=True vacuously"
+        )
