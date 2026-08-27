@@ -20,13 +20,17 @@ orders = LabService(name="orders", port=8081, path="/orders")
 
 
 class LeakyPool:
-    """A per-incident slot counter that never releases what it hands out.
+    """A per-incident slot-acquisition-attempt counter that never releases.
 
     This is not real concurrency tracking; it is just enough state to make a
     resource pool observably exhaust itself as fault traffic accumulates.
-    It assumes sequential, single-threaded callers, matching how
-    `drive_traffic` in `scenario_control.py` drives traffic today;
-    concurrent use would need a lock around `acquire`.
+    Every call to `acquire` counts as one attempt, whether or not the pool
+    actually has room -- a refused request is still a real attempt against
+    the pool, so this counter is deliberately unbounded above once attempts
+    outstrip capacity, not a bounded occupancy count. It assumes sequential,
+    single-threaded callers, matching how `drive_traffic` in
+    `scenario_control.py` drives traffic today; concurrent use would need a
+    lock around `acquire`.
     """
 
     def __init__(self) -> None:
@@ -58,28 +62,36 @@ def handle(request_id: str) -> RouteResult:
         endpoint="/orders",
         settings_loaded=len(configuration),
     )
-    in_use = pool.acquire(incident_id)
+    slots_requested = pool.acquire(incident_id)
     capacity = configuration.get(POOL_CAPACITY_SETTING)
-    # Fix F1. Publish utilization (a ratio), not the raw cumulative slot
-    # count `LeakyPool` hands out -- the raw count only ever grows across an
-    # incident's whole lifetime (baseline requests included, since
-    # `pool.acquire` above runs unconditionally on every request), so it
-    # was observably indistinguishable from a plain request counter and
-    # never actually measured pool occupancy. Guarded by `int(capacity) >
-    # 0`: no scenario today configures `pool_capacity: 0`, but an
-    # unguarded division would raise `ZeroDivisionError` on one if it ever
-    # did. This guard is on the *publish* only -- the exhaustion check
-    # below is unchanged, so a `pool_capacity: 0` config still exhausts
-    # immediately, exactly as it does today.
+    # Fix F1 (revised). Publish attempts-per-capacity, not raw utilization.
+    # `LeakyPool.acquire` above runs unconditionally on every request,
+    # including requests that will be refused for exceeding capacity below
+    # -- so this quantity can exceed 1.0 once attempts outstrip the pool,
+    # by design. That is honest, not a bug: a refused request is still a
+    # real attempt against the pool, and clamping it to 1.0 would make two
+    # scenario families that both exceed their own capacity (one of which
+    # is supposed to be diagnosable as pool saturation, the other
+    # deliberately ambiguous) read identically -- the exact confusion this
+    # metric exists to avoid. Guarded by `int(capacity) > 0`: no scenario
+    # today configures `pool_capacity: 0`, but an unguarded division would
+    # raise `ZeroDivisionError` on one if it ever did. This guard is on the
+    # *publish* only -- the exhaustion check below is unchanged, so a
+    # `pool_capacity: 0` config still exhausts immediately, exactly as it
+    # does today. Because the metric is honestly unbounded above, this
+    # publish-before-exhaustion-check ordering is correct by construction,
+    # not merely harmless.
     if capacity is not None and int(capacity) > 0:
-        orders.set_pool_utilization(in_use / int(capacity))
-    if capacity is not None and in_use > int(capacity):
+        orders.set_pool_attempts_per_capacity(slots_requested / int(capacity))
+    if capacity is not None and slots_requested > int(capacity):
         orders.log(
             "error",
             "pool_exhausted",
             request_id,
             config_key=POOL_CAPACITY_SETTING,
-            detail=f"{in_use} slots requested against a capacity of {capacity}",
+            detail=(
+                f"{slots_requested} slots requested against a capacity of {capacity}"
+            ),
         )
         return 500, {"error": "resource pool exhausted"}, "error"
     if configuration.get(TOKEN_SETTING, False):

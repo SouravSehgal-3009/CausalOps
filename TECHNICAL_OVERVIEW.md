@@ -2519,7 +2519,7 @@ from its own numbers: at 1,280 tokens of prose against the (then) 9,600 −
 the original figure and survived the rewrite to the new one. The valid
 example is a HYPOTHESIS_UPDATE after runbook retrieval: one check remains,
 it can retain all five `Budgets.runbook_passages`, and its proposal-tool
-binding is 12,829 characters/tokens. By
+binding is 12,839 characters/tokens. By
 contrast, FINAL_ASSESSMENT binds its 2,292-token schema, and its
 5,577-character full-runbook context fits the resulting 7,308-token folded
 headroom. `test_live_model.py`'s
@@ -2530,7 +2530,7 @@ prose plus tools does not, and proves the fake transport is still sent. Unit
 characters; the addendum round's A1/A2 (also below) then grew it back to
 **7,020** at that historical point, since both were additive prose fixes in
 the opposite direction from item 6's strip. The current strict-schema payload
-is 12,829, which is already larger than the 9,600-token prose cap. Folding
+is 12,839, which is already larger than the 9,600-token prose cap. Folding
 proposal schemas into that cap would therefore refuse even an empty proposal
 request; final-assessment schemas do not have that problem. The test derives
 the proposal-stage folded headroom from emitted definitions instead of
@@ -2864,7 +2864,7 @@ round.
   payload (priced by `reservation_usd` on every FINAL_ASSESSMENT turn) was completely
   unpinned. A second test, `test_the_respond_tool_payload_size_matches_what_pricingpy_
   assumes`, pinned the final schema at **2,261 characters/tokens** at that
-  historical point. The current single-call proposal measurement is 12,829 for
+  historical point. The current single-call proposal measurement is 12,839 for
   proposals and 2,292 for final assessments; `_send` names them separately.
 - **N2 — proves the open #27 finding for real.** `KNOWN_PROSE_ONLY_CONTRACTS` has always
   mapped a label to a string DESCRIBING where its prose lives; nothing ever verified the
@@ -3140,7 +3140,7 @@ line is intentionally skipped individually so valid log rows still produce evide
 `settle_reservation` now reports `RESERVATION_NOT_SETTLEABLE`, not `STORE_UNAVAILABLE`, when its
 caller supplies no matching `RESERVED` ledger row; actual SQLite failures retain the latter code.
 
-**Post-review single-call schema update.** Current proposal tool schemas are 12,829 serialized
+**Post-review single-call schema update.** Current proposal tool schemas are 12,839 serialized
 characters/tokens, larger than the prose-only 9,600-token cap; the final-assessment
 schema is 2,292. The gap between the two is mechanical, not five independently large tools:
 Anthropic tool schemas are self-contained, with no cross-tool `$ref`, so each of the five
@@ -3631,6 +3631,29 @@ reads only `Evidence.summary`. `TOOL_REGISTRY_VERSION` moves `"3"` → `"4"`; th
 rename also adds 5 bytes to `query_metric`'s own embedded schema (12,824 →
 12,829), mechanically bumping the pinned tool-payload-size tests in
 `test_live_model.py`.
+
+**F1 (revised) — the "utilization" name was still not honest, so it was
+renamed a second time within this same unit.** External review found
+`pool.acquire()` still increments `in_use` unconditionally, before the
+capacity check, so `in_use` can exceed `capacity` and the published ratio can
+read above `1.0` (e.g. `1.5`) -- not what "utilization" implies for a
+nominally-bounded resource. Clamping the ratio at `1.0` was considered and
+rejected: under the evaluation seed, `resource_pool_saturation` (capacity 7)
+and `ambiguous_telemetry` (capacity 13) both reach peak in-use 18, so a
+clamped ratio reads exactly `1.0` for both -- silently re-merging the exact
+pair Unit 4's W8 fix spent an entire isolated unit separating, and inviting a
+confident wrong `RESOURCE_POOL_SATURATION` diagnosis on `ambiguous_telemetry`,
+whose true answer is `UNDETERMINED`. Renamed instead, end to end:
+`causalops_pool_utilization` becomes `causalops_pool_attempts_per_capacity`;
+`MetricTemplate.RESOURCE_POOL_UTILIZATION` becomes `RESOURCE_POOL_ATTEMPTS_
+PER_CAPACITY`; `prometheus.py`'s query template follows. The new name is
+deliberately honest about being unbounded above -- a refused request is still
+a real attempt -- rather than reshaping the fix into a second attempt at a
+bounded-looking ratio. The `in_use > capacity` exhaustion check and the
+`int(capacity) > 0` publish guard are both unchanged by this rename.
+`TOOL_REGISTRY_VERSION` moves `"4"` → `"5"`; the rename adds another 10 bytes
+to `query_metric`'s embedded schema (12,829 → 12,839). Zero fixtures reference
+any `resource_pool_*` template id (grep-confirmed), so no frozen digest moves.
 
 **Frozen-report impact.** `tests/unit/test_graph_frozen_reports.py`'s shared
 `Versions(...)` literal moves all three fields at once. Only the two scenarios

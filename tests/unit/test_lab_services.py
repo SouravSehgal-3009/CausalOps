@@ -156,13 +156,13 @@ def test_the_gateway_reports_an_unreachable_upstream(
     assert "upstream_timeout" in events
 
 
-def pool_utilization_value(exposed: str, incident: str) -> float | None:
-    """The `causalops_pool_utilization` sample value for `orders`/`incident`,
-    or `None` if no such sample was ever published (the gauge has no
-    default -- `prometheus_client` only emits a sample for a label
-    combination that was actually `.labels(...).set(...)`)."""
+def pool_attempts_per_capacity_value(exposed: str, incident: str) -> float | None:
+    """The `causalops_pool_attempts_per_capacity` sample value for
+    `orders`/`incident`, or `None` if no such sample was ever published
+    (the gauge has no default -- `prometheus_client` only emits a sample
+    for a label combination that was actually `.labels(...).set(...)`)."""
     for family in text_string_to_metric_families(exposed):
-        if family.name != "causalops_pool_utilization":
+        if family.name != "causalops_pool_attempts_per_capacity":
             continue
         for sample in family.samples:
             if sample.labels.get("incident") == incident:
@@ -173,13 +173,19 @@ def pool_utilization_value(exposed: str, incident: str) -> float | None:
 def test_orders_exhausts_its_pool_past_capacity(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix F1. `causalops_pool_utilization` (`in_use / capacity`) replaces
-    the old `causalops_pool_in_use` raw cumulative-count gauge, which never
-    actually measured pool occupancy -- see `orders.py::handle`'s own
-    comment. The third request both publishes a real utilization ratio
-    (3 in use / capacity 2 = 1.5, published before the exhaustion check
+    """Fix F1 (revised). `causalops_pool_attempts_per_capacity` (slot
+    acquisition attempts / capacity) replaces the old raw
+    `causalops_pool_in_use` cumulative-count gauge, which never actually
+    measured pool occupancy -- see `orders.py::handle`'s own comment. The
+    third request both publishes a real attempts-per-capacity ratio (3
+    attempts / capacity 2 = 1.5, published before the exhaustion check
     below runs) and trips the exhaustion refusal -- both facts checked
-    here, not just the refusal."""
+    here, not just the refusal. A value above 1.0 is EXPECTED and CORRECT
+    for this metric: it counts every acquisition attempt, including the
+    one that gets refused, so it climbs past 1.0 exactly when the pool is
+    actually exhausted -- that is the signal, not a bug to fix. Also
+    proves BOTH the old raw-counter gauge name and the old "utilization"
+    name are gone from `/metrics`, not just replaced additively."""
     import orders
 
     activate(runs, POOL_INCIDENT)
@@ -196,21 +202,22 @@ def test_orders_exhausts_its_pool_past_capacity(
 
     exposed = generate_latest(orders.orders.registry).decode("utf-8")
     assert "causalops_pool_in_use" not in exposed
-    assert pool_utilization_value(exposed, POOL_INCIDENT) == 1.5
+    assert "causalops_pool_utilization" not in exposed
+    assert pool_attempts_per_capacity_value(exposed, POOL_INCIDENT) == 1.5
     assert (status, outcome) == (500, "error")
     assert "pool" in str(body)
     events = [record["event"] for record in log_lines(runs, "orders", POOL_INCIDENT)]
     assert "pool_exhausted" in events
 
 
-def test_orders_publishes_no_utilization_when_pool_capacity_is_unset(
+def test_orders_publishes_no_attempts_per_capacity_when_pool_capacity_is_unset(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix F1. No `pool_capacity` configured -> no utilization ratio can be
-    computed, and none is published -- not a sample of `0` or `None`, no
-    sample line at all, matching a `configuration_change`-style scenario
-    before this unit's fixture mitigation added `pool_capacity` to its own
-    `faulted_config`."""
+    """Fix F1. No `pool_capacity` configured -> no attempts-per-capacity
+    ratio can be computed, and none is published -- not a sample of `0` or
+    `None`, no sample line at all, matching a `configuration_change`-style
+    scenario before this unit's fixture mitigation added `pool_capacity`
+    to its own `faulted_config`."""
     import orders
 
     incident = "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e"
@@ -222,19 +229,19 @@ def test_orders_publishes_no_utilization_when_pool_capacity_is_unset(
     orders.handle("req-1")
 
     exposed = generate_latest(orders.orders.registry).decode("utf-8")
-    assert pool_utilization_value(exposed, incident) is None
+    assert pool_attempts_per_capacity_value(exposed, incident) is None
 
 
-def test_orders_publishes_no_utilization_when_pool_capacity_is_zero(
+def test_orders_publishes_no_attempts_per_capacity_when_pool_capacity_is_zero(
     runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Fix F1. `pool_capacity: 0` is unreachable by any of the four real
     scenario files today, but a real gap in the plan's original unguarded
-    `in_use / int(capacity)` -- this proves the added `int(capacity) > 0`
-    guard actually prevents the `ZeroDivisionError` (this test would raise,
-    not fail an assertion, if the guard were missing), while leaving the
-    exhaustion check -- which is genuinely unchanged -- still tripping
-    immediately."""
+    `slots_requested / int(capacity)` -- this proves the added
+    `int(capacity) > 0` guard actually prevents the `ZeroDivisionError`
+    (this test would raise, not fail an assertion, if the guard were
+    missing), while leaving the exhaustion check -- which is genuinely
+    unchanged -- still tripping immediately."""
     import orders
 
     incident = "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f"
@@ -251,7 +258,7 @@ def test_orders_publishes_no_utilization_when_pool_capacity_is_zero(
     assert (status, outcome) == (500, "error")
     assert "pool" in str(body)
     exposed = generate_latest(orders.orders.registry).decode("utf-8")
-    assert pool_utilization_value(exposed, incident) is None
+    assert pool_attempts_per_capacity_value(exposed, incident) is None
 
 
 def test_orders_retries_the_upstream_before_giving_up(

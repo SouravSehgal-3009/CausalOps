@@ -101,10 +101,12 @@ class LabService:
             registry=self.registry,
             buckets=LATENCY_BUCKETS_SECONDS,
         )
-        self.pool_utilization = Gauge(
-            "causalops_pool_utilization",
-            "Fraction of the bounded resource pool's capacity in use "
-            "(in_use / capacity), not the raw cumulative slot count.",
+        self.pool_attempts_per_capacity = Gauge(
+            "causalops_pool_attempts_per_capacity",
+            "Cumulative pool slot acquisition attempts for the incident "
+            "divided by configured capacity. Exceeds 1 once attempts "
+            "outstrip the pool; this is not an occupancy or utilization "
+            "fraction.",
             ["service", "incident"],
             registry=self.registry,
         )
@@ -147,8 +149,10 @@ class LabService:
         self.requests.labels(self.name, incident, outcome).inc()
         self.latency.labels(self.name, incident).observe(seconds)
 
-    def set_pool_utilization(self, utilization: float) -> None:
-        self.pool_utilization.labels(self.name, self.incident_id()).set(utilization)
+    def set_pool_attempts_per_capacity(self, attempts_per_capacity: float) -> None:
+        self.pool_attempts_per_capacity.labels(self.name, self.incident_id()).set(
+            attempts_per_capacity
+        )
 
     def serve(self, route: Route) -> None:
         server = ThreadingHTTPServer(("", self.port), self.handler_class(route))

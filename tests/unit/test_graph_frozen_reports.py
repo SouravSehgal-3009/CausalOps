@@ -237,6 +237,20 @@ as every prior round: running the suite before and after this specific
 wording change showed exactly one new failure
 (`after_a_first_turn_denial`, `final_context_digest` only), and every
 other field/scenario in the file is unaffected.
+
+**A later round revised F1 a second time**, after an external review found
+the original "utilization" ratio could still exceed 1.0 (the raw slot
+count is incremented before the exhaustion check, so `in_use` can exceed
+`capacity`) -- an honest-boundedness claim a value like `1.5` quietly
+broke. `MetricTemplate.RESOURCE_POOL_UTILIZATION` was renamed to
+`RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`, an honestly-unbounded-above name
+for the same numbers. Same reasoning as the original F1 entry above still
+applies: this template id appears only in `QueryMetricArguments`'s own
+tool schema (pinned separately in `test_live_model.py`), never in this
+file's rendered context text or any replay fixture (grep-confirmed) --
+`tool_registry_version="4"` becomes `"5"` with no digest movement of its
+own, confirmed by running the suite before and after this specific rename
+and observing zero new `final_context_digest` failures.
 """
 
 from pathlib import Path
@@ -584,7 +598,7 @@ def assert_report_matches_frozen(
         schema_version="1",
         prompt_version="6",
         policy_version="4",
-        tool_registry_version="4",
+        tool_registry_version="5",
     )
 
 

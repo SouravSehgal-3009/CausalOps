@@ -64,14 +64,19 @@ METRIC_QUERIES: dict[MetricTemplate, str] = {
         'sum(rate(causalops_requests_total{{service="{service}",'
         'incident="{incident}",outcome="timeout"}}[30s]))'
     ),
-    # Fix F1. Queries the renamed `causalops_pool_utilization` gauge -- a
-    # ratio (`in_use / capacity`), not the raw cumulative slot count the
-    # old `causalops_pool_in_use` published. The old metric is deliberately
-    # not kept as a second registered template: that would preserve the
-    # exact trap this fix exists to close (a model reading a monotonically
-    # growing counter and mistaking it for pool occupancy).
-    MetricTemplate.RESOURCE_POOL_UTILIZATION: (
-        'max(causalops_pool_utilization{{service="{service}",incident="{incident}"}})'
+    # Fix F1 (revised). Queries `causalops_pool_attempts_per_capacity`: total
+    # slot acquisition attempts for the incident divided by configured
+    # capacity. This is honestly unbounded above -- it exceeds 1 once
+    # attempts outstrip the pool, since a refused request is still a real
+    # attempt -- so it is named for what it measures rather than implying a
+    # bounded occupancy fraction the way "utilization" would. The old raw
+    # `causalops_pool_in_use` counter is deliberately not kept as a second
+    # registered template: that would preserve the exact trap this fix
+    # exists to close (a model reading a monotonically growing counter and
+    # mistaking it for pool occupancy).
+    MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_CAPACITY: (
+        "max(causalops_pool_attempts_per_capacity"
+        '{{service="{service}",incident="{incident}"}})'
     ),
 }
 

@@ -241,12 +241,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """P1-1's regression test. Before this unit's fix, `_send` reserved
-    against prose alone, never the current ~12,829-token tool schema `bind_tools`
+    against prose alone, never the current ~12,839-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~12,829" restates
+    the pinned, directly-measured figure this comment's "~12,839" restates
     in prose."""
     model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
@@ -339,15 +339,20 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     # 12,824 bytes -- not a drift, the mechanical cost of Q1's window
     # contract, five-fold-duplicated the same way `_domain_tool_definitions`'s
     # own docstring already explains for `HypothesesRecord`'s schema.
-    # Fix F1: `MetricTemplate.RESOURCE_POOL_IN_USE` (21 chars) renamed to
-    # `RESOURCE_POOL_UTILIZATION` (26 chars) inside `QueryMetricArguments`'s
-    # own schema -- a real +5-byte drift this pin exists to catch, not one
-    # to explain away, so it moves the literal rather than the comment.
-    assert len(payload) == 12_829
+    # Fix F1 (revised): `MetricTemplate.RESOURCE_POOL_UTILIZATION`
+    # ("resource_pool_utilization", 25 chars, a false claim of boundedness)
+    # renamed to `RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`
+    # ("resource_pool_attempts_per_capacity", 35 chars, honestly unbounded
+    # above) inside `QueryMetricArguments`'s own schema -- this is the
+    # second growth of this same pinned literal within this one
+    # remediation unit (12,824 -> 12,829 for F1's original rename, now
+    # 12,829 -> 12,839 for this revised rename), a real drift this pin
+    # exists to catch each time, not one to explain away.
+    assert len(payload) == 12_839
     # Unit 3b-3: `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 12_829
+    assert estimate_input_tokens(payload) == 12_839
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(

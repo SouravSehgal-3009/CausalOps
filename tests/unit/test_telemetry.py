@@ -1484,15 +1484,20 @@ def test_the_downstream_timeout_rate_template_executes(
     assert outcome.payload["template"] == MetricTemplate.DOWNSTREAM_TIMEOUT_RATE.value
 
 
-def test_the_resource_pool_utilization_template_executes(
+def test_the_resource_pool_attempts_per_capacity_template_executes(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    arguments = metric_arguments(template=MetricTemplate.RESOURCE_POOL_UTILIZATION)
+    arguments = metric_arguments(
+        template=MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_CAPACITY
+    )
 
     outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
 
     assert outcome.outcome is ToolOutcome.EXECUTED
-    assert outcome.payload["template"] == MetricTemplate.RESOURCE_POOL_UTILIZATION.value
+    assert (
+        outcome.payload["template"]
+        == MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_CAPACITY.value
+    )
 
 
 def test_the_gateway_latency_p95_template_executes(

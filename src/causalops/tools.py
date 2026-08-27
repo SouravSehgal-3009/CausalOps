@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "4"
+TOOL_REGISTRY_VERSION = "5"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -38,7 +38,7 @@ class MetricTemplate(StrEnum):
     GATEWAY_ERROR_RATE = "gateway_error_rate"
     GATEWAY_LATENCY_P95 = "gateway_latency_p95"
     DOWNSTREAM_TIMEOUT_RATE = "downstream_timeout_rate"
-    RESOURCE_POOL_UTILIZATION = "resource_pool_utilization"
+    RESOURCE_POOL_ATTEMPTS_PER_CAPACITY = "resource_pool_attempts_per_capacity"
 
 
 class LogFilter(StrEnum):
