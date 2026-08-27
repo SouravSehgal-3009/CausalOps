@@ -340,24 +340,34 @@ Python; Docker and Prometheus are local infrastructure dependencies.
 
 ### Supported development platforms
 
-CausalOps supports two owner environments, each with at least 7.5 GiB detected
-total RAM and 12 GB free disk:
+CausalOps runs on any machine with at least 7.5 GiB detected total RAM,
+12 GB free disk, Docker, `uv`, and Python -- `causalops doctor` reports
+whichever operating system, CPU architecture, and (on Windows) build it
+detects, and fails only if that reading itself comes back blank. There is
+no allowlist of specific operating systems, Windows builds, or CPU
+architectures: earlier revisions of this check required Windows 11 (build
+>= 22000) or Linux x86-64/amd64 specifically, but neither restriction was
+ever backed by a real incompatibility -- every capability CausalOps
+actually needs (Docker responding, enough memory and disk, a readable
+checkpoint database, writable run directories) already has its own check,
+and each of those says what is actually wrong rather than guessing from
+the platform name.
 
-- **Windows 11.** Python, `uv`, Git, and Claude Code run natively from
-  PowerShell. Docker Desktop uses its WSL2 backend only for the gateway,
-  orders, inventory, and Prometheus containers; WSL is not the project shell.
-- **Linux x86-64.** The same tools run from the system shell, and Docker
-  Engine runs the same four containers directly.
+Continuous integration runs the full check suite on Windows, Linux
+x86-64, and macOS (arm64) -- `windows-latest`/`ubuntu-latest`/
+`macos-latest`. Older Windows builds and non-x86-64 Linux architectures
+are proven only by unit tests against a faked machine reading
+(`test_doctor.py`), not by a real CI job or a real machine anyone on this
+project has run `doctor` against -- GitHub's free hosted runners offer no
+Windows-10-specific or ARM-Linux-specific image.
 
-Docker is an owner-installed prerequisite on both; project automation does not
-install or upgrade it.
-
-Project-authored code uses `pathlib.Path`, UTF-8, injected UTC timestamps, and
-cross-platform Python APIs. Project commands and documentation must not depend
-on Bash, hard-coded POSIX paths, or shell behavior unavailable in PowerShell.
-Run one scenario and one Claude request at a time. Prometheus retains one hour
-of data. Warn when current available RAM is below 2.5 GiB, but keep that check
-advisory because available memory changes while the system runs.
+Project-authored code uses `pathlib.Path`, UTF-8, injected UTC timestamps,
+and cross-platform Python APIs. Project commands and documentation must
+not depend on Bash, hard-coded POSIX paths, or shell behavior unavailable
+in PowerShell. Run one scenario and one Claude request at a time.
+Prometheus retains 24 hours of data. Warn when current available RAM is
+below 2.5 GiB, but keep that check advisory because available memory
+changes while the system runs.
 
 Use these approximate container memory ceilings, set in
 `lab/docker-compose.yml`:
@@ -832,7 +842,8 @@ adapter to exist first. Every row in this table is built; none is deferred.
 - Citation validity and required-evidence sufficiency scoring
   (`test_evaluation.py`).
 - Windows drive letters, path separators, UTF-8 files, writable-directory
-  checks (`test_doctor.py`, `fake_machine.py`), proven on both CI platforms.
+  checks (`test_doctor.py`, `fake_machine.py`), proven on all three CI
+  platforms.
 - `causalops doctor` outcomes for missing Docker, missing API key, less than
   7.5 GiB detected total RAM, less than 12 GB free disk, the advisory warning
   below 2.5 GiB available RAM, and success (`test_doctor.py`).
@@ -845,10 +856,11 @@ the *Scenario
 contamination* row (`test_scenario_reset_isolation.py`) — same tests, same
 citations, listed once.
 
-Windows support above is proven by continuous integration on
-`windows-latest`. A manual smoke test on the working platform, Linux x86-64,
-with all required containers, is run by hand and produces no committed
-artifact — it is a process step, not a test this repository can cite.
+Windows and macOS support above is proven by continuous integration on
+`windows-latest` and `macos-latest`. A manual smoke test on the working
+platform, Linux x86-64, with all required containers, is run by hand and
+produces no committed artifact — it is a process step, not a test this
+repository can cite.
 
 ### Tests specified for the live Claude adapter
 
@@ -908,9 +920,9 @@ unless noted):
   blocking publication of a non-reproducible score — Unit 3c's job, the
   paired evaluation, not this one.
 
-Normal CI runs on `windows-latest` and `ubuntu-latest` using replay fixtures
-and disposable local test data. Network access is allowed only while
-installing locked dependencies; after that, formatting, linting, strict
+Normal CI runs on `windows-latest`, `ubuntu-latest`, and `macos-latest` using
+replay fixtures and disposable local test data. Network access is allowed only
+while installing locked dependencies; after that, formatting, linting, strict
 typing, unit tests, security tests, and replay conformance make no external
 calls and require no credentials — CI never invokes `causalops` at all, only
 `pytest`/`ruff`/`mypy`. As of Unit 3b-2, `causalops investigate --model

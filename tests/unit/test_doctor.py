@@ -50,35 +50,25 @@ def test_healthy_defaults_sit_above_every_threshold() -> None:
     assert probe.free_disk > MINIMUM_FREE_DISK_BYTES
 
 
-def test_a_system_that_is_neither_windows_nor_linux_fails(tmp_path: Path) -> None:
-    probe = FakeProbe(system="Darwin", release="23.6.0", machine="arm64", build=None)
-
-    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
-
-    check = check_named(report, "operating_system")
-    assert check.status is CheckStatus.FAIL
-    assert check.reason_code is DoctorReasonCode.UNSUPPORTED_OS
-    assert "Darwin" in check.message
-
-
-def test_windows_10_build_fails(tmp_path: Path) -> None:
+def test_windows_10_build_passes_now_that_the_os_gate_is_open(tmp_path: Path) -> None:
     report = run_doctor(
         ProjectPaths(root=tmp_path), FakeProbe(build=19045), HEALTHY_ENVIRONMENT
     )
 
-    assert check_named(report, "operating_system").reason_code is (
-        DoctorReasonCode.UNSUPPORTED_OS
-    )
+    check = check_named(report, "operating_system")
+    assert check.status is CheckStatus.PASS
+    assert "19045" in check.message
 
 
-def test_windows_without_a_build_number_fails(tmp_path: Path) -> None:
+def test_windows_without_a_build_number_still_passes(tmp_path: Path) -> None:
     report = run_doctor(
         ProjectPaths(root=tmp_path), FakeProbe(build=None), HEALTHY_ENVIRONMENT
     )
 
-    assert check_named(report, "operating_system").reason_code is (
-        DoctorReasonCode.UNSUPPORTED_OS
-    )
+    check = check_named(report, "operating_system")
+    assert check.status is CheckStatus.PASS
+    assert check.message
+    assert "build" not in check.message
 
 
 def test_linux_on_x86_64_passes_and_says_which_platform_it_judged(
@@ -92,11 +82,11 @@ def test_linux_on_x86_64_passes_and_says_which_platform_it_judged(
 
     check = check_named(report, "operating_system")
     assert check.status is CheckStatus.PASS
-    assert check.message == "Linux 6.8.0-45-generic (x86_64)."
+    assert check.message == "Detected Linux 6.8.0-45-generic (x86_64)."
     assert report.failures == ()
 
 
-def test_linux_on_another_architecture_fails(tmp_path: Path) -> None:
+def test_linux_on_another_architecture_now_passes(tmp_path: Path) -> None:
     probe = FakeProbe(
         system="Linux", release="6.8.0-45-generic", machine="aarch64", build=None
     )
@@ -104,8 +94,75 @@ def test_linux_on_another_architecture_fails(tmp_path: Path) -> None:
     report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
 
     check = check_named(report, "operating_system")
-    assert check.reason_code is DoctorReasonCode.UNSUPPORTED_OS
+    assert check.status is CheckStatus.PASS
     assert "aarch64" in check.message
+
+
+def test_darwin_now_passes_and_names_the_platform(tmp_path: Path) -> None:
+    probe = FakeProbe(system="Darwin", release="23.6.0", machine="arm64", build=None)
+
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "operating_system")
+    assert check.status is CheckStatus.PASS
+    assert "Darwin" in check.message
+
+
+def test_a_blank_operating_system_reading_fails(tmp_path: Path) -> None:
+    probe = FakeProbe(system="")
+
+    report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+
+    check = check_named(report, "operating_system")
+    assert check.status is CheckStatus.FAIL
+    assert check.reason_code is DoctorReasonCode.OS_UNREADABLE
+    assert check.message
+    assert "None" not in check.message
+    assert "()" not in check.message
+
+
+def test_a_blank_release_or_machine_still_passes_with_a_clean_message(
+    tmp_path: Path,
+) -> None:
+    """`release()`/`machine()` can independently return "" even when `system`
+    is readable -- the check still only fails on a blank `system`, and the
+    message must not show a stray double space, empty parens, or comma.
+    """
+    both_blank = FakeProbe(system="Linux", release="", machine="", build=None)
+    release_blank = FakeProbe(system="Linux", release="", machine="x86_64", build=None)
+    machine_blank = FakeProbe(
+        system="Linux", release="6.8.0-45-generic", machine="", build=None
+    )
+
+    for probe in (both_blank, release_blank, machine_blank):
+        report = run_doctor(ProjectPaths(root=tmp_path), probe, HEALTHY_ENVIRONMENT)
+        check = check_named(report, "operating_system")
+        assert check.status is CheckStatus.PASS
+        assert "  " not in check.message
+        assert "()" not in check.message
+        assert not check.message.rstrip(".").endswith(",")
+
+    assert (
+        check_named(
+            run_doctor(ProjectPaths(root=tmp_path), both_blank, HEALTHY_ENVIRONMENT),
+            "operating_system",
+        ).message
+        == "Detected Linux."
+    )
+    assert (
+        check_named(
+            run_doctor(ProjectPaths(root=tmp_path), release_blank, HEALTHY_ENVIRONMENT),
+            "operating_system",
+        ).message
+        == "Detected Linux (x86_64)."
+    )
+    assert (
+        check_named(
+            run_doctor(ProjectPaths(root=tmp_path), machine_blank, HEALTHY_ENVIRONMENT),
+            "operating_system",
+        ).message
+        == "Detected Linux 6.8.0-45-generic."
+    )
 
 
 def test_the_same_checks_run_on_linux(tmp_path: Path) -> None:
@@ -421,7 +478,7 @@ def test_an_os_error_from_is_file_fails_cleanly_instead_of_raising(
 
 
 def test_every_failure_is_reported_together(tmp_path: Path) -> None:
-    probe = FakeProbe(build=19045, total_memory=1, free_disk=1, docker=False)
+    probe = FakeProbe(system="", total_memory=1, free_disk=1, docker=False)
 
     report = run_doctor(ProjectPaths(root=tmp_path), probe, {})
 
@@ -429,7 +486,7 @@ def test_every_failure_is_reported_together(tmp_path: Path) -> None:
     # `report.failures` counts `FAIL` only, and the missing
     # key still shows up as a `WARN`, asserted separately below.
     assert {check.reason_code for check in report.failures} == {
-        DoctorReasonCode.UNSUPPORTED_OS,
+        DoctorReasonCode.OS_UNREADABLE,
         DoctorReasonCode.INSUFFICIENT_TOTAL_MEMORY,
         DoctorReasonCode.INSUFFICIENT_FREE_DISK,
         DoctorReasonCode.DOCKER_UNAVAILABLE,

@@ -41,7 +41,7 @@ uv sync --locked
 uv run causalops doctor
 ```
 
-The same commands run from a POSIX shell on Linux x86-64.
+The same commands run from a POSIX shell on Linux or macOS.
 
 The operating system, total RAM, free disk, writable directories,
 checkpoint database, and Docker checks are hard failures. Low available RAM
@@ -57,6 +57,12 @@ PowerShell before a live command:
 
 ```powershell
 $env:ANTHROPIC_API_KEY = "<your key>"
+```
+
+On Linux or macOS:
+
+```bash
+export ANTHROPIC_API_KEY="<your key>"
 ```
 
 ## Running a live investigation

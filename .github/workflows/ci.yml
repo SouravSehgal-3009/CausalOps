@@ -6,12 +6,14 @@ on:
 
 jobs:
   checks:
-    # Both supported platforms run the same five commands. Windows support is
-    # proven here rather than by a manual run, since work happens on Linux.
+    # All three platforms run the same five commands. Windows and macOS
+    # support are proven here rather than by a manual run, since work
+    # happens on Linux -- these three are GitHub's free hosted runner
+    # options, not a set `doctor` itself restricts to (it no longer does).
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +25,6 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy src lab
-      # The lab containers are not started in CI on either platform, so their
+      # The lab containers are not started in CI on any platform, so their
       # integration tests are deselected and the owner runs them by hand.
       - run: uv run pytest -m "not docker"

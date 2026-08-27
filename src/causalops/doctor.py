@@ -18,14 +18,6 @@ MINIMUM_TOTAL_MEMORY_BYTES = int(7.5 * 1024**3)
 ADVISORY_AVAILABLE_MEMORY_BYTES = int(2.5 * 1024**3)
 MINIMUM_FREE_DISK_BYTES = 12 * 10**9
 
-# Windows 11 reports major version 10, so the build number is what separates it.
-FIRST_WINDOWS_11_BUILD = 22000
-
-# Supported Linux is a kernel and an architecture, not a distribution. Everything a
-# distribution would stand in for -- Python, Docker, the filesystem, memory, disk --
-# already has its own check, and each of those says what is actually wrong.
-SUPPORTED_LINUX_MACHINES = frozenset({"x86_64", "amd64"})
-
 API_KEY_VARIABLE = "ANTHROPIC_API_KEY"
 
 
@@ -36,7 +28,7 @@ class CheckStatus(StrEnum):
 
 
 class DoctorReasonCode(StrEnum):
-    UNSUPPORTED_OS = "UNSUPPORTED_OS"
+    OS_UNREADABLE = "OS_UNREADABLE"
     INSUFFICIENT_TOTAL_MEMORY = "INSUFFICIENT_TOTAL_MEMORY"
     LOW_AVAILABLE_MEMORY = "LOW_AVAILABLE_MEMORY"
     INSUFFICIENT_FREE_DISK = "INSUFFICIENT_FREE_DISK"
@@ -130,42 +122,38 @@ def failed_reading(
     )
 
 
-def unsupported_os(message: str) -> CheckResult:
+def check_operating_system(probe: SystemProbe) -> CheckResult:
+    """Pass on any non-blank platform reading; fail only when it comes back empty.
+
+    `platform.system()`/`release()`/`machine()` return an empty string, never
+    raise, when a value cannot be determined -- an empty `system` is the one
+    case this refuses. `release`/`machine` being blank does not fail the
+    check; the message just omits whichever part is missing. See
+    "Supported development platforms" in TECHNICAL_OVERVIEW.md for why this
+    check carries no OS/build/architecture allowlist.
+    """
+    found = probe.operating_system()
+    if not found.system:
+        return CheckResult(
+            name="operating_system",
+            status=CheckStatus.FAIL,
+            reason_code=DoctorReasonCode.OS_UNREADABLE,
+            message="Could not determine the operating system.",
+        )
+    release_detail = f" {found.release}" if found.release else ""
+    parenthetical_parts: list[str] = []
+    if found.machine:
+        parenthetical_parts.append(found.machine)
+    if found.windows_build is not None:
+        parenthetical_parts.append(f"build {found.windows_build}")
+    parenthetical = (
+        f" ({', '.join(parenthetical_parts)})" if parenthetical_parts else ""
+    )
+    platform_detail = f"{found.system}{release_detail}{parenthetical}"
     return CheckResult(
         name="operating_system",
-        status=CheckStatus.FAIL,
-        reason_code=DoctorReasonCode.UNSUPPORTED_OS,
-        message=message,
-    )
-
-
-def check_operating_system(probe: SystemProbe) -> CheckResult:
-    """Pass on Windows 11 or Linux x86-64, and say which one this machine is."""
-    found = probe.operating_system()
-    if found.system == "Windows":
-        if found.windows_build is None:
-            return unsupported_os("This machine reports Windows with no build number.")
-        if found.windows_build < FIRST_WINDOWS_11_BUILD:
-            return unsupported_os(
-                f"Windows build {found.windows_build} is older than Windows 11."
-            )
-        return CheckResult(
-            name="operating_system",
-            status=CheckStatus.PASS,
-            message=f"Windows 11 (build {found.windows_build}).",
-        )
-    if found.system == "Linux":
-        if found.machine.lower() not in SUPPORTED_LINUX_MACHINES:
-            return unsupported_os(
-                f"Linux on {found.machine} is not supported; CausalOps needs x86-64."
-            )
-        return CheckResult(
-            name="operating_system",
-            status=CheckStatus.PASS,
-            message=f"Linux {found.release} ({found.machine}).",
-        )
-    return unsupported_os(
-        f"{found.system or 'This machine'} is neither Windows 11 nor Linux x86-64."
+        status=CheckStatus.PASS,
+        message=f"Detected {platform_detail}.",
     )
 
 
