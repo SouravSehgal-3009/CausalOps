@@ -776,7 +776,7 @@ def test_rebuild_receipts_leaves_matching_receipts_unaffected() -> None:
     """The positive case for the tripwire above: a receipt whose
     `incident_id` agrees with state's own passes through `_rebuild_receipts`
     unchanged -- the ordinary path every real dispatch takes, unaffected by
-    the W16 guard added beside it."""
+    the incident_id identity check added beside it."""
     matching_receipt = ToolReceipt(
         receipt_id="receipt-matching",
         incident_id=incident_scope().incident_id,

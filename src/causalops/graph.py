@@ -343,8 +343,8 @@ def _denied_check_notes(
             "has no such validator of its own, and _rebuild_receipts "
             "rehydrates receipts from checkpoint state, so this stays a real "
             "tripwire against a corrupted checkpoint rather than a "
-            "restatement of a type guarantee -- same posture as W16's own "
-            "identity check."
+            "restatement of a type guarantee -- same posture as "
+            "_rebuild_receipts's own incident_id identity check above."
         )
         notes.append(
             DeniedCheckNote(
