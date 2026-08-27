@@ -1021,11 +1021,13 @@ def test_changes_summaries_only_name_changes_still_present_after_trimming(
 def test_a_pathologically_long_changes_summary_still_builds_valid_evidence(
     tmp_path: Path,
 ) -> None:
-    """Lab-defect-fix F8. `run_changes_check`'s summary now embeds up to
-    `MAX_SUMMARY_CONTENT_CHARS` of real change content, capped and marked
-    with "..." -- this proves the cap actually holds against `Evidence.
-    summary`'s hard `max_length=400` bound (`domain.py`), not just against
-    this function's own internal assert. `build_evidence`
+    """Lab-defect-fix F8. `run_changes_check`'s summary now embeds real change
+    content, capped to a budget computed from the rest of the summary's own
+    runtime length (Codex round 1 -- a fixed content cap alone cannot
+    guarantee the overall bound, since `arguments.service` has no schema
+    `max_length`) and marked with "..." -- this proves the cap actually holds
+    against `Evidence.summary`'s hard `max_length=400` bound (`domain.py`),
+    not just against this function's own final clamp. `build_evidence`
     (`tool_wrappers.py:556`) constructs `Evidence` with no try/except around
     it by design, so a summary this function ever let through over 400
     chars would not fail safely -- it would crash the whole investigation.
@@ -1068,6 +1070,284 @@ def test_a_pathologically_long_changes_summary_still_builds_valid_evidence(
         payload=outcome.payload,
     )
     assert evidence.summary == outcome.summary
+
+
+def test_changes_summary_content_keeps_the_newest_text_not_the_oldest(
+    tmp_path: Path,
+) -> None:
+    """Codex round-1 finding on lab-defect-fix F8. `payload["summaries"]` (the
+    real change content, joined) is already ordered oldest-to-newest by the
+    time it reaches the summary's content-display cap -- `changes.sort(key=
+    _change_moment)` above, then `trim_to_bytes`'s own front-pop keeps the
+    newest survivors. A HEAD slice of that joined string (`content[:budget]`,
+    the pre-fix code) would keep the OLDEST of what's shown and silently
+    discard the newest -- the opposite of every other truncation direction in
+    this function (`trim_to_bytes` itself keeps the newest ROWS; this is about
+    what survives once rows are joined into one display string). Both changes
+    below are individually short enough that `trim_to_bytes` never drops
+    either ROW -- `outcome.payload["truncated"]` stays `False` and both
+    survive into `payload["changes"]` -- so this exercises ONLY the summary's
+    own content-display cap, never the row-trimming path `test_changes_
+    summaries_only_name_changes_still_present_after_trimming` above already
+    covers.
+
+    The content budget is derived from the real runtime prefix ("N recent
+    changes on <service>"), the same way `run_changes_check` itself derives
+    it, rather than a hand-picked magic size -- so this test does not
+    silently drift out of sync if that prefix's shape ever changes. The older
+    change's marker sits at the very START of its own text (so any nonzero
+    head-drop excludes it) and the newer change's marker sits at the very END
+    of its own text (so it is the last thing in the joined content, and the
+    filler ahead of it is sized to fall comfortably inside the kept tail)."""
+    paths = RunPaths(root=tmp_path)
+    service = "orders"
+    change_count = 2
+    prefix = f"{change_count} recent changes on {service}"
+    content_budget = 400 - len(prefix) - len(": ")
+    keep = content_budget - len("...")
+
+    newer_marker = "NEWER_MARKER"
+    older_marker = "OLDER_MARKER"
+    newer_summary = "b" * 5 + newer_marker
+    # Pad the older change well past `keep` so the joined tail-kept slice
+    # lands deep inside the "a" filler -- far from `older_marker`, which sits
+    # at index 0 of `older_summary` -- regardless of the exact `keep` value.
+    older_summary = older_marker + "a" * (keep + 50)
+
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": service,
+                    "summary": older_summary,
+                },
+                {
+                    "at": (WINDOW_START + timedelta(minutes=1)).isoformat(),
+                    "service": service,
+                    "summary": newer_summary,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.payload["truncated"] is False
+    assert outcome.payload["change_count"] == change_count
+    assert len(outcome.summary) <= 400
+    assert newer_marker in outcome.summary
+    assert older_marker not in outcome.summary
+
+
+def test_a_moderately_long_service_name_shrinks_the_budget_but_shows_content(
+    tmp_path: Path,
+) -> None:
+    """Codex round-1 finding. `arguments.service` has no schema `max_length`
+    (`ListRecentChangesArguments`, `tools.py`), so a longer-than-usual service
+    name must correctly shrink the content budget around itself rather than
+    assume a fixed content cap always leaves the summary under 400 chars.
+
+    Post-freeze review, correctness's P3 + simplicity's P2 (same gap, two
+    angles). The original version of this test used a change summary (~57
+    chars) far shorter than the computed budget for an 80-char service name
+    (298 chars) -- it always landed in the "content fits whole, no
+    truncation" branch and never exercised the tail-slice logic the
+    docstring claimed to prove. This raw content is deliberately longer than
+    the computed budget, so the tail-slice branch genuinely runs. The
+    computed budget is derived here with the SAME formula `run_changes_check`
+    uses (`400 - len(prefix) - len(": ")`), not asserted only as `<= 400`,
+    so a mutation that hardcodes `content_budget` to a fixed wrong constant
+    (confirmed by the correctness reviewer's own mutation test: reverting to
+    a hardcoded `220` leaves this test's old assertions all still green)
+    would make the exact-length and marker-survival assertions below fail."""
+    paths = RunPaths(root=tmp_path)
+    service = "svc-" + "x" * 76
+    marker = "..."
+    start_marker = "STARTMARKER-"
+    end_marker = "-ENDMARKER"
+    # Long enough that, once the computed budget for this service name is
+    # subtracted from it, more than `len(marker)` characters must be cut
+    # from the front -- guaranteeing the tail-slice branch, not the
+    # fits-whole branch.
+    change_summary = start_marker + "z" * 328 + end_marker
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": service,
+                    "summary": change_summary,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    # Mirrors run_changes_check's own arithmetic exactly: one matched,
+    # untruncated change, so `prefix` carries no "(truncated)" note.
+    prefix = f"1 recent changes on {service}"
+    content_budget = 400 - len(prefix) - len(": ")
+    assert content_budget > len(marker), (
+        "this fixture is meant to test the shrink-but-still-show-content "
+        "case -- if this fails, the service name or content need retuning"
+    )
+    assert len(change_summary) > content_budget, (
+        "the raw content must be longer than the computed budget, or the "
+        "fits-whole branch runs instead of the tail-slice branch"
+    )
+    keep = content_budget - len(marker)
+    expected_content = marker + change_summary[-keep:]
+    expected_summary = f"{prefix}: {expected_content}"
+    assert outcome.summary == expected_summary
+    assert len(outcome.summary) == 400
+    assert start_marker not in outcome.summary
+    assert end_marker in outcome.summary
+
+
+def test_a_pathologically_long_service_name_still_produces_valid_evidence(
+    tmp_path: Path,
+) -> None:
+    """Codex's own reproduction, made permanent. Before this fix, a service
+    name long enough that the fixed prefix alone exceeded `Evidence.summary`'s
+    hard `max_length=400` bound (`domain.py`) crashed the whole investigation
+    via an uncaught `AssertionError` -- `build_evidence` (`tool_wrappers.py`)
+    constructs `Evidence` with no try/except around it by design, so this is
+    not a safe failure. This service name alone (450 chars) already puts the
+    fixed prefix ("N recent changes on <service>") over 400 chars before any
+    change content is even considered -- the content budget goes negative,
+    content is dropped entirely, and the final unconditional clamp is what
+    keeps the summary under the bound. Routes the result through
+    `build_evidence`, reusing the pattern `test_a_pathologically_long_
+    changes_summary_still_builds_valid_evidence` above already established,
+    to prove it doesn't raise -- not just that the string itself is short.
+
+    Post-freeze review note: this service name is long enough (450 chars)
+    that the fixed prefix alone (470 chars) already exceeds the final
+    unconditional clamp's own 397-char cut point, before any change content
+    is considered -- so this case cannot distinguish a correctly-computed
+    negative `content_budget` from a wrong, hardcoded one: the final clamp
+    truncates within the prefix either way, producing byte-identical output
+    regardless of what `content_budget` was. That is precisely why the
+    correctness reviewer's `content_budget = 220` mutation still passed this
+    test's own original assertions. This test stays -- it is still real
+    proof that an oversized prefix cannot crash the check via `build_
+    evidence` -- but the arithmetic itself is pinned by the adjacent test
+    below, `test_a_negative_content_budget_produces_the_exact_expected_
+    summary`, whose service length is chosen specifically so the final
+    clamp does NOT mask a wrong budget."""
+    paths = RunPaths(root=tmp_path)
+    service = "s" * 450
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": service,
+                    "summary": "a real change happened here",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    assert len(outcome.summary) <= 400
+    prefix = f"1 recent changes on {service}"
+    content_budget = 400 - len(prefix) - len(": ")
+    assert content_budget <= 0
+    expected_summary = prefix[:397] + "..."
+    assert outcome.summary == expected_summary
+    evidence = build_evidence(
+        incident_id=INCIDENT_ID,
+        kind=outcome.kind,
+        source=outcome.source,
+        observed_at=WINDOW_END,
+        summary=outcome.summary,
+        payload=outcome.payload,
+    )
+    assert evidence.summary == outcome.summary
+
+
+def test_a_negative_content_budget_produces_the_exact_expected_summary(
+    tmp_path: Path,
+) -> None:
+    """Post-freeze review, correctness's P3 + simplicity's P2. Neither
+    existing service-name test above can distinguish a correctly-computed
+    `content_budget` from a wrong, hardcoded one: the moderate case (~80
+    chars) used to use content far shorter than any budget, and the
+    pathological case (450 chars) has its result masked by the final
+    unconditional clamp regardless of the budget's value (see that test's
+    own updated docstring).
+
+    This service length (379 chars) is chosen precisely so `content_budget`
+    computed from it (`400 - len(prefix) - len(": ")`) is a small negative
+    number (-1) while `prefix` itself (399 chars) still fits under the
+    400-char bound on its own -- so the final unconditional clamp never
+    fires, and the summary is exactly `prefix`, unpadded. A mutation that
+    hardcodes `content_budget` to a fixed positive constant (e.g. the
+    correctness reviewer's own `220`) would instead take the "content fits
+    whole" branch, append `": a real change happened here"` after the
+    prefix, push the result to 429 chars, and get clamped to a DIFFERENT
+    397-char cut -- verified directly against real production arithmetic in
+    this docstring's own review round, not asserted on faith."""
+    paths = RunPaths(root=tmp_path)
+    service = "s" * 379
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": service,
+                    "summary": "a real change happened here",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    prefix = f"1 recent changes on {service}"
+    content_budget = 400 - len(prefix) - len(": ")
+    assert content_budget <= 0, (
+        "this fixture is meant to test the negative-budget, unclamped-"
+        "prefix case -- if this fails, the service length needs retuning"
+    )
+    assert len(prefix) <= 400, (
+        "the prefix itself must stay under the bound, or the final "
+        "unconditional clamp masks the budget arithmetic this test exists "
+        "to pin -- see the pathological-service-name test's docstring"
+    )
+    assert outcome.summary == prefix
+    assert len(outcome.summary) == 399
 
 
 def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(

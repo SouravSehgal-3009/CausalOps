@@ -35,7 +35,6 @@ from causalops.tools import (
 )
 
 MAX_LOG_ROWS = 40
-MAX_SUMMARY_CONTENT_CHARS = 220
 
 
 class RunPaths(BaseModel):
@@ -397,33 +396,70 @@ def run_changes_check(
     # blind to content it had already fetched (confirmed against a real
     # paid run: the model cited a `list_recent_changes` evidence record as
     # supporting while its own stated uncertainty said it never saw change
-    # content -- true, given what it was shown). Capped and truncated with
-    # an explicit marker so this can never approach `Evidence.summary`'s
-    # hard `max_length=400` (`domain.py`) -- `build_evidence`
-    # (`tool_wrappers.py`) constructs `Evidence` outside any try/except by
-    # design, so an over-length summary here would not fail safely, it
-    # would crash the whole investigation.
-    content = str(payload["summaries"])
-    if len(content) > MAX_SUMMARY_CONTENT_CHARS:
-        content = content[:MAX_SUMMARY_CONTENT_CHARS] + "..."
-    content_note = f": {content}" if content else ""
-    summary = (
+    # content -- true, given what it was shown).
+    #
+    # Lab-defect-fix F8, Codex round 1. `payload["summaries"]` is already
+    # ordered oldest-to-newest (`changes.sort(key=_change_moment)` above,
+    # then `trim_to_bytes`'s own front-pop keeps the newest survivors) --
+    # a fixed-size head slice would keep the OLDEST of what survived and
+    # discard the newest, the opposite of every other truncation direction
+    # in this function. The content budget is computed from the REAL
+    # runtime length of everything else in the summary (never a fixed
+    # constant -- `arguments.service` has no schema `max_length`, so a
+    # fixed cap on content alone cannot guarantee the 400-char bound on
+    # its own), and the trailing `"..."` marker goes on the FRONT since
+    # what is kept is a tail.
+    prefix = (
         f"{payload['change_count']} recent changes on "
-        f"{arguments.service}{truncated_note}{content_note}"
+        f"{arguments.service}{truncated_note}"
     )
-    # Defensive, matching this function's own established pattern
-    # (`assert fits(payload)` above): confirmed unreachable today given the
-    # cap above (`change_count` is bounded well under 4 digits by
-    # `trim_to_bytes`'s own row cap, `arguments.service` is a short
-    # identifier, `truncated_note` is a short fixed template, and
-    # `content_note` is capped at `MAX_SUMMARY_CONTENT_CHARS` plus the fixed
-    # `"..."` truncation marker and the `": "` prefix) --
-    # kept anyway so a future change to any of those pieces fails loudly
-    # here instead of silently corrupting the evidence record it produces.
-    assert len(summary) <= 400, (
-        f"changes summary of {len(summary)} chars exceeds Evidence.summary's "
-        "max_length=400 bound"
-    )
+    raw_content = str(payload["summaries"])
+    marker = "..."
+    content_budget = 400 - len(prefix) - len(": ")
+    if content_budget <= 0:
+        content = ""
+    elif len(raw_content) <= content_budget:
+        content = raw_content
+    else:
+        # `keep > 0` is load-bearing, not defensive paranoia. Two distinct
+        # failure modes, both reachable whenever `0 < content_budget <=
+        # len(marker)` (`marker` is 3 chars, so `content_budget` of 1 or 2):
+        # at `keep == 0`, Python's `s[-0:]` returns the WHOLE string (there
+        # is no signed zero for slice indices), not an empty one -- an
+        # unguarded `raw_content[-keep:]` would silently emit the full,
+        # untruncated content plus a spurious leading marker; at `keep < 0`,
+        # `raw_content[-keep:]` double-negates into a POSITIVE start index
+        # and emits nearly the whole untruncated string from a small offset
+        # in -- a worse, differently-shaped version of the same bug, not
+        # merely a milder one. Guarding on `keep > 0` and falling back to
+        # empty content covers both.
+        keep = content_budget - len(marker)
+        content = f"{marker}{raw_content[-keep:]}" if keep > 0 else ""
+    content_note = f": {content}" if content else ""
+    summary = f"{prefix}{content_note}"
+    # No assert here, unlike this function's `fits(payload)` guard above:
+    # that assert CHECKS a byte bound and crashes (via an uncaught
+    # AssertionError, this function has no try/except around its callers)
+    # if the reasoning above it was ever wrong -- it is load-bearing
+    # exactly because nothing else would catch a violation. This clamp is
+    # different in kind: it ENFORCES the 400-char bound unconditionally,
+    # by re-truncating whatever string exists at this point regardless of
+    # whether the branch logic above reasoned correctly, so an assert
+    # immediately after it would only be checking a fact this line already
+    # guarantees. Keeping one anyway would reintroduce a second version of
+    # exactly the crash this fix exists to remove, purely for
+    # consistency with the `fits()` convention elsewhere in this file.
+    # Its head-slice-plus-trailing-marker direction (keep the FRONT, mark
+    # the cut at the END) is the opposite of `raw_content`'s own tail-slice
+    # above, and that is correct, not a regression: this clamp only ever
+    # bites into `prefix` (`content_budget <= 0` is exactly the condition
+    # under which `content` is empty, so nothing else is left to clamp),
+    # which is the service name/count prefix, not chronological change
+    # data -- "keep the newest" directionality is a property of the change
+    # content this function reports on, and does not apply to a prefix that
+    # carries no time-ordering at all.
+    if len(summary) > 400:
+        summary = summary[:397] + "..."
     return executed_check(
         EvidenceKind.CHANGE,
         source,
