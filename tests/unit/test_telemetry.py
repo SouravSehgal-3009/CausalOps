@@ -1350,6 +1350,57 @@ def test_a_negative_content_budget_produces_the_exact_expected_summary(
     assert len(outcome.summary) == 399
 
 
+def test_a_content_budget_of_exactly_three_still_shows_no_content(
+    tmp_path: Path,
+) -> None:
+    """External review, P3. `run_changes_check`'s own comment on the
+    `keep > 0` guard states the failure range as `0 < content_budget <=
+    len(marker)` (correct) but glosses it in English as "content_budget of
+    1 or 2" (wrong -- `marker` is 3 chars, so 3 is in range too). The math
+    was always right; only the prose omitted the boundary. This test pins
+    the omitted case directly: a service length (375 chars) chosen so
+    `content_budget` (`400 - len(prefix) - len(": ")`) computes to exactly
+    3 -- `content_budget > 0`, so this is NOT the negative-budget branch
+    the sibling test above covers, but `keep = content_budget - len(marker)`
+    is `3 - 3 == 0`, and `keep > 0` is still `False`, so content is still
+    correctly suppressed. Without the `keep > 0` guard, `raw_content[-0:]`
+    would return the WHOLE unclamped summaries string per the comment's own
+    documented Python slicing gotcha -- this fixture is the one case that
+    would actually demonstrate that regression, since `content_budget <= 0`
+    fixtures never reach the `keep` arithmetic at all."""
+    paths = RunPaths(root=tmp_path)
+    service = "s" * 375
+    paths.changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "at": WINDOW_START.isoformat(),
+                    "service": service,
+                    "summary": "a real change happened here",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    outcome = run_changes_check(
+        ListRecentChangesArguments(
+            service=service, window_start=WINDOW_START, window_end=WINDOW_END
+        ),
+        paths,
+    )
+
+    assert outcome.outcome is ToolOutcome.EXECUTED
+    prefix = f"1 recent changes on {service}"
+    content_budget = 400 - len(prefix) - len(": ")
+    assert content_budget == 3, (
+        "this fixture is meant to test the exactly-three-byte budget "
+        "boundary -- if this fails, the service length needs retuning"
+    )
+    assert outcome.summary == prefix
+    assert len(outcome.summary) == 395
+
+
 def test_changes_trim_drops_the_chronologically_oldest_not_the_first_declared(
     tmp_path: Path,
 ) -> None:

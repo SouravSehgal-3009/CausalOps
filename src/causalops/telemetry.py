@@ -423,7 +423,8 @@ def run_changes_check(
     else:
         # `keep > 0` is load-bearing, not defensive paranoia. Two distinct
         # failure modes, both reachable whenever `0 < content_budget <=
-        # len(marker)` (`marker` is 3 chars, so `content_budget` of 1 or 2):
+        # len(marker)` (`marker` is 3 chars, so `content_budget` of 1, 2,
+        # or 3):
         # at `keep == 0`, Python's `s[-0:]` returns the WHOLE string (there
         # is no signed zero for slice indices), not an empty one -- an
         # unguarded `raw_content[-keep:]` would silently emit the full,
