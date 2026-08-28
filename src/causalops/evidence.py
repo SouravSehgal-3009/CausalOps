@@ -6,7 +6,7 @@ that every backend shapes its result the same way.
 
 import json
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from hashlib import sha256
 from uuid import uuid4
@@ -23,31 +23,73 @@ from causalops.domain import (
 
 MAX_RESULT_BYTES = 12 * 1024
 
-# Fixed per-kind quotas keep the model context bounded and the same size for the
-# same evidence, whatever order it arrived in.
-CONTEXT_QUOTAS: dict[EvidenceKind, int] = {
+# SYMPTOM/TOPOLOGY never scale with the evidence budget:
+# SYMPTOM is seeded once at incident creation, never tool-produced, so more
+# executed-tool budget can never produce a second one. TOPOLOGY's single
+# `get_topology` call takes no varying arguments, so a second call is always
+# refused as `DUPLICATE_PROPOSAL` by the policy layer regardless of budget --
+# that cap comes from policy, not from this quota, and this quota must not
+# be read as the reason a second topology record never appears.
+_FIXED_CONTEXT_QUOTAS: dict[EvidenceKind, int] = {
     EvidenceKind.SYMPTOM: 2,
     EvidenceKind.TOPOLOGY: 2,
-    EvidenceKind.METRIC: 3,
-    EvidenceKind.LOG: 3,
-    EvidenceKind.CHANGE: 3,
 }
-
-# `context_evidence` below does an unguarded `CONTEXT_QUOTAS[record.kind]`
-# lookup -- the only unguarded per-kind lookup in `src/`. A new
-# `EvidenceKind` member added without a
-# matching entry here would not fail at the point it was added; it would
-# crash the first investigation that ever produced evidence of that kind.
-# Runbook retrieval removed the *motive* for that (no `EvidenceKind.RUNBOOK` --
-# `RunbookCheckOutcome` has no `kind` field to populate one with) but not
-# the *capability* -- nothing stops a future kind from being added here
-# without its quota. This assertion is that guard, checked at import time
-# rather than left to whichever investigation happens to hit the gap first.
-assert set(CONTEXT_QUOTAS) == set(EvidenceKind), (
-    "CONTEXT_QUOTAS is missing an entry for at least one EvidenceKind member "
-    "-- context_evidence()'s per-kind lookup would crash on that kind's "
-    "first evidence record"
+# METRIC/LOG/CHANGE are the three kinds an executed check can actually keep
+# producing more of as the evidence budget widens -- `derive_context_quotas`
+# below scales each of these with `Budgets.executed_tools` rather than
+# leaving them fixed, so a wider evidence budget is not silently capped by a
+# context window still sized for the narrower default.
+_TOOL_DERIVED_QUOTA_KINDS: tuple[EvidenceKind, ...] = (
+    EvidenceKind.METRIC,
+    EvidenceKind.LOG,
+    EvidenceKind.CHANGE,
 )
+
+# `context_evidence` below does an unguarded `quotas[record.kind]` lookup --
+# the only unguarded per-kind lookup in `src/`. A new `EvidenceKind` member
+# added to neither the fixed set above nor the tool-derived set above would
+# not fail at the point it was added; it would crash the first investigation
+# that ever produced evidence of that kind. Runbook retrieval removed the
+# *motive* for that (no `EvidenceKind.RUNBOOK` -- `RunbookCheckOutcome` has
+# no `kind` field to populate one with) but not the *capability* -- nothing
+# stops a future kind from being added to `EvidenceKind` without also being
+# added here. This assertion is that guard, checked at import time rather
+# than left to whichever investigation happens to hit the gap first; it
+# covers `derive_context_quotas`'s output for every possible
+# `executed_tools` value, not just the one default this file used to pin,
+# since the two sets it checks are what the derivation is built from, not a
+# concrete dict that could itself go stale.
+assert set(_FIXED_CONTEXT_QUOTAS) | set(_TOOL_DERIVED_QUOTA_KINDS) == set(
+    EvidenceKind
+), (
+    "a new EvidenceKind member is neither fixed nor tool-derived here -- "
+    "context_evidence()'s per-kind lookup would crash on that kind's first "
+    "evidence record"
+)
+
+
+def derive_context_quotas(executed_tools: int) -> dict[EvidenceKind, int]:
+    """The per-kind evidence quota for a run whose `Budgets.executed_tools`
+    is `executed_tools` -- keeps the model context bounded and the same size
+    for the same evidence, whatever order it arrived in, while letting a
+    wider evidence-gathering budget actually see more of what it gathered.
+    METRIC/LOG/CHANGE scale as `executed_tools + 1` (room for one more
+    record than the number of checks a run could ever execute, since a
+    single check can produce more than one evidence record of the same kind
+    over its history); SYMPTOM/TOPOLOGY stay fixed at 2 regardless -- see
+    `_FIXED_CONTEXT_QUOTAS`'s own comment for why."""
+    quotas = dict(_FIXED_CONTEXT_QUOTAS)
+    for kind in _TOOL_DERIVED_QUOTA_KINDS:
+        quotas[kind] = executed_tools + 1
+    return quotas
+
+
+# The quota an unbudgeted caller (a test, a direct `EvidenceStore.
+# context_evidence()` call with no `Budgets` in scope) sees -- equal to
+# `derive_context_quotas(2)`, `Budgets().executed_tools`'s own default, so
+# behaviour for every such caller is unchanged from before quotas became
+# budget-derived.
+CONTEXT_QUOTAS: dict[EvidenceKind, int] = derive_context_quotas(2)
 
 
 def new_opaque_id() -> str:
@@ -227,14 +269,20 @@ class EvidenceStore:
             )
         )
 
-    def context_evidence(self) -> tuple[tuple[Evidence, ...], tuple[str, ...]]:
-        """Evidence for the model context, plus a marker for anything left out."""
+    def context_evidence(
+        self, quotas: Mapping[EvidenceKind, int] = CONTEXT_QUOTAS
+    ) -> tuple[tuple[Evidence, ...], tuple[str, ...]]:
+        """Evidence for the model context, plus a marker for anything left
+        out. `quotas` defaults to the unbudgeted `CONTEXT_QUOTAS` above;
+        `graph.py`'s `_render_stage_request` -- the one production caller --
+        always passes `derive_context_quotas(budgets.executed_tools)`
+        instead, so a real run's quota tracks its own evidence budget."""
         kept: list[Evidence] = []
         used: dict[EvidenceKind, int] = {}
         dropped: dict[EvidenceKind, int] = {}
         for record in self.ordered():
             seen = used.get(record.kind, 0)
-            if seen < CONTEXT_QUOTAS[record.kind]:
+            if seen < quotas[record.kind]:
                 kept.append(record)
                 used[record.kind] = seen + 1
                 continue

@@ -897,6 +897,34 @@ def minimum_possible_reservation_usd(
         conn.close()
 
 
+def maximum_possible_reservation_usd(
+    pricing: PricingSnapshot = CLAUDE_SONNET_5_PRICING,
+) -> float:
+    """The largest `reserved_usd` `_send` could ever compute for one real
+    model call.
+
+    `causalops.evaluate_cli`'s pre-flight cost check needs an upper bound on
+    what a batch could reserve, not just the lower bound
+    `minimum_possible_reservation_usd` above provides. Rather than a fourth
+    hand-copy of the reservation formula -- the exact bug class that
+    function's own docstring documents three rounds of -- this reuses `_send`'s
+    real, unmodified inputs directly: `MAX_INPUT_TOKENS`, the hard prose cap
+    `InputTooLarge` refuses above before any reservation is ever made, plus
+    the larger of the two stages' own tool schema
+    (`propose()`'s stop tool plus all five domain tools, always at least as
+    large as `respond()`'s single final-assessment tool -- `_send`'s own
+    comment on `tool_definition_tokens` confirms this ordering). No network
+    call or fake transport is needed here, unlike the minimum-reservation
+    probe above: unlike a real reservation, this bound does not depend on
+    what a specific rendered prose context happens to contain, only on the
+    same two real functions (`_domain_tool_definitions`,
+    `estimate_input_tokens`) `_send` itself calls to price a real request.
+    """
+    tools = [_stop_tool_definition(), *_domain_tool_definitions()]
+    tool_definition_tokens = estimate_input_tokens(json.dumps(tools))
+    return pricing.reservation_usd(MAX_INPUT_TOKENS + tool_definition_tokens)
+
+
 def _finish_plan[StageModel: BaseModel](
     schema: type[StageModel],
     hypotheses: Sequence[Hypothesis],

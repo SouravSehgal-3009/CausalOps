@@ -2,8 +2,16 @@
 
 Runs the same model against the same answer-neutral initial alert to
 compare a no-tool baseline against the tool-enabled LangGraph workflow,
-over a predefined paired set of held-out incidents, without ever invoking
-the escalation path (HITL is demonstrated and tested separately).
+over a frozen, held-out corpus of 12 incidents (`EVALUATION_FAMILIES` x
+`EVALUATION_SEEDS`), without ever invoking the escalation path (HITL is
+demonstrated and tested separately).
+
+Each invocation runs exactly one point on the evidence-budget curve
+(`--executed-tools`, default 2, matching `Budgets()`'s own default) --
+never all three in one run. The owner runs this script up to three times,
+once per budget setting, so real spend can be checked between phases
+rather than committed all at once; see `build_parser`'s own help text and
+`main`'s pre-flight cost check for why.
 
 This is a genuinely separate console script from `causalops` -- registered
 under its own `[project.scripts]` entry (`causalops-evaluate`) in
@@ -26,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -35,8 +44,13 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from causalops.approvals import CheckpointStoreError
-from causalops.cost_ledger import run_cost_totals
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
+from causalops.cost_ledger import (
+    RESERVATION_CEILING_BUFFER_USD,
+    application_wide_spend_usd,
+    ensure_cost_ledger_table,
+    run_cost_totals,
+)
 from causalops.doctor import API_KEY_VARIABLE, ProjectPaths, find_project_root
 from causalops.domain import (
     Budgets,
@@ -55,7 +69,11 @@ from causalops.evaluation import (
 )
 from causalops.evidence import new_opaque_id
 from causalops.graph import run_graph_investigation
-from causalops.live_setup import build_model_and_registry, live_evaluation_ceiling_usd
+from causalops.live_setup import (
+    MAXIMUM_POSSIBLE_RESERVATION_USD,
+    build_model_and_registry,
+    live_evaluation_ceiling_usd,
+)
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import (
@@ -73,24 +91,42 @@ from causalops.scenario_control import (
     start_scenario,
 )
 
-# The frozen four-pair held-out corpus. `lab/scenarios/*.json` has exactly
-# these four families today, each already carrying a `seed_variants.
-# evaluation` block distinct from `seed_variants.development`. Adding a
-# fifth or sixth family later is a one-line change here, not a redesign.
+# The frozen held-out corpus: `lab/scenarios/*.json` has exactly these four
+# families today, each already carrying `seed_variants.evaluation`,
+# `.evaluation_b`, and `.evaluation_c` blocks, distinct from
+# `seed_variants.development`. Adding a fifth family, or a fourth seed,
+# later is a one-line change to one of these two tuples, not a redesign.
 EVALUATION_FAMILIES: tuple[str, ...] = (
     "ambiguous_telemetry",
     "configuration_change",
     "downstream_timeout_retry_amplification",
     "resource_pool_saturation",
 )
+EVALUATION_SEEDS: tuple[str, ...] = ("evaluation", "evaluation_b", "evaluation_c")
+
+# The evidence-budget curve this evaluation script sweeps, one point per
+# `causalops-evaluate --executed-tools N` invocation. `model_calls =
+# executed_tools + 2` at every point: one call per reachable check, plus one
+# always held back for the FINAL_ASSESSMENT turn, plus one more so a single
+# repair is still possible on the last reachable turn -- see `graph.py`'s
+# `test_repair_headroom_is_present_when_model_calls_is_executed_tools_plus_
+# two` for the reachable-checks arithmetic this coupling depends on.
+# `Budgets()`'s own class-level defaults (2, 4) are the first point on this
+# curve and are themselves unchanged -- this curve is applied by
+# constructing a `Budgets` instance per invocation, never by editing those
+# defaults (`test_graph_frozen_reports.py` pins six literal digests that
+# depend on them staying exactly as they are).
+EVIDENCE_BUDGET_CURVE: tuple[int, ...] = (2, 3, 4)
+DEFAULT_EXECUTED_TOOLS = 2
 
 # The two arms of the paired comparison: the same model and same
 # answer-neutral initial alert, run once with no tools and once through the
 # tool-enabled LangGraph workflow. `_run_one` writes one of
 # these two words as `run_key`'s final `/`-separated segment
-# (`f"{incident_id}/{model_name}/{mode}"`); `_arm_of` below is the one place
-# that reads it back out, so a change to either constant only has to update
-# both ends of that same encoding.
+# (`f"{incident_id}/{model_name}/et{executed_tools}/{mode}"` -- the budget
+# dimension sits before the mode, not after); `_arm_of` below is the one
+# place that reads it back out via `rsplit("/", 1)`, so a change to either
+# constant only has to update both ends of that same encoding.
 MODE_NO_TOOL_BASELINE = "no_tool_baseline"
 MODE_TOOL_ENABLED = "tool_enabled"
 
@@ -111,21 +147,52 @@ class EvaluationAborted(Exception):
         super().__init__(reason.value)
 
 
+def resolve_budgets(executed_tools: int) -> Budgets:
+    """`Budgets(executed_tools=executed_tools, model_calls=executed_tools +
+    2)` -- the one place this script's evidence-budget curve is turned into
+    a real `Budgets` instance. `main` calls this once, from the resolved
+    `--executed-tools` argument, and threads the same `Budgets` object
+    through `run_evaluation` and every `_run_one` call it makes, so the
+    pre-flight cost check, the graph investigation itself, and the record's
+    own `executed_tools`/`model_calls_budget` fields all agree on one
+    `model_calls` derivation rather than each re-deriving `+ 2`
+    independently."""
+    return Budgets(executed_tools=executed_tools, model_calls=executed_tools + 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="causalops-evaluate",
         description=(
-            "Run the frozen four-pair paired live comparison against the "
-            "local synthetic lab (`causalops lab up` first) and score it "
-            "against evaluator-only expected outcomes. Sends real, billed "
-            "Anthropic requests under the application-wide "
-            "LIVE_EVALUATION_MAX_USD ceiling."
+            "Run the frozen 12-incident paired live comparison "
+            "(EVALUATION_FAMILIES x EVALUATION_SEEDS) against the local "
+            "synthetic lab (`causalops lab up` first) and score it against "
+            "evaluator-only expected outcomes. Sends real, billed Anthropic "
+            "requests under the application-wide LIVE_EVALUATION_MAX_USD "
+            "ceiling. Runs exactly one point on the evidence-budget curve "
+            "per invocation -- pass --executed-tools up to two more times, "
+            "at 3 and then 4, to build the full curve across separate, "
+            "independently billed runs."
         ),
     )
     parser.add_argument(
         "--version",
         action="version",
         version=f"causalops-evaluate {version('causalops')}",
+    )
+    parser.add_argument(
+        "--executed-tools",
+        type=int,
+        choices=EVIDENCE_BUDGET_CURVE,
+        default=DEFAULT_EXECUTED_TOOLS,
+        help=(
+            "The evidence-budget curve point to run this invocation at -- "
+            "Budgets.executed_tools, with Budgets.model_calls derived as "
+            "executed_tools + 2. Defaults to 2, matching Budgets()'s own "
+            "default; every incident's baseline run still runs regardless "
+            "of this value, since a no-tool run has no executed-tools "
+            "budget to vary."
+        ),
     )
     return parser
 
@@ -203,6 +270,7 @@ def _run_one(
     *,
     root: Path,
     family: str,
+    seed_name: str,
     incident: StoredIncident,
     expected: ExpectedOutcome,
     fixture_sha256: str,
@@ -210,11 +278,22 @@ def _run_one(
     git_sha: str,
     git_dirty: bool,
     configured_ceiling_usd: float,
+    budgets: Budgets,
     no_tool_baseline: bool,
 ) -> EvaluationRecord:
     """One scored run -- baseline or tool-enabled -- against an already
     seeded incident. `suppress_escalation=True` on every call: §10 forbids
     the paired comparison from ever invoking the escalation path.
+
+    `budgets` is shared by both arms of this incident's pair, not just the
+    tool-enabled one: the no-tool baseline never proposes a check regardless
+    of `budgets.executed_tools` (its own minimal topology never adds
+    `investigate` at all -- see `build_graph`'s `no_tool_baseline` docstring),
+    so the curve has no effect on what the baseline arm actually does; using
+    the SAME `Budgets` instance for both arms is simpler than branching, and
+    the record's own `executed_tools`/`model_calls_budget` fields state the
+    configured point either way, not what was actually exercised (`scores.
+    efficiency.tools_executed` already reports that).
 
     No `checkpointer` is passed to `run_graph_investigation`, so it defaults
     to a fresh, process-local `InMemorySaver()`: a suppressed run never
@@ -224,7 +303,6 @@ def _run_one(
     that same file, opened directly here -- unrelated to the graph
     checkpointer, and still the one ledger every live call shares.
     """
-    budgets = Budgets()
     checkpoints_db = ProjectPaths(root=root).checkpoints_db
     checkpoints_db.parent.mkdir(parents=True, exist_ok=True)
     paths = run_paths(root, incident.scope.incident_id)
@@ -278,8 +356,18 @@ def _run_one(
         # that looks complete but is not.
         incomplete_settlement = not fully_settled
         mode = MODE_NO_TOOL_BASELINE if no_tool_baseline else MODE_TOOL_ENABLED
+        # The budget dimension is inserted BEFORE the mode segment, not
+        # after -- `_arm_of` below recovers the mode via `rsplit("/",
+        # 1)[-1]`, so inserting anywhere before the final segment leaves it
+        # unaffected; every incident-id/first-segment reader (`_arm_of`'s own
+        # sibling, `split("/", 1)[0]`) is equally unaffected, since neither
+        # end of the string moved.
+        run_key = (
+            f"{incident.scope.incident_id}/{model_name}/"
+            f"et{budgets.executed_tools}/{mode}"
+        )
         return EvaluationRecord(
-            run_key=f"{incident.scope.incident_id}/{model_name}/{mode}",
+            run_key=run_key,
             investigation_id=result.report.investigation_id,
             incident_id=result.report.incident_id,
             expected=expected,
@@ -297,99 +385,185 @@ def _run_one(
             reserved_usd=reserved_usd,
             actual_usd=None if incomplete_settlement else actual_usd,
             failure_reason=result.report.reason_code,
+            executed_tools=budgets.executed_tools,
+            model_calls_budget=budgets.model_calls,
+            seed_name=seed_name,
         )
     finally:
         ledger_conn.close()
 
 
-def run_evaluation(root: Path, target: Path) -> list[EvaluationRecord]:
+def _preflight_worst_case_batch_usd(budgets: Budgets) -> float:
+    """The largest amount this invocation's whole batch could ever reserve:
+    one run per `(family, seed)` pair per arm --
+    `len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2` runs, every
+    invocation, regardless of which curve point `--executed-tools` selects
+    (the baseline arm always runs alongside the tool-enabled arm; see
+    `run_evaluation`'s own docstring for why baseline is not skipped on a
+    later phase) -- times `budgets.model_calls`, the most model calls any
+    one of those runs could make, times `MAXIMUM_POSSIBLE_RESERVATION_USD`,
+    the most any one of those calls could ever reserve. A real batch will
+    cost far less than this in practice (most calls never hit the input
+    cap, most turns never need a repair), but a pre-flight check exists to
+    catch a genuinely insufficient ceiling before any scenario runs, not to
+    estimate the likely real cost precisely."""
+    runs = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2
+    return runs * budgets.model_calls * MAXIMUM_POSSIBLE_RESERVATION_USD
+
+
+def _check_preflight_cost(
+    conn_path: Path, budgets: Budgets, ceiling_usd: float
+) -> None:
+    """Refuses BEFORE any scenario starts if this invocation's worst-case
+    batch cost, on top of what the application has already spent or
+    committed to spend, could not possibly fit under `ceiling_usd` -- even
+    granting every remaining request the full `RESERVATION_CEILING_BUFFER_
+    USD` safety margin `cost_ledger.record_reservation_before_request`
+    already reserves per request. This is a coarser, batch-wide version of
+    that same per-request check, run once up front so a doomed batch is
+    refused before spending anything on the first `start_scenario` call
+    instead of partway through it.
+    """
+    conn_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(conn_path))
+    try:
+        ensure_cost_ledger_table(conn)
+        already_spent = application_wide_spend_usd(conn)
+    finally:
+        conn.close()
+    worst_case = _preflight_worst_case_batch_usd(budgets)
+    if already_spent + worst_case + RESERVATION_CEILING_BUFFER_USD > ceiling_usd:
+        raise CheckpointStoreError(
+            CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER,
+            f"LIVE_EVALUATION_MAX_USD={ceiling_usd:.4f} cannot cover this "
+            f"invocation's worst-case batch cost: ${already_spent:.4f} "
+            f"already spent/committed application-wide, plus a worst case "
+            f"of ${worst_case:.4f} for this --executed-tools "
+            f"{budgets.executed_tools} batch "
+            f"({len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2} runs x "
+            f"{budgets.model_calls} model calls x "
+            f"${MAXIMUM_POSSIBLE_RESERVATION_USD:.6f} per call), plus the "
+            f"${RESERVATION_CEILING_BUFFER_USD:.2f} reservation buffer. "
+            "Raise LIVE_EVALUATION_MAX_USD, or wait for headroom to free up, "
+            "before running this batch.",
+        )
+
+
+def run_evaluation(
+    root: Path, target: Path, budgets: Budgets
+) -> list[EvaluationRecord]:
     """`target` (a directory under `results/evaluations/`, already created
     with an empty `records.jsonl` by `main`'s `_new_evaluation_target`) is
     rewritten with the complete list of records produced SO FAR after every
-    single `_run_one` call returns -- not batched to the end. Each of the
-    eight scored runs in the full corpus is a real, billed Anthropic
-    request; an exception partway through (a realistic risk -- this
-    project's own live calls have hit failures before) must not discard
-    every already-completed, already-paid-for record along with it. Full
-    rewrite rather than a true append is deliberate: `write_jsonl` already
-    exists, writes the complete file in one `path.write_text` call, and the
-    corpus is at most eight records -- reusing it keeps this function
-    simple and gives `records.jsonl` a single, uniform "whatever this file
-    contains is exactly what has been scored so far" contract, rather than
-    a second, append-only code path with its own correctness questions
-    (partial lines, encoding boundaries) `write_jsonl` was never written to
-    answer.
+    single `_run_one` call returns -- not batched to the end. Each of this
+    invocation's 24 scored runs (`EVALUATION_FAMILIES` x `EVALUATION_SEEDS`
+    x the two arms) is a real, billed Anthropic request; an exception
+    partway through (a realistic risk -- this project's own live calls have
+    hit failures before) must not discard every already-completed,
+    already-paid-for record along with it. Full rewrite rather than a true
+    append is deliberate: `write_jsonl` already exists, writes the complete
+    file in one `path.write_text` call, and the corpus is at most 24
+    records -- reusing it keeps this function simple and gives `records.
+    jsonl` a single, uniform "whatever this file contains is exactly what
+    has been scored so far" contract, rather than a second, append-only
+    code path with its own correctness questions (partial lines, encoding
+    boundaries) `write_jsonl` was never written to answer.
+
+    The no-tool baseline arm runs for EVERY incident on EVERY invocation of
+    this script, not only on the first `--executed-tools` phase -- a
+    deliberate simplification, not an oversight. `budgets.executed_tools`
+    has no effect on what the baseline arm does (see `_run_one`'s own
+    docstring), so skipping it on later phases would save real spend at the
+    cost of needing each phase to read back a PRIOR phase's own `results/
+    evaluations/<opaque-id>/records.jsonl` to know which incidents already
+    have a baseline record -- extra cross-invocation state, extra failure
+    surface, for a phase's own evaluation artifact to stay self-contained
+    and independently reproducible on its own. The redundant baseline spend
+    is modest: a baseline run makes at most two model calls (`Budgets().
+    model_calls` allows one repair) regardless of `--executed-tools`, so it
+    is a small fraction of a batch dominated by the tool-enabled arm's
+    larger budget at higher curve points.
     """
     git_sha, git_dirty = _git_provenance(root)
     configured_ceiling_usd = live_evaluation_ceiling_usd(os.environ)
     runbook_corpus_version = RunbookIndex().corpus_version
     records_path = target / "records.jsonl"
 
+    _check_preflight_cost(
+        ProjectPaths(root=root).checkpoints_db, budgets, configured_ceiling_usd
+    )
+
     records: list[EvaluationRecord] = []
     for family in EVALUATION_FAMILIES:
-        incident_id = start_scenario(root, family, "evaluation")
-        try:
-            paths = run_paths(root, incident_id)
-            incident = StoredIncident.model_validate_json(
-                paths.incident_file.read_text(encoding="utf-8")
-            )
-            expected = _load_expected_outcome(paths.root)
-            fixture_sha256 = _fixture_sha256(root, family)
-            for no_tool_baseline in (True, False):
-                record = _run_one(
-                    root=root,
-                    family=family,
-                    incident=incident,
-                    expected=expected,
-                    fixture_sha256=fixture_sha256,
-                    runbook_corpus_version=runbook_corpus_version,
-                    git_sha=git_sha,
-                    git_dirty=git_dirty,
-                    configured_ceiling_usd=configured_ceiling_usd,
-                    no_tool_baseline=no_tool_baseline,
-                )
-                records.append(record)
-                # Durable the moment a real, billed result exists -- see
-                # this function's own docstring for why this cannot wait
-                # until every family has finished.
-                write_jsonl(records_path, records)
-                if record.failure_reason in INFRASTRUCTURE_ABORT_REASONS:
-                    raise EvaluationAborted(record.failure_reason)
-        finally:
-            # `reset_scenario` still runs unconditionally, on every path out
-            # of `try` -- success or failure -- exactly as before this
-            # comment. What changed: if the `try` block is already
-            # propagating a real, billed run failure AND `reset_scenario`
-            # itself also raises, Python's ordinary exception chaining would
-            # otherwise replace the original exception with this cleanup
-            # failure, burying the actual reason a billed run failed behind
-            # an unrelated lab-reset problem.
-            #
-            # `already_failing` is read HERE, at the top of `finally` and
-            # BEFORE the nested `try` below -- not from inside the nested
-            # `except Exception as reset_error:` handler further down. That
-            # distinction is the actual fix: `sys.exc_info()` reports the
-            # exception the *nearest enclosing* `except` block is currently
-            # handling, at the point it is called. Called from inside
-            # `except Exception as reset_error:`, the nearest enclosing
-            # handler is that very `except` -- `sys.exc_info()` there always
-            # describes `reset_error` itself, never an outer exception from
-            # this function's own `try` block, so a check placed there could
-            # never see past its own just-caught exception. Called here,
-            # before the nested `try` exists, the nearest enclosing handler
-            # is whatever `finally` is unwinding for -- correctly the outer
-            # `try` body's own exception, or `None` if that body succeeded.
-            already_failing = sys.exc_info()[0] is not None
+        for seed_name in EVALUATION_SEEDS:
+            incident_id = start_scenario(root, family, seed_name)
             try:
-                reset_scenario(root, incident_id)
-            except Exception as reset_error:
-                if already_failing:
-                    print(
-                        f"FAIL RESET_SCENARIO_FAILED_DURING_CLEANUP {family}/"
-                        f"{incident_id}: {reset_error}"
+                paths = run_paths(root, incident_id)
+                incident = StoredIncident.model_validate_json(
+                    paths.incident_file.read_text(encoding="utf-8")
+                )
+                expected = _load_expected_outcome(paths.root)
+                fixture_sha256 = _fixture_sha256(root, family)
+                for no_tool_baseline in (True, False):
+                    record = _run_one(
+                        root=root,
+                        family=family,
+                        seed_name=seed_name,
+                        incident=incident,
+                        expected=expected,
+                        fixture_sha256=fixture_sha256,
+                        runbook_corpus_version=runbook_corpus_version,
+                        git_sha=git_sha,
+                        git_dirty=git_dirty,
+                        configured_ceiling_usd=configured_ceiling_usd,
+                        budgets=budgets,
+                        no_tool_baseline=no_tool_baseline,
                     )
-                else:
-                    raise
+                    records.append(record)
+                    # Durable the moment a real, billed result exists -- see
+                    # this function's own docstring for why this cannot wait
+                    # until every family/seed pair has finished.
+                    write_jsonl(records_path, records)
+                    if record.failure_reason in INFRASTRUCTURE_ABORT_REASONS:
+                        raise EvaluationAborted(record.failure_reason)
+            finally:
+                # `reset_scenario` still runs unconditionally, on every path
+                # out of `try` -- success or failure -- exactly as before
+                # this comment. What changed: if the `try` block is already
+                # propagating a real, billed run failure AND
+                # `reset_scenario` itself also raises, Python's ordinary
+                # exception chaining would otherwise replace the original
+                # exception with this cleanup failure, burying the actual
+                # reason a billed run failed behind an unrelated lab-reset
+                # problem.
+                #
+                # `already_failing` is read HERE, at the top of `finally`
+                # and BEFORE the nested `try` below -- not from inside the
+                # nested `except Exception as reset_error:` handler further
+                # down. That distinction is the actual fix: `sys.exc_info()`
+                # reports the exception the *nearest enclosing* `except`
+                # block is currently handling, at the point it is called.
+                # Called from inside `except Exception as reset_error:`, the
+                # nearest enclosing handler is that very `except` --
+                # `sys.exc_info()` there always describes `reset_error`
+                # itself, never an outer exception from this function's own
+                # `try` block, so a check placed there could never see past
+                # its own just-caught exception. Called here, before the
+                # nested `try` exists, the nearest enclosing handler is
+                # whatever `finally` is unwinding for -- correctly the outer
+                # `try` body's own exception, or `None` if that body
+                # succeeded.
+                already_failing = sys.exc_info()[0] is not None
+                try:
+                    reset_scenario(root, incident_id)
+                except Exception as reset_error:
+                    if already_failing:
+                        print(
+                            f"FAIL RESET_SCENARIO_FAILED_DURING_CLEANUP "
+                            f"{family}/{seed_name}/{incident_id}: {reset_error}"
+                        )
+                    else:
+                        raise
     return records
 
 
@@ -429,11 +603,11 @@ def render_evaluation_summary(summary: EvaluationSummary) -> str:
     rather than inventing a second style.
 
     Renders one group's figures only -- `render_paired_evaluation_summary`
-    below calls this once per `(arm, retrieval_mode)` group; the trailing
-    batch-wide total it appends afterward is a plain record count, not a
-    second call into this function (see that function's own docstring for
-    why). This function itself knows nothing about arms or retrieval
-    modes."""
+    below calls this once per `(arm, retrieval_mode, executed_tools)` group;
+    the trailing batch-wide total it appends afterward is a plain record
+    count, not a second call into this function (see that function's own
+    docstring for why). This function itself knows nothing about arms,
+    retrieval modes, or evidence budgets."""
     total = summary.total_records
     lines = [
         f"evaluation summary: {total} record(s)",
@@ -496,7 +670,7 @@ _RETRIEVAL_MODE_ORDER: tuple[RetrievalMode, ...] = (
 
 
 class EvaluationGroupSummary(BaseModel):
-    """One `(arm, retrieval_mode)` group's own batch summary.
+    """One `(arm, retrieval_mode, executed_tools)` group's own batch summary.
 
     A benchmark aggregate must never silently fall back, mix retrieval
     modes together, or represent FTS5 as semantic retrieval. Partitioning
@@ -512,24 +686,33 @@ class EvaluationGroupSummary(BaseModel):
     So two tool-enabled runs in the same batch can legitimately carry
     different `retrieval_mode` values, and an arm-only partition can
     silently blend them into one reported figure -- exactly what this rule
-    forbids. Partitioning by the `(arm, retrieval_mode)` pair instead means
-    every group this class represents came from records that share both
-    facts, so no group can mix retrieval modes."""
+    forbids.
+
+    `executed_tools` joins the same partition for the identical reason,
+    added by the evidence-budget curve: every point on that curve (2, 3, 4)
+    is a genuinely different experimental condition, and blending two
+    curve points' records into one reported figure would hide the very
+    comparison the curve exists to produce -- the same "never mix modes in
+    one benchmark aggregate" rule this class's `retrieval_mode` split
+    already enforces, applied to a second dimension. Partitioning by the
+    full `(arm, retrieval_mode, executed_tools)` triple means every group
+    this class represents came from records that share all three facts, so
+    no group can mix retrieval modes OR evidence-budget settings."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     arm: str
     retrieval_mode: RetrievalMode
+    executed_tools: int
     summary: EvaluationSummary
 
 
 class PairedEvaluationSummary(BaseModel):
     """Replaces a fixed three-field `baseline`/`tool_enabled`/`combined`
-    shape used previously. `groups` holds one `EvaluationGroupSummary`
-    per distinct `(arm, retrieval_mode)` pair actually present in the batch --
-    however many distinct pairs that turns out to be (one group for the
-    baseline arm, since it is always `DISABLED`; one or two for the
-    tool-enabled arm, depending on whether the model ever retrieved) --
+    shape used previously. `groups` holds one `EvaluationGroupSummary` per
+    distinct `(arm, retrieval_mode, executed_tools)` triple actually
+    present in the batch -- see that class's own docstring for why all
+    three facts, not arm alone, decide which records may share one group --
     rather than assuming a fixed small set of buckets that a future third
     retrieval mode or a mixed-mode batch could silently overflow.
 
@@ -560,16 +743,17 @@ class PairedEvaluationSummary(BaseModel):
 def summarize_paired_evaluation(
     records: Sequence[EvaluationRecord],
 ) -> PairedEvaluationSummary:
-    """Partitions `records` by the `(arm, retrieval_mode)` pair -- see
-    `EvaluationGroupSummary`'s own docstring for why arm alone is not
-    enough -- then calls the existing arm/mode-agnostic
-    `summarize_evaluation` once per distinct pair present.
-    `summarize_evaluation` itself is taught nothing about arms or retrieval
-    modes; it predates this script's paired design and stays usable on any
-    flat list of records, here or elsewhere. `total_records` is a bare count of
-    the whole batch, not a call to `summarize_evaluation` on the unpartitioned
-    records -- see `PairedEvaluationSummary`'s own docstring for why no
-    benchmark figure may span more than one retrieval mode.
+    """Partitions `records` by the `(arm, retrieval_mode, executed_tools)`
+    triple -- see `EvaluationGroupSummary`'s own docstring for why arm and
+    retrieval mode alone are not enough -- then calls the existing
+    arm/mode/budget-agnostic `summarize_evaluation` once per distinct triple
+    present. `summarize_evaluation` itself is taught nothing about arms,
+    retrieval modes, or evidence budgets; it predates this script's paired
+    design and stays usable on any flat list of records, here or elsewhere.
+    `total_records` is a bare count of the whole batch, not a call to
+    `summarize_evaluation` on the unpartitioned records -- see
+    `PairedEvaluationSummary`'s own docstring for why no benchmark figure
+    may span more than one retrieval mode or evidence-budget setting.
 
     A record whose `run_key` carries neither known arm word is a data-shape
     bug upstream (a `run_key` no `_run_one` call in this script's history
@@ -589,21 +773,24 @@ def summarize_paired_evaluation(
             f"{MODE_TOOL_ENABLED!r} -- cannot partition this batch by arm"
         )
 
-    grouped: dict[tuple[str, RetrievalMode], list[EvaluationRecord]] = {}
+    grouped: dict[tuple[str, RetrievalMode, int], list[EvaluationRecord]] = {}
     for record in records:
-        key = (_arm_of(record), record.retrieval_mode)
+        key = (_arm_of(record), record.retrieval_mode, record.executed_tools)
         grouped.setdefault(key, []).append(record)
 
-    def _sort_key(key: tuple[str, RetrievalMode]) -> tuple[int, int]:
-        arm, mode = key
+    def _sort_key(key: tuple[str, RetrievalMode, int]) -> tuple[int, int, int]:
+        arm, mode, executed_tools = key
         arm_rank = 0 if arm == MODE_NO_TOOL_BASELINE else 1
-        return (arm_rank, _RETRIEVAL_MODE_ORDER.index(mode))
+        return (arm_rank, _RETRIEVAL_MODE_ORDER.index(mode), executed_tools)
 
     groups = tuple(
         EvaluationGroupSummary(
-            arm=arm, retrieval_mode=mode, summary=summarize_evaluation(group_records)
+            arm=arm,
+            retrieval_mode=mode,
+            executed_tools=executed_tools,
+            summary=summarize_evaluation(group_records),
         )
-        for (arm, mode), group_records in sorted(
+        for (arm, mode, executed_tools), group_records in sorted(
             grouped.items(), key=lambda item: _sort_key(item[0])
         )
     )
@@ -611,24 +798,27 @@ def summarize_paired_evaluation(
 
 
 def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
-    """One block per `(arm, retrieval_mode)` group, then a plain batch-wide
-    record count -- never a benchmark figure that spans more than one
-    retrieval mode. Each group's own label states both facts it was
-    partitioned on, so two tool-enabled groups that differ only in
-    retrieval mode -- exactly the blending this project's evaluation
-    reporting forbids -- render as visibly separate blocks, never one merged
-    number. The trailing total is a count only, not a call into
-    `render_evaluation_summary` (which reports diagnosis/citation/control/
-    latency/cost figures) -- see `PairedEvaluationSummary`'s own docstring
-    for why even a clearly labeled version of that figure is still the
-    thing this project's evaluation reporting forbids."""
+    """One block per `(arm, retrieval_mode, executed_tools)` group, then a
+    plain batch-wide record count -- never a benchmark figure that spans
+    more than one retrieval mode or evidence-budget setting. Each group's
+    own label states all three facts it was partitioned on, so groups that
+    differ only in retrieval mode or only in evidence budget -- exactly the
+    blending this project's evaluation reporting forbids -- render as
+    visibly separate blocks, never one merged number. The trailing total is
+    a count only, not a call into `render_evaluation_summary` (which reports
+    diagnosis/citation/control/latency/cost figures) -- see
+    `PairedEvaluationSummary`'s own docstring for why even a clearly
+    labeled version of that figure is still the thing this project's
+    evaluation reporting forbids."""
     blocks = [
-        f"[{group.arm}, retrieval_mode={group.retrieval_mode.value}]\n"
+        f"[{group.arm}, retrieval_mode={group.retrieval_mode.value}, "
+        f"executed_tools={group.executed_tools}]\n"
         f"{render_evaluation_summary(group.summary)}"
         for group in paired.groups
     ]
     blocks.append(
-        f"total_records (all arms and retrieval modes): {paired.total_records}"
+        "total_records (all arms, retrieval modes, and evidence budgets): "
+        f"{paired.total_records}"
     )
     return "\n\n".join(blocks)
 
@@ -657,7 +847,8 @@ def _write_json_atomic(path: Path, payload: BaseModel) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    build_parser().parse_args(argv)
+    arguments = build_parser().parse_args(argv)
+    budgets = resolve_budgets(arguments.executed_tools)
     start = Path.cwd()
     root = find_project_root(start)
     if root is None:
@@ -676,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     records_path = target / "records.jsonl"
     try:
-        records = run_evaluation(root, target)
+        records = run_evaluation(root, target, budgets)
     except EvaluationAborted as aborted:
         print(f"FAIL EVALUATION_ABORTED {aborted.reason.value}")
         print(f"records so far: {records_path}")
@@ -687,13 +878,17 @@ def main(argv: list[str] | None = None) -> int:
         # `run_evaluation` and indirectly through `build_model_and_registry`
         # in `_run_one`) whenever `LIVE_EVALUATION_MAX_USD` is configured but
         # unusable -- malformed, non-finite, or too small to ever authorize
-        # a reservation. Without this in the typed tuple, that refusal fell
-        # through to the generic `except Exception` below and reported the
-        # opaque `FAIL INTERNAL_ERROR` instead of its own stable reason
-        # code, contradicting `.env.example`'s documented `FAIL
-        # CEILING_BELOW_RESERVATION_BUFFER`/`FAIL CEILING_MALFORMED` output.
-        # `cli.py`'s `main` already catches this type alongside the same two
-        # exceptions for its own `investigate`/`approve`/`reject` commands.
+        # a reservation -- and from `_check_preflight_cost` (also called by
+        # `run_evaluation`, before any scenario starts) whenever the
+        # ceiling, though individually usable, could not possibly cover this
+        # invocation's own worst-case batch cost. Without this in the typed
+        # tuple, either refusal fell through to the generic `except
+        # Exception` below and reported the opaque `FAIL INTERNAL_ERROR`
+        # instead of its own stable reason code, contradicting `.env.
+        # example`'s documented `FAIL CEILING_BELOW_RESERVATION_BUFFER`/
+        # `FAIL CEILING_MALFORMED` output. `cli.py`'s `main` already catches
+        # this type alongside the same two exceptions for its own
+        # `investigate`/`approve`/`reject` commands.
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         print(f"records so far: {records_path}")
         return 1
@@ -713,10 +908,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"records so far: {records_path}")
         return 1
     for record in records:
+        actual_usd_display = (
+            f"{record.actual_usd:.4f}" if record.actual_usd is not None else "None"
+        )
         print(
             f"{record.run_key} diagnosis_correct={record.scores.diagnosis_correct} "
             f"disposition_correct={record.scores.disposition_correct} "
-            f"reserved_usd={record.reserved_usd:.4f} actual_usd={record.actual_usd}"
+            f"reserved_usd={record.reserved_usd:.4f} actual_usd={actual_usd_display}"
         )
     # Partitioned by arm, not one blended total -- see
     # `PairedEvaluationSummary`'s own docstring for why a single combined

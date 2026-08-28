@@ -39,11 +39,23 @@
   },
   "seed_variants": {
     "development": {
-      "change_offsets": [-30, -180]
+      "change_offsets": [-30, -180],
+      "traffic_volume_bump": 0
     },
     "evaluation": {
       "change_offsets": [-50, -220],
-      "faulted_config_overrides": {"response_delay_seconds": 2.0}
+      "faulted_config_overrides": {"response_delay_seconds": 2.0},
+      "traffic_volume_bump": 2
+    },
+    "evaluation_b": {
+      "change_offsets": [-55, -230],
+      "faulted_config_overrides": {"response_delay_seconds": 1.7},
+      "traffic_volume_bump": 2
+    },
+    "evaluation_c": {
+      "change_offsets": [-60, -240],
+      "faulted_config_overrides": {"response_delay_seconds": 2.3},
+      "traffic_volume_bump": 2
     }
   }
 }

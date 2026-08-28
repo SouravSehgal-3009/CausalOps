@@ -101,7 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     scenario_actions = scenario.add_subparsers(dest="action", required=True)
     start = scenario_actions.add_parser("start", help="Create one incident.")
     start.add_argument("family", help="Owner-facing scenario family name.")
-    start.add_argument("--seed", choices=("development", "evaluation"), required=True)
+    start.add_argument(
+        "--seed",
+        choices=("development", "evaluation", "evaluation_b", "evaluation_c"),
+        required=True,
+    )
     reset = scenario_actions.add_parser("reset", help="Delete one incident's state.")
     reset.add_argument("incident_id")
 

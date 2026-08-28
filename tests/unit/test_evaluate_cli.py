@@ -34,6 +34,12 @@ from fake_incident import (
 from pydantic import BaseModel
 
 import causalops.evaluate_cli as evaluate_cli
+from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
+from causalops.cost_ledger import (
+    RESERVATION_CEILING_BUFFER_USD,
+    ensure_cost_ledger_table,
+    record_reservation_before_request,
+)
 from causalops.domain import (
     Budgets,
     Disposition,
@@ -47,18 +53,23 @@ from causalops.domain import (
 )
 from causalops.evaluate_cli import (
     EVALUATION_FAMILIES,
+    EVALUATION_SEEDS,
+    EVIDENCE_BUDGET_CURVE,
     MODE_NO_TOOL_BASELINE,
     MODE_TOOL_ENABLED,
+    _check_preflight_cost,
     _fixture_sha256,
     _git_provenance,
     _load_expected_outcome,
     _new_evaluation_target,
+    _preflight_worst_case_batch_usd,
     _run_id_from_events,
     _write_json_atomic,
     build_parser,
     main,
     render_evaluation_summary,
     render_paired_evaluation_summary,
+    resolve_budgets,
     run_evaluation,
     summarize_paired_evaluation,
 )
@@ -74,6 +85,7 @@ from causalops.evaluation import (
     summarize_evaluation,
 )
 from causalops.evidence import new_opaque_id
+from causalops.live_setup import MAXIMUM_POSSIBLE_RESERVATION_USD
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunEvent
 from causalops.scenario_control import run_paths
@@ -135,10 +147,55 @@ def _fake_start_scenario(root: Path, family: str, seed: str) -> str:
     return incident_id
 
 
+def _disable_preflight_cost_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run_evaluation`'s pre-flight cost check (`_check_preflight_cost`)
+    compares a real batch's worst-case cost against
+    `LIVE_EVALUATION_MAX_USD` before any scenario starts -- real machinery
+    this file's own dedicated pre-flight tests exercise directly. Every
+    OTHER test in this file that drives `run_evaluation`/`main()` through
+    monkeypatched, zero-cost fakes is testing something else entirely and
+    would otherwise trip this real, unrelated gate (the default
+    `DEFAULT_LIVE_EVALUATION_MAX_USD` ceiling is sized for real spend, not
+    for the fact that no test here sets `LIVE_EVALUATION_MAX_USD` at all) --
+    disabled here the same way `start_scenario`/`build_model_and_registry`
+    are already faked out for the same reason."""
+    monkeypatch.setattr(evaluate_cli, "_check_preflight_cost", lambda *a, **k: None)
+
+
+DEFAULT_TEST_BUDGETS = Budgets()
+
+
 def test_build_parser_accepts_no_arguments() -> None:
     parsed = build_parser().parse_args([])
 
     assert parsed == build_parser().parse_args([])
+    assert parsed.executed_tools == 2
+
+
+def test_build_parser_accepts_each_curve_point() -> None:
+    for point in EVIDENCE_BUDGET_CURVE:
+        parsed = build_parser().parse_args(["--executed-tools", str(point)])
+        assert parsed.executed_tools == point
+
+
+def test_build_parser_rejects_a_value_off_the_curve() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--executed-tools", "5"])
+
+
+def test_resolve_budgets_couples_model_calls_to_executed_tools_plus_two() -> None:
+    for executed_tools in EVIDENCE_BUDGET_CURVE:
+        budgets = resolve_budgets(executed_tools)
+        assert budgets.executed_tools == executed_tools
+        assert budgets.model_calls == executed_tools + 2
+
+
+def test_resolve_budgets_at_the_default_matches_budgets_own_class_defaults() -> None:
+    """`resolve_budgets(2)` -- the default curve point -- must produce
+    exactly what `Budgets()`'s own class-level defaults already are, so the
+    first point on the curve is behaviourally identical to every existing
+    caller that still constructs a bare `Budgets()`."""
+    assert resolve_budgets(2) == Budgets()
 
 
 def test_git_provenance_reads_a_clean_commit(tmp_path: Path) -> None:
@@ -226,14 +283,16 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Proves the orchestration `run_evaluation` is responsible for: one
-    `start_scenario(..., "evaluation")` per family, two scored runs per
-    incident in baseline-then-tool-enabled order, one `reset_scenario` per
-    family even though nothing raises, and a resulting `EvaluationRecord`
-    per run carrying the evaluator-only expected outcome -- without ever
-    handing that expected outcome to the investigation call itself (this
-    script builds it and the model+registry from two entirely separate
-    functions; `_run_one` never receives `expected` as investigator input,
-    only as a scoring argument after the run has already finished)."""
+    `start_scenario(..., seed)` per `(family, seed)` pair in
+    `EVALUATION_FAMILIES` x `EVALUATION_SEEDS`, two scored runs per incident
+    in baseline-then-tool-enabled order, one `reset_scenario` per incident
+    even though nothing raises, and a resulting `EvaluationRecord` per run
+    carrying the evaluator-only expected outcome -- without ever handing
+    that expected outcome to the investigation call itself (this script
+    builds it and the model+registry from two entirely separate functions;
+    `_run_one` never receives `expected` as investigator input, only as a
+    scoring argument after the run has already finished)."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -317,14 +376,21 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
     monkeypatch.setattr("causalops.evaluate_cli.run_graph_investigation", spy_run_graph)
 
     target = _new_evaluation_target(tmp_path)
-    records = run_evaluation(tmp_path, target)
+    records = run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
-    assert [family for family, seed in started] == list(EVALUATION_FAMILIES)
-    assert all(seed == "evaluation" for _, seed in started)
-    assert len(reset) == len(EVALUATION_FAMILIES)
-    assert len(records) == 2 * len(EVALUATION_FAMILIES)
+    expected_started = [
+        (family, seed_name)
+        for family in EVALUATION_FAMILIES
+        for seed_name in EVALUATION_SEEDS
+    ]
+    assert started == expected_started
+    incidents_started = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS)
+    assert len(reset) == incidents_started
+    assert len(records) == 2 * incidents_started
     modes = [record.run_key.rsplit("/", 1)[-1] for record in records]
-    assert modes == ["no_tool_baseline", "tool_enabled"] * len(EVALUATION_FAMILIES)
+    assert modes == ["no_tool_baseline", "tool_enabled"] * incidents_started
+    seed_names = [record.seed_name for record in records]
+    assert seed_names == [seed for _, seed in expected_started for _ in range(2)]
     assert len(graph_calls) == len(records)
     for index, call in enumerate(graph_calls):
         assert call["suppress_escalation"] is True
@@ -333,6 +399,8 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
         assert record.model_name == "fake-claude-model"
         assert record.git_sha == "f" * 40
         assert record.git_dirty is False
+        assert record.executed_tools == 2
+        assert record.model_calls_budget == 4
         assert (
             record.expected.root_cause
             is RootCauseCode.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION
@@ -344,16 +412,17 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
 ) -> None:
     """The bug this test exists for: `run_evaluation` must rewrite
     `records.jsonl` after every completed run, not batch everything to the
-    end. Proves it by making the run that would build the SECOND family's
-    model construction raise -- after the first family's baseline and
-    tool-enabled runs have both already completed and been appended -- and
-    then reading `records.jsonl` back from disk (not the in-memory
-    exception, and not the in-memory `records` list this function never
-    even gets to return) to confirm those two already-scored, already-paid-
-    for records are durable despite the crash. Reading only the in-memory
-    list would not prove anything: the bug this test guards against was
-    exactly that records could be correct in memory yet never reach disk
-    before a crash discarded them."""
+    end. Proves it by making the run that would build the SECOND
+    `(family, seed)` pair's model construction raise -- after the first
+    pair's baseline and tool-enabled runs have both already completed and
+    been appended -- and then reading `records.jsonl` back from disk (not
+    the in-memory exception, and not the in-memory `records` list this
+    function never even gets to return) to confirm those two
+    already-scored, already-paid-for records are durable despite the
+    crash. Reading only the in-memory list would not prove anything: the
+    bug this test guards against was exactly that records could be correct
+    in memory yet never reach disk before a crash discarded them."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -376,11 +445,13 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     ) -> tuple[object, object, str, object]:
         nonlocal call_count
         call_count += 1
-        # Calls 1 and 2 are the first family's baseline and tool-enabled
-        # runs -- let both succeed and land on disk. Call 3 is the SECOND
-        # family's baseline run -- raise there, simulating a real mid-batch
-        # failure (a crashed request, a killed process) after real, billed
-        # work has already produced scoreable results.
+        # Calls 1 and 2 are the first `(family, seed)` pair's baseline and
+        # tool-enabled runs -- let both succeed and land on disk. Call 3 is
+        # the SECOND `(family, seed)` pair's baseline run (still the first
+        # family, its second seed, since the loop is family-major, seed-
+        # minor) -- raise there, simulating a real mid-batch failure (a
+        # crashed request, a killed process) after real, billed work has
+        # already produced scoreable results.
         if call_count == 3:
             raise RuntimeError("simulated mid-batch failure on the third run")
         model = ReplayToolCallingModel(
@@ -405,7 +476,7 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     records_path = target / "records.jsonl"
 
     with pytest.raises(RuntimeError, match="simulated mid-batch failure"):
-        run_evaluation(tmp_path, target)
+        run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
     assert call_count == 3
 
@@ -417,8 +488,9 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     assert len(on_disk) == 2
     modes = [record.run_key.rsplit("/", 1)[-1] for record in on_disk]
     assert modes == ["no_tool_baseline", "tool_enabled"]
-    # Both surviving records share one incident_id -- the first family's --
-    # confirming they are the pair from before the crash, not some other mix.
+    # Both surviving records share one incident_id -- the first
+    # `(family, seed)` pair's -- confirming they are the pair from before
+    # the crash, not some other mix.
     incident_ids = {record.run_key.split("/", 1)[0] for record in on_disk}
     assert len(incident_ids) == 1
     for record in on_disk:
@@ -437,6 +509,7 @@ def _prepare_stubbed_evaluation(
     monkeypatch.setattr(evaluate_cli, "start_scenario", _fake_start_scenario)
     monkeypatch.setattr(evaluate_cli, "reset_scenario", lambda root, incident_id: None)
     monkeypatch.setattr(evaluate_cli, "_git_provenance", lambda root: ("f" * 40, False))
+    _disable_preflight_cost_check(monkeypatch)
     return _new_evaluation_target(tmp_path)
 
 
@@ -456,7 +529,7 @@ def test_infrastructure_failure_is_persisted_before_evaluation_aborts(
     monkeypatch.setattr(evaluate_cli, "_run_one", fake_run_one)
 
     with pytest.raises(evaluate_cli.EvaluationAborted) as aborted:
-        run_evaluation(tmp_path, target)
+        run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
     assert aborted.value.reason is ReasonCode.COST_CEILING_EXCEEDED
     assert calls == [True]
@@ -485,13 +558,16 @@ def test_model_quality_failure_does_not_abort_later_evaluation_runs(
 
     monkeypatch.setattr(evaluate_cli, "_run_one", fake_run_one)
 
-    records = run_evaluation(tmp_path, target)
+    records = run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
-    assert calls == 4
-    assert len(records) == 4
+    # 2 stubbed families x the real EVALUATION_SEEDS x 2 arms -- this test
+    # does not monkeypatch EVALUATION_SEEDS, only EVALUATION_FAMILIES.
+    expected_calls = 2 * len(EVALUATION_SEEDS) * 2
+    assert calls == expected_calls
+    assert len(records) == expected_calls
     assert records[0].failure_reason is ReasonCode.MODEL_OUTPUT_INVALID
     on_disk = (target / "records.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(on_disk) == 4
+    assert len(on_disk) == expected_calls
 
 
 def test_the_original_run_failure_survives_cleanup_also_failing(
@@ -506,6 +582,7 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
     problem. Simulates both failing on the very first family and confirms
     the ORIGINAL run failure is what actually propagates and gets reported
     -- the cleanup failure is only printed, never silently discarded."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -538,7 +615,7 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
     target = _new_evaluation_target(tmp_path)
 
     with pytest.raises(RuntimeError, match="simulated billed-run failure"):
-        run_evaluation(tmp_path, target)
+        run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
     out = capsys.readouterr().out
     assert "RESET_SCENARIO_FAILED_DURING_CLEANUP" in out
@@ -564,6 +641,7 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
     earlier code, this test fails: `run_evaluation` returns its records
     normally instead of raising, because every family's reset failure gets
     caught, printed, and discarded."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -605,7 +683,7 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
     with pytest.raises(
         RuntimeError, match="simulated reset_scenario failure after a clean run"
     ):
-        run_evaluation(tmp_path, target)
+        run_evaluation(tmp_path, target, DEFAULT_TEST_BUDGETS)
 
 
 def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
@@ -749,6 +827,7 @@ def test_main_writes_a_summary_alongside_records(
     """End-to-end through `main()`: the aggregate summary this fix adds must
     actually reach both stdout and a saved `summary.json`, not just exist as
     a pure function nothing calls."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -791,25 +870,33 @@ def test_main_writes_a_summary_alongside_records(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    # Refined by the retrieval-mode fix, and again by
-    # a later fix that removed the cross-mode `combined` benchmark
-    # figure entirely: `main()` prints one block per `(arm, retrieval_mode)`
-    # group plus a plain trailing record count -- every run here is the
-    # replay fixture's fake model, which never calls `search_runbooks`, so
-    # both arms stay `RetrievalMode.DISABLED` and each arm still produces
-    # exactly one group of 4 records; the trailing count reports all 8, but
-    # carries no diagnosis/citation/control/latency/cost figure of its own.
-    assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in out
-    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in out
-    assert "total_records (all arms and retrieval modes): 8" in out
+    # The 12-incident corpus (EVALUATION_FAMILIES x EVALUATION_SEEDS) at the
+    # default --executed-tools 2: `main()` prints one block per
+    # (arm, retrieval_mode, executed_tools) group plus a plain trailing
+    # record count -- every run here is the replay fixture's fake model,
+    # which never calls `search_runbooks`, so both arms stay
+    # `RetrievalMode.DISABLED` and both stay at executed_tools=2, so each
+    # arm still produces exactly one group of 12 records; the trailing
+    # count reports all 24, but carries no diagnosis/citation/control/
+    # latency/cost figure of its own.
+    incidents = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS)
+    total = incidents * 2
+    assert (
+        f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled, executed_tools=2]" in out
+    )
+    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=2]" in out
+    assert (
+        "total_records (all arms, retrieval modes, and evidence budgets): "
+        f"{total}" in out
+    )
     # No blended benchmark figure anywhere in the output: every
     # "evaluation summary: N record(s)" block (produced only by
-    # `render_evaluation_summary`, one call per group) reports exactly 4,
-    # the size of one (arm, retrieval_mode) group -- never 8, which would
-    # mean a figure spanning both groups.
+    # `render_evaluation_summary`, one call per group) reports exactly
+    # `incidents`, the size of one (arm, retrieval_mode, executed_tools)
+    # group -- never `total`, which would mean a figure spanning both arms.
     assert out.count("evaluation summary:") == 2
-    assert "evaluation summary: 4 record(s)" in out
-    assert "evaluation summary: 8 record(s)" not in out
+    assert f"evaluation summary: {incidents} record(s)" in out
+    assert f"evaluation summary: {total} record(s)" not in out
     assert "summary:" in out
     summary_path = (
         next((tmp_path / "results" / "evaluations").iterdir()) / "summary.json"
@@ -821,14 +908,16 @@ def test_main_writes_a_summary_alongside_records(
     # `total_records` is a bare count with no `diagnosis_correct_count`,
     # `citations_valid_count`, latency, or cost figure anywhere on it, so no
     # single reported field in this file blends records across retrieval
-    # modes.
+    # modes or evidence budgets.
     assert len(saved["groups"]) == 2
     groups_by_arm = {group["arm"]: group for group in saved["groups"]}
     assert groups_by_arm[MODE_NO_TOOL_BASELINE]["retrieval_mode"] == "disabled"
-    assert groups_by_arm[MODE_NO_TOOL_BASELINE]["summary"]["total_records"] == 4
+    assert groups_by_arm[MODE_NO_TOOL_BASELINE]["executed_tools"] == 2
+    assert groups_by_arm[MODE_NO_TOOL_BASELINE]["summary"]["total_records"] == incidents
     assert groups_by_arm[MODE_TOOL_ENABLED]["retrieval_mode"] == "disabled"
-    assert groups_by_arm[MODE_TOOL_ENABLED]["summary"]["total_records"] == 4
-    assert saved["total_records"] == 8
+    assert groups_by_arm[MODE_TOOL_ENABLED]["executed_tools"] == 2
+    assert groups_by_arm[MODE_TOOL_ENABLED]["summary"]["total_records"] == incidents
+    assert saved["total_records"] == total
     assert "combined" not in saved
     assert set(saved.keys()) == {"groups", "total_records"}
 
@@ -848,6 +937,7 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     to a sibling `summary.json.tmp-<hex>` before renaming it onto
     `summary.json`, so the matched name is a prefix, not the exact final
     filename."""
+    _disable_preflight_cost_check(monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -907,13 +997,13 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     assert "records (unaffected):" in out
     assert str(records_path) in out
     # `records.jsonl` itself is untouched by the summary write failure --
-    # all 8 real, already-billed results are still readable back.
+    # every real, already-billed result is still readable back.
     on_disk = [
         EvaluationRecord.model_validate_json(line)
         for line in records_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert len(on_disk) == 8
+    assert len(on_disk) == len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2
 
 
 class _TinyPayload(BaseModel):
@@ -1003,20 +1093,26 @@ def _paired_record(
     retrieval_mode: RetrievalMode = RetrievalMode.DISABLED,
     citations_sufficient: bool | None = True,
     has_predicate: bool = True,
+    executed_tools: int = 2,
 ) -> EvaluationRecord:
     """A minimal `EvaluationRecord` for `summarize_paired_evaluation`/
     `render_paired_evaluation_summary` tests -- only `run_key` (which arm
     encodes the mode as its final `/`-segment), `diagnosis_correct`,
-    `retrieval_mode`, `citations_sufficient`, and `has_predicate` vary
-    across the records these tests build; everything else is fixed,
-    plausible filler.
+    `retrieval_mode`, `citations_sufficient`, `has_predicate`, and
+    `executed_tools` vary across the records these tests build; everything
+    else is fixed, plausible filler.
 
     `has_predicate` controls whether `expected.predicates` is non-empty.
     Defaults to `True` (a predicate-bearing outcome). A caller building a
     not-applicable `citations_sufficient=None` record must pass
     `has_predicate=False` explicitly: applicability is derived from
     `expected.predicates` itself, and real `score_run` output can never
-    pair a non-empty `expected.predicates` with `citations_sufficient=None`."""
+    pair a non-empty `expected.predicates` with `citations_sufficient=None`.
+
+    `executed_tools` is a real field on the record (not parsed out of
+    `run_key`, which stays free-form for these tests) -- defaults to 2, the
+    value every group test that does not care about the evidence-budget
+    curve builds against."""
     return EvaluationRecord(
         run_key=run_key,
         investigation_id="inv-1",
@@ -1060,19 +1156,26 @@ def _paired_record(
         configured_ceiling_usd=5.0,
         reserved_usd=0.01,
         actual_usd=0.008,
+        executed_tools=executed_tools,
     )
 
 
-def _group(paired: object, arm: str, retrieval_mode: RetrievalMode) -> object:
-    """Finds the one `EvaluationGroupSummary` for `(arm, retrieval_mode)`
-    in `paired.groups` -- raises `StopIteration` (a clear test failure) if
-    no such group exists, which is itself part of what these tests check:
-    a group that should not exist must genuinely be absent, not merged into
-    another one."""
+def _group(
+    paired: object, arm: str, retrieval_mode: RetrievalMode, executed_tools: int = 2
+) -> object:
+    """Finds the one `EvaluationGroupSummary` for `(arm, retrieval_mode,
+    executed_tools)` in `paired.groups` -- raises `StopIteration` (a clear
+    test failure) if no such group exists, which is itself part of what
+    these tests check: a group that should not exist must genuinely be
+    absent, not merged into another one. `executed_tools` defaults to 2,
+    the value every group test that does not care about the evidence-budget
+    curve builds against."""
     return next(
         group
         for group in paired.groups  # type: ignore[attr-defined]
-        if group.arm == arm and group.retrieval_mode == retrieval_mode
+        if group.arm == arm
+        and group.retrieval_mode == retrieval_mode
+        and group.executed_tools == executed_tools
     )
 
 
@@ -1122,9 +1225,16 @@ def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
 
     rendered = render_paired_evaluation_summary(summary)
 
-    assert f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled]" in rendered
-    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in rendered
-    assert "total_records (all arms and retrieval modes): 4" in rendered
+    assert (
+        f"[{MODE_NO_TOOL_BASELINE}, retrieval_mode=disabled, executed_tools=2]"
+        in rendered
+    )
+    assert (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=2]" in rendered
+    )
+    assert (
+        "total_records (all arms, retrieval modes, and evidence budgets): 4" in rendered
+    )
     # No merged "diagnosis_correct: 3/4" figure anywhere -- each arm's own
     # line stays visibly separate, and the trailing total carries no
     # diagnosis figure of its own to blend them.
@@ -1203,13 +1313,17 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
 
     # Both tool-enabled groups render as visibly separate blocks -- neither
     # retrieval-mode figure below is blended into the other.
-    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]" in rendered
-    assert f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]" in rendered
+    no_retrieval_label = (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=2]"
+    )
+    retrieved_label = (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical, executed_tools=2]"
+    )
+    assert no_retrieval_label in rendered
+    assert retrieved_label in rendered
     no_retrieval_block, retrieved_block = (
-        rendered.split(f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled]")[1].split(
-            f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]"
-        )[0],
-        rendered.split(f"[{MODE_TOOL_ENABLED}, retrieval_mode=fts5_lexical]")[1],
+        rendered.split(no_retrieval_label)[1].split(retrieved_label)[0],
+        rendered.split(retrieved_label)[1],
     )
     assert "diagnosis_correct:   1/1" in no_retrieval_block
     assert "diagnosis_correct:   0/1" in retrieved_block
@@ -1219,7 +1333,73 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     # blends diagnosis data across the different retrieval modes present in
     # this batch.
     assert "diagnosis_correct:   2/3" not in rendered
-    assert "total_records (all arms and retrieval modes): 3" in rendered
+    assert (
+        "total_records (all arms, retrieval modes, and evidence budgets): 3" in rendered
+    )
+
+
+def test_summarize_paired_evaluation_keeps_evidence_budget_settings_apart() -> None:
+    """The single most important fix in the evidence-budget-curve unit:
+    without partitioning by `executed_tools` too, every budget-setting
+    variant of the tool-enabled arm would collapse into one blended
+    summary, and the entire curve this design exists to produce would be
+    lost even though the underlying records are genuinely distinct. Builds
+    a batch with identical arm/retrieval_mode but three different
+    `executed_tools` values and proves `summarize_paired_evaluation`
+    produces three separate groups, not one."""
+    records = [
+        _paired_record(
+            run_key=f"incident-a/model/et2/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=True,
+            executed_tools=2,
+        ),
+        _paired_record(
+            run_key=f"incident-b/model/et3/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=False,
+            executed_tools=3,
+        ),
+        _paired_record(
+            run_key=f"incident-c/model/et4/{MODE_TOOL_ENABLED}",
+            diagnosis_correct=True,
+            executed_tools=4,
+        ),
+    ]
+
+    summary = summarize_paired_evaluation(records)
+
+    assert len(summary.groups) == 3
+    et2_group = _group(
+        summary, MODE_TOOL_ENABLED, RetrievalMode.DISABLED, executed_tools=2
+    )
+    et3_group = _group(
+        summary, MODE_TOOL_ENABLED, RetrievalMode.DISABLED, executed_tools=3
+    )
+    et4_group = _group(
+        summary, MODE_TOOL_ENABLED, RetrievalMode.DISABLED, executed_tools=4
+    )
+    assert et2_group.summary.total_records == 1
+    assert et2_group.summary.diagnosis_correct_count == 1
+    assert et3_group.summary.total_records == 1
+    assert et3_group.summary.diagnosis_correct_count == 0
+    assert et4_group.summary.total_records == 1
+    assert et4_group.summary.diagnosis_correct_count == 1
+    assert summary.total_records == 3
+
+    rendered = render_paired_evaluation_summary(summary)
+
+    assert (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=2]" in rendered
+    )
+    assert (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=3]" in rendered
+    )
+    assert (
+        f"[{MODE_TOOL_ENABLED}, retrieval_mode=disabled, executed_tools=4]" in rendered
+    )
+    # No blended figure across the three budget points anywhere -- the exact
+    # figure a cross-budget aggregate would report (2 of the batch's 3
+    # records are diagnosis_correct) never appears.
+    assert "diagnosis_correct:   2/3" not in rendered
 
 
 def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() -> None:
@@ -1379,3 +1559,119 @@ def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     out = capsys.readouterr().out
     assert "FAIL EVALUATION_TARGET_UNWRITABLE" in out
     assert "simulated read-only filesystem" in out
+
+
+def test_preflight_worst_case_batch_usd_scales_with_model_calls() -> None:
+    """The formula itself: runs-per-invocation (fixed, regardless of which
+    curve point is selected) x `budgets.model_calls` x
+    `MAXIMUM_POSSIBLE_RESERVATION_USD`."""
+    runs = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2
+    for executed_tools in EVIDENCE_BUDGET_CURVE:
+        budgets = resolve_budgets(executed_tools)
+        expected = runs * budgets.model_calls * MAXIMUM_POSSIBLE_RESERVATION_USD
+        assert _preflight_worst_case_batch_usd(budgets) == pytest.approx(expected)
+
+
+def test_check_preflight_cost_passes_with_sufficient_headroom(tmp_path: Path) -> None:
+    """An empty, freshly-created ledger and a generous ceiling: the
+    pre-flight check must not raise."""
+    conn_path = tmp_path / "checkpoints.db"
+    budgets = resolve_budgets(2)
+    worst_case = _preflight_worst_case_batch_usd(budgets)
+
+    _check_preflight_cost(
+        conn_path, budgets, worst_case + RESERVATION_CEILING_BUFFER_USD + 1.0
+    )  # must not raise
+
+
+def test_check_preflight_cost_refuses_when_the_batch_could_exceed_the_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A ceiling one cent below this batch's own worst case must be refused
+    before any scenario starts -- `CheckpointStoreError` with the same
+    `CEILING_BELOW_RESERVATION_BUFFER` code `live_evaluation_ceiling_usd`
+    itself already uses for a too-small ceiling, so `main`'s existing typed
+    refusal handler reports it identically."""
+    conn_path = tmp_path / "checkpoints.db"
+    budgets = resolve_budgets(2)
+    worst_case = _preflight_worst_case_batch_usd(budgets)
+    too_small = worst_case + RESERVATION_CEILING_BUFFER_USD - 0.01
+
+    with pytest.raises(CheckpointStoreError) as excinfo:
+        _check_preflight_cost(conn_path, budgets, too_small)
+
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER
+    )
+    assert "worst-case batch cost" in str(excinfo.value)
+
+
+def test_check_preflight_cost_accounts_for_already_spent_application_wide(
+    tmp_path: Path,
+) -> None:
+    """A ceiling that would cover this batch's worst case ALONE is still
+    refused once existing application-wide spend is added -- the pre-flight
+    check reads the real ledger, not just this invocation's own cost."""
+    conn_path = tmp_path / "checkpoints.db"
+    conn_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(conn_path))
+    try:
+        ensure_cost_ledger_table(conn)
+        record_reservation_before_request(
+            conn,
+            run_id="already-spent",
+            graph_phase="INVESTIGATE",
+            model_turn=0,
+            context_digest="digest-1",
+            reserved_usd=4.0,
+            requested_at=datetime(2026, 8, 24, tzinfo=UTC),
+            ceiling_usd=1_000_000.0,
+        )
+    finally:
+        conn.close()
+    budgets = resolve_budgets(2)
+    worst_case = _preflight_worst_case_batch_usd(budgets)
+    # Exactly enough for the batch alone, none of the 4.0 already reserved.
+    ceiling = worst_case + RESERVATION_CEILING_BUFFER_USD
+
+    with pytest.raises(CheckpointStoreError) as excinfo:
+        _check_preflight_cost(conn_path, budgets, ceiling)
+
+    assert (
+        excinfo.value.reason_code
+        is CheckpointStoreReasonCode.CEILING_BELOW_RESERVATION_BUFFER
+    )
+
+
+def test_main_refuses_before_any_scenario_starts_when_the_batch_is_too_costly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end through `main()`: a `LIVE_EVALUATION_MAX_USD` well above
+    the per-request floor (so `live_evaluation_ceiling_usd` itself accepts
+    it) but below this invocation's own worst-case batch cost must still be
+    refused, before `start_scenario` is ever called -- proven directly by
+    asserting `start_scenario` was never invoked, not just by the exit code
+    and message."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("LIVE_EVALUATION_MAX_USD", "1.00")
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
+    )
+    started: list[str] = []
+
+    def spy_start_scenario(root: Path, family: str, seed: str) -> str:
+        started.append(family)
+        raise AssertionError("start_scenario must not be called")
+
+    monkeypatch.setattr("causalops.evaluate_cli.start_scenario", spy_start_scenario)
+
+    exit_code = main([])
+
+    assert exit_code == 1
+    assert started == []
+    out = capsys.readouterr().out
+    assert "FAIL CEILING_BELOW_RESERVATION_BUFFER" in out
+    assert "worst-case batch cost" in out

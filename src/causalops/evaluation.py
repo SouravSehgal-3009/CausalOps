@@ -213,6 +213,22 @@ class EvaluationRecord(BaseModel):
     # The reason lets batch orchestration distinguish infrastructure failures
     # (which must stop further paid requests) from model-quality outcomes.
     failure_reason: ReasonCode | None = None
+    # The evidence-budget curve, §3 of the 12-incident/phased-budget design:
+    # `executed_tools`/`model_calls_budget` are this run's own `Budgets.
+    # executed_tools`/`Budgets.model_calls`, and `seed_name` is which
+    # `lab/scenarios/<family>.json` seed variant the incident this run
+    # scored was started under (`"evaluation"`, `"evaluation_b"`, or
+    # `"evaluation_c"`). Defaulted, not required: every record this project
+    # produced before this fix was scored under the one seed
+    # (`"evaluation"`) and the one budget (`Budgets()`'s own defaults,
+    # `executed_tools=2, model_calls=4`) this corpus ever used, so these
+    # defaults describe every pre-existing record's real history accurately,
+    # not a placeholder -- a historical `records.jsonl` line missing these
+    # three keys still reads back correctly today, matching `correct_and_
+    # grounded`'s own established read-compatibility precedent.
+    executed_tools: int = 2
+    model_calls_budget: int = 4
+    seed_name: str = "evaluation"
 
 
 def satisfies(predicate: RequiredEvidencePredicate, evidence: Evidence) -> bool:
@@ -434,9 +450,11 @@ class EvaluationSummary(BaseModel):
     performance claim from a small synthetic benchmark. This model
     deliberately has no percentile, mean, or standard
     deviation field -- a count and a min-max range are what a corpus this
-    size (at most eight records, `EVALUATION_FAMILIES` in `evaluate_cli.py`)
-    can honestly support, and adding a statistical field here would invite
-    reporting it later even though the sample never grew to support it.
+    size (at most 24 records per `causalops-evaluate` invocation --
+    `EVALUATION_FAMILIES` x `EVALUATION_SEEDS` x two arms, in
+    `evaluate_cli.py`) can honestly support, and adding a statistical field
+    here would invite reporting it later even though the sample never grew
+    to support it.
 
     Every `*_min`/`*_max` pair is `None` only when `total_records == 0` (an
     empty batch, not a realistic outcome of a successful run but a real

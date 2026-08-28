@@ -2679,3 +2679,92 @@ def test_an_escalated_investigation_carries_the_same_evidence_and_receipts_so_fa
     assert len(paused.receipts) == 1
     assert paused.receipts[0].outcome is ToolOutcome.UNAVAILABLE
     assert len(paused.evidence) == 2
+
+
+# The evaluation harness's evidence-budget curve (`causalops.evaluate_cli`)
+# runs the same graph under `Budgets(executed_tools=et, model_calls=et + 2)`
+# for `et` in `{2, 3, 4}` -- `model_calls = executed_tools + 2` is the
+# coupling that keeps one full repair's worth of headroom at every point on
+# the curve. These tests prove the underlying reachable-checks arithmetic
+# directly against `graph.py`'s own private helpers, at pure-function speed,
+# rather than running a full graph investigation five times over.
+def _allowed_settled_receipt(receipt_id: str) -> ToolReceipt:
+    return ToolReceipt(
+        receipt_id=receipt_id,
+        incident_id=incident_scope().incident_id,
+        tool=ToolName.QUERY_METRIC,
+        fingerprint=receipt_id,
+        policy_result=PolicyResult.ALLOWED,
+        state=ReceiptState.SETTLED,
+        outcome=ToolOutcome.EXECUTED,
+        requested_at=WINDOW_END,
+        duration_ms=1,
+    )
+
+
+@pytest.mark.parametrize("executed_tools", [2, 3, 4])
+def test_tools_left_starts_at_the_budget_and_counts_down_to_zero(
+    executed_tools: int,
+) -> None:
+    budgets = Budgets(executed_tools=executed_tools, model_calls=executed_tools + 2)
+
+    assert graph_module._tools_left([], budgets) == executed_tools
+
+    spent = [_allowed_settled_receipt(f"r{i}") for i in range(executed_tools)]
+    assert graph_module._tools_left(spent, budgets) == 0
+
+
+@pytest.mark.parametrize(
+    ("executed_tools", "model_calls"), [(2, 4), (3, 4), (3, 5), (4, 4), (4, 6)]
+)
+def test_model_calls_left_reflects_the_configured_model_calls_budget(
+    executed_tools: int, model_calls: int
+) -> None:
+    """`T = min(executed_tools, model_calls - 1)` -- the number of checks a
+    run could ever reach -- is bounded on one side by
+    `_tools_left` (proven above) and on the other by how many model calls
+    remain once one turn's worth is spent, which is exactly what
+    `_model_calls_left` reports."""
+    budgets = Budgets(executed_tools=executed_tools, model_calls=model_calls)
+
+    assert graph_module._model_calls_left(0, budgets) == model_calls
+    assert graph_module._model_calls_left(model_calls, budgets) == 0
+    assert graph_module._model_calls_left(model_calls - 1, budgets) == 1
+
+
+def test_repair_headroom_is_present_when_model_calls_is_executed_tools_plus_two() -> (
+    None
+):
+    """The coupling this whole curve depends on: at `model_calls = executed_
+    tools + 2`, a repair is still possible on the LAST reachable turn --
+    `may_repair` requires both an unused repair slot and at least one
+    remaining model call after the attempt that already failed."""
+    for executed_tools in (2, 3, 4):
+        budgets = Budgets(executed_tools=executed_tools, model_calls=executed_tools + 2)
+        counters = graph_module._StageCounters(
+            model_calls_used=executed_tools + 1,
+            repairs_used=0,
+            invalid_responses=0,
+            usage=None,
+            context_digest="",
+        )
+
+        assert counters.may_repair(budgets) is True
+
+
+def test_repair_headroom_is_absent_when_model_calls_equals_executed_tools() -> None:
+    """The trap this design avoids: without the `+ 2` headroom, a run that
+    spends its budget on checks has no model call left to repair a failed
+    FINAL_ASSESSMENT attempt -- `may_repair` correctly reports `False`, not
+    a silent truncation the caller has to notice on its own."""
+    for executed_tools in (2, 3, 4):
+        budgets = Budgets(executed_tools=executed_tools, model_calls=executed_tools)
+        counters = graph_module._StageCounters(
+            model_calls_used=executed_tools,
+            repairs_used=0,
+            invalid_responses=0,
+            usage=None,
+            context_digest="",
+        )
+
+        assert counters.may_repair(budgets) is False

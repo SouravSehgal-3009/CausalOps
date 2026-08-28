@@ -576,6 +576,68 @@ def test_an_evaluation_record_carries_the_full_reproducibility_manifest() -> Non
     assert record.configured_ceiling_usd == 5.00
     assert record.reserved_usd == 0.01
     assert record.actual_usd == 0.008
+    # Defaulted to the one budget/seed every pre-existing record in this
+    # project's history actually used -- see the field's own comment for why
+    # this is historically accurate, not a placeholder.
+    assert record.executed_tools == 2
+    assert record.model_calls_budget == 4
+    assert record.seed_name == "evaluation"
+
+
+def test_an_evaluation_record_round_trips_a_non_default_evidence_budget() -> None:
+    """The evidence-budget curve's own fields carry a non-default budget
+    point and seed through a round trip -- proves they are real, settable
+    fields, not just defaults that happen to read back unchanged."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+
+    record = EvaluationRecord(
+        run_key="evaluation-1/causalops/et4/tool_enabled",
+        investigation_id=report.investigation_id,
+        incident_id=report.incident_id,
+        expected=expected_diagnosis(),
+        scores=scores,
+        executed_tools=4,
+        model_calls_budget=6,
+        seed_name="evaluation_c",
+        **reproducibility_manifest_kwargs(),
+    )
+    restored = EvaluationRecord.model_validate_json(record.model_dump_json())
+
+    assert restored == record
+    assert restored.executed_tools == 4
+    assert restored.model_calls_budget == 6
+    assert restored.seed_name == "evaluation_c"
+
+
+def test_a_pre_evidence_budget_curve_record_missing_new_fields_still_validates() -> (
+    None
+):
+    """A `records.jsonl` line saved before this fix has no `executed_tools`/
+    `model_calls_budget`/`seed_name` keys at all -- the same additive-default
+    read-compatibility `correct_and_grounded` already established. Every
+    record this project ever produced before this fix was scored under
+    `Budgets()`'s own default (`executed_tools=2, model_calls=4`) and the
+    `"evaluation"` seed, so the defaults describe that record's real history
+    correctly, not merely enough to avoid a validation error."""
+    evidence = timeout_evidence()
+    report = diagnosed_report((evidence.evidence_id,))
+    scores = score_run(report, [evidence], [receipt()], expected_diagnosis())
+    payload = {
+        "run_key": "evaluation-1/causalops/1",
+        "investigation_id": report.investigation_id,
+        "incident_id": report.incident_id,
+        "expected": expected_diagnosis().model_dump(mode="json"),
+        "scores": scores.model_dump(mode="json"),
+        **reproducibility_manifest_kwargs(),
+    }
+
+    record = EvaluationRecord.model_validate(payload)
+
+    assert record.executed_tools == 2
+    assert record.model_calls_budget == 4
+    assert record.seed_name == "evaluation"
 
 
 def test_an_evaluation_record_allows_a_never_settled_actual_cost() -> None:

@@ -623,15 +623,24 @@ def test_apply_seed_variant_is_identity_without_seed_variants() -> None:
     assert result is definition
 
 
-def test_apply_seed_variant_is_identity_for_an_unlisted_seed() -> None:
+def test_apply_seed_variant_raises_for_a_seed_absent_from_a_declared_block() -> None:
+    """A family that DOES declare `seed_variants` but not the requested seed
+    used to fall back to the family's unmodified base definition, silently --
+    the exact typo/mismatch class this fix now refuses loudly instead. Only a
+    family with NO `seed_variants` block at all stays identity (see the
+    sibling test above, unchanged)."""
     definition = {
+        "family": "a_family",
         "changes": [{"service": "orders", "summary": "x", "offset_seconds": -10}],
         "seed_variants": {"development": {"change_offsets": [-20]}},
     }
 
-    result = apply_seed_variant(definition, "evaluation")
+    with pytest.raises(LabError) as excinfo:
+        apply_seed_variant(definition, "evaluation")
 
-    assert result is definition
+    assert excinfo.value.reason_code is LabReasonCode.UNKNOWN_SEED
+    assert "a_family" in str(excinfo.value)
+    assert "evaluation" in str(excinfo.value)
 
 
 def test_apply_seed_variant_replaces_offsets_and_merges_config_overrides() -> None:
@@ -654,6 +663,44 @@ def test_apply_seed_variant_replaces_offsets_and_merges_config_overrides() -> No
     assert [entry["offset_seconds"] for entry in result["changes"]] == [-30, -40]
     assert result["changes"][0]["service"] == "orders"
     assert result["faulted_config"] == {"pool_capacity": 7}
+
+
+def test_apply_seed_variant_copies_a_declared_traffic_volume_bump() -> None:
+    definition = {
+        "changes": [{"service": "orders", "summary": "a", "offset_seconds": -10}],
+        "seed_variants": {"evaluation": {"traffic_volume_bump": 2}},
+    }
+
+    result = apply_seed_variant(definition, "evaluation")
+
+    assert result["traffic_volume_bump"] == 2
+
+
+def test_start_scenario_defaults_traffic_volume_bump_to_zero_when_undeclared(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A seed variant that never declares `traffic_volume_bump` (like this
+    corpus's own `development` blocks before this fix added the field
+    explicitly, or a hand-written variant that omits it) must still drive
+    exactly the base `baseline_requests`/`fault_requests` count -- the read
+    site's own default, not a value every seed variant is required to state."""
+    calls: list[int] = []
+    original_drive_traffic = scenario_control.drive_traffic
+
+    def counting_drive_traffic(count: int) -> tuple[int, int]:
+        calls.append(count)
+        return original_drive_traffic(count)
+
+    monkeypatch.setattr(scenario_control, "drive_traffic", counting_drive_traffic)
+    use_family_gateway(monkeypatch, project, FAMILY)
+
+    start_scenario(project, FAMILY, "development")
+
+    definition = scenario_control.load_definition(project, FAMILY)
+    assert calls == [
+        int(definition["baseline_requests"]),
+        int(definition["fault_requests"]),
+    ]
 
 
 def test_apply_seed_variant_requires_matching_offset_and_change_counts() -> None:

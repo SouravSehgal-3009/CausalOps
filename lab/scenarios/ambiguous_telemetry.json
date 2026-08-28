@@ -52,11 +52,23 @@
   },
   "seed_variants": {
     "development": {
-      "change_offsets": [-40, -35, -190]
+      "change_offsets": [-40, -35, -190],
+      "traffic_volume_bump": 0
     },
     "evaluation": {
       "change_offsets": [-65, -55, -230],
-      "faulted_config_overrides": {"pool_capacity": 13, "response_delay_seconds": 2.0}
+      "faulted_config_overrides": {"pool_capacity": 13, "response_delay_seconds": 2.0},
+      "traffic_volume_bump": 2
+    },
+    "evaluation_b": {
+      "change_offsets": [-70, -60, -240],
+      "faulted_config_overrides": {"pool_capacity": 14, "response_delay_seconds": 1.8},
+      "traffic_volume_bump": 2
+    },
+    "evaluation_c": {
+      "change_offsets": [-75, -65, -250],
+      "faulted_config_overrides": {"pool_capacity": 15, "response_delay_seconds": 2.2},
+      "traffic_volume_bump": 2
     }
   }
 }

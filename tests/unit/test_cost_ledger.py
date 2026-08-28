@@ -18,6 +18,7 @@ from causalops.cost_ledger import (
     AmbiguousReservationNotResent,
     CostCeilingExceeded,
     CostLedgerRow,
+    application_wide_spend_usd,
     ensure_cost_ledger_table,
     record_reservation_before_request,
     run_cost_totals,
@@ -510,6 +511,35 @@ def test_settle_reservation_survives_warnings_as_errors_on_an_overrun(
     assert row.actual_usd == pytest.approx(0.03)
     assert row.reserved_usd == pytest.approx(0.01)
     assert row.state == "SETTLED"
+
+
+def test_application_wide_spend_usd_is_the_same_figure_the_ceiling_gate_uses(
+    conn: sqlite3.Connection,
+) -> None:
+    """`application_wide_spend_usd` is the public wrapper `causalops.
+    evaluate_cli`'s pre-flight cost check calls -- proves it delegates to the
+    same private accounting the ceiling gate itself relies on, not a second,
+    independently-computed figure that could silently drift from it."""
+    _reserve(conn, run_id="run-1", reserved_usd=0.02)
+    _reserve(conn, run_id="run-2", reserved_usd=0.03)
+    settle_reservation(
+        conn,
+        run_id="run-1",
+        graph_phase="INVESTIGATE",
+        model_turn=0,
+        context_digest="digest-1",
+        actual_usd=0.05,
+        input_tokens=1000,
+        output_tokens=500,
+        settled_at=NOW,
+    )
+
+    # run-1 settled ABOVE its own reservation (0.05 > 0.02), so it counts
+    # at its true cost (0.05); run-2 is still only RESERVED, so it counts at
+    # its reservation (0.03) -- the same `max(reserved_usd, actual_usd)` for
+    # settled rows, `reserved_usd` for still-reserved ones, the private
+    # `_reserved_and_settled_total` implements.
+    assert application_wide_spend_usd(conn) == pytest.approx(0.05 + 0.03)
 
 
 def test_an_overrun_settlement_is_counted_at_its_true_cost_against_the_ceiling(

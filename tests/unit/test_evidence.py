@@ -12,6 +12,7 @@ from causalops.evidence import (
     EvidenceStore,
     build_evidence,
     content_hash,
+    derive_context_quotas,
     digest_text,
     fits,
     new_opaque_id,
@@ -122,6 +123,42 @@ def test_context_evidence_adds_no_marker_when_nothing_is_dropped() -> None:
 
     assert len(kept) == 2
     assert markers == ()
+
+
+def test_derive_context_quotas_at_the_default_budget_matches_context_quotas() -> None:
+    """`CONTEXT_QUOTAS` (the unbudgeted default `context_evidence()` still
+    falls back to) must describe exactly what `derive_context_quotas` would
+    compute for `Budgets().executed_tools` -- so a caller with no `Budgets`
+    in scope sees the same quota a real run at the default budget does."""
+    assert CONTEXT_QUOTAS == derive_context_quotas(2)
+
+
+def test_derive_context_quotas_scales_only_the_tool_derived_kinds() -> None:
+    quotas = derive_context_quotas(4)
+
+    assert quotas[EvidenceKind.METRIC] == 5
+    assert quotas[EvidenceKind.LOG] == 5
+    assert quotas[EvidenceKind.CHANGE] == 5
+    # SYMPTOM/TOPOLOGY never scale with the evidence budget -- see
+    # `derive_context_quotas`'s own docstring for why.
+    assert quotas[EvidenceKind.SYMPTOM] == 2
+    assert quotas[EvidenceKind.TOPOLOGY] == 2
+    assert set(quotas) == set(EvidenceKind)
+
+
+def test_context_evidence_honours_an_explicit_wider_quota() -> None:
+    """A caller that passes a wider quota (a run configured with a larger
+    `executed_tools` budget) keeps more evidence of a tool-derived kind, not
+    just the fixed unbudgeted default."""
+    store = filled_store()
+    for minute in range(6):
+        store.add(log_evidence(minute))
+
+    kept, markers = store.context_evidence(derive_context_quotas(4))
+
+    logs_kept = [record for record in kept if record.kind is EvidenceKind.LOG]
+    assert len(logs_kept) == 5
+    assert markers == ("[truncated: 1 more LOG records omitted]",)
 
 
 def test_trim_to_bytes_pops_rows_and_keeps_the_count_field_in_sync() -> None:

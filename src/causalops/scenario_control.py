@@ -89,6 +89,18 @@ class LabReasonCode(StrEnum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     BASELINE_NOT_HEALTHY = "BASELINE_NOT_HEALTHY"
     FAULT_NOT_OBSERVED = "FAULT_NOT_OBSERVED"
+    # A family's own `seed_variants` block exists (so this family DOES
+    # distinguish seeds) but does not contain the requested seed name --
+    # `apply_seed_variant`'s own docstring explains why this is now a hard
+    # refusal rather than a silent identity fallback: a family with no
+    # `seed_variants` block at all is a real, intentional
+    # backward-compatible case, but a family that DOES declare variants and
+    # is asked for one it does not have is almost certainly a typo (a seed
+    # name that doesn't exist, or a mismatch between this corpus and a
+    # caller's own list of seeds) -- silently running the family's
+    # unmodified base definition would produce a real incident under the
+    # wrong timing/fault magnitude with no signal anything went wrong.
+    UNKNOWN_SEED = "UNKNOWN_SEED"
     # A stored JSON artifact (`incident.json`,
     # `report.json`) exists but could not be turned back into the typed
     # record it is supposed to hold -- unreadable (permissions, a file
@@ -288,14 +300,28 @@ def load_definition(root: Path, family: str) -> dict[str, Any]:
 
 
 def apply_seed_variant(definition: dict[str, Any], seed: str) -> dict[str, Any]:
-    """Deterministically vary a definition's timing and fault magnitude by seed.
+    """Deterministically vary a definition's timing, fault magnitude, and
+    traffic volume by seed.
 
-    A family without a matching `seed_variants` entry is returned unchanged, so
-    this stays backward compatible with a definition that has none at all.
+    A family with NO `seed_variants` block at all is returned unchanged --
+    real, intentional backward compatibility with a definition that never
+    declared any variant. A family that DOES declare `seed_variants` but not
+    the requested `seed` is a different case: silently falling back to the
+    family's base definition there used to make a typo'd or unknown seed
+    name produce a real incident under the wrong timing and fault magnitude,
+    with nothing to say a match was never found. That now raises
+    `LabError(UNKNOWN_SEED, ...)` instead of returning unchanged.
     """
     variants = definition.get("seed_variants")
-    if not variants or seed not in variants:
+    if not variants:
         return definition
+    if seed not in variants:
+        family = definition.get("family", "<unnamed family>")
+        raise LabError(
+            LabReasonCode.UNKNOWN_SEED,
+            f"{family} has no seed variant named {seed!r} -- known seeds: "
+            f"{sorted(variants)}",
+        )
     variant = variants[seed]
     varied = dict(definition)
     if "change_offsets" in variant:
@@ -310,6 +336,8 @@ def apply_seed_variant(definition: dict[str, Any], seed: str) -> dict[str, Any]:
             **definition["faulted_config"],
             **variant["faulted_config_overrides"],
         }
+    if "traffic_volume_bump" in variant:
+        varied["traffic_volume_bump"] = variant["traffic_volume_bump"]
     return varied
 
 
@@ -508,7 +536,15 @@ def start_scenario(
         paths.logs.mkdir(parents=True, exist_ok=True)
         write_json(paths.root / "lab" / "config.json", definition["healthy_config"])
         window_start = clock() - WINDOW_LEAD_IN
-        extra = 2 if seed == "evaluation" else 0
+        # Per-seed, not a growing `seed == "..."` string-comparison chain:
+        # `apply_seed_variant` copies each seed's own declared
+        # `traffic_volume_bump` (`lab/scenarios/*.json`'s `seed_variants.
+        # <seed>.traffic_volume_bump`) through onto `definition`; a family
+        # with no `seed_variants` at all, or a seed variant that does not
+        # declare the field, defaults to `0` -- covering both a family that
+        # never distinguishes seeds and today's `development` seed, which
+        # never needed extra volume.
+        extra = int(definition.get("traffic_volume_bump", 0))
         healthy, unhealthy = drive_traffic(int(definition["baseline_requests"]) + extra)
         if healthy == 0 or unhealthy > 0:
             raise LabError(

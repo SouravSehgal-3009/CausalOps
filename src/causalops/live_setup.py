@@ -26,7 +26,11 @@ from causalops.cost_ledger import (
 from causalops.doctor import API_KEY_VARIABLE
 from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_model import LiveClaudeModel, minimum_possible_reservation_usd
+from causalops.live_model import (
+    LiveClaudeModel,
+    maximum_possible_reservation_usd,
+    minimum_possible_reservation_usd,
+)
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
@@ -114,6 +118,15 @@ MINIMUM_POSSIBLE_RESERVATION_USD = minimum_possible_reservation_usd(
 )
 MINIMUM_USABLE_CEILING_USD = (
     RESERVATION_CEILING_BUFFER_USD + MINIMUM_POSSIBLE_RESERVATION_USD
+)
+
+# `causalops.evaluate_cli`'s pre-flight cost check needs an upper bound on
+# what one real model call could ever reserve, the same "call the real code,
+# don't hand-copy the formula" precedent `MINIMUM_POSSIBLE_RESERVATION_USD`
+# above already sets -- see `live_model.maximum_possible_reservation_usd`'s
+# own docstring for what it measures.
+MAXIMUM_POSSIBLE_RESERVATION_USD = maximum_possible_reservation_usd(
+    CLAUDE_SONNET_5_PRICING
 )
 
 

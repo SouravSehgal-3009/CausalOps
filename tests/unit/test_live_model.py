@@ -56,6 +56,7 @@ from causalops.live_model import (
     _domain_tool_definitions,
     _final_assessment_tool_definition,
     _stop_tool_definition,
+    maximum_possible_reservation_usd,
 )
 from causalops.models import ModelRequest, Stage
 from causalops.policy import authorize
@@ -357,6 +358,32 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
     assert estimate_input_tokens(payload) == 13_404
+
+
+def test_maximum_possible_reservation_usd_reuses_the_real_propose_schema() -> None:
+    """Proves `maximum_possible_reservation_usd` genuinely calls
+    `_domain_tool_definitions`/`_stop_tool_definition` -- the same real
+    functions `propose()`'s own tool payload (pinned at 13,404 tokens by
+    `test_the_tool_payload_size_matches_what_pricingpy_assumes` above) is
+    built from -- rather than a hand-typed constant that could silently
+    drift from the real schema."""
+    tools = [_stop_tool_definition(), *_domain_tool_definitions()]
+    tool_definition_tokens = estimate_input_tokens(json.dumps(tools))
+
+    expected = CHEAP_PRICING.reservation_usd(MAX_INPUT_TOKENS + tool_definition_tokens)
+
+    assert maximum_possible_reservation_usd(CHEAP_PRICING) == pytest.approx(expected)
+
+
+def test_maximum_possible_reservation_usd_exceeds_the_minimum() -> None:
+    """A sanity bound: the maximum possible reservation (the larger
+    `propose()` schema, at the full `MAX_INPUT_TOKENS` prose cap) must never
+    be smaller than the minimum (the smaller `respond()` schema, at zero
+    prose) -- a regression that swapped the two schemas or dropped the
+    `MAX_INPUT_TOKENS` term would silently produce a max below the min."""
+    from causalops.live_model import minimum_possible_reservation_usd
+
+    assert maximum_possible_reservation_usd() > minimum_possible_reservation_usd()
 
 
 def test_the_respond_tool_payload_size_matches_what_pricingpy_assumes(

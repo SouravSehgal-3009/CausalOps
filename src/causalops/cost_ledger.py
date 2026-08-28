@@ -381,6 +381,18 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
     )
 
 
+def application_wide_spend_usd(conn: sqlite3.Connection) -> float:
+    """The public name for `_reserved_and_settled_total` below -- every
+    dollar this application has ever spent or committed to spend, across
+    every run. A thin public wrapper, not a second implementation:
+    `causalops.evaluate_cli`'s pre-flight cost check (§5g) needs this exact
+    figure to compare against a batch's own worst-case reserved cost before
+    any scenario starts, and the private function's own logic (the
+    `max(reserved_usd, actual_usd)` accounting `record_reservation_before_
+    request` also relies on) must not be duplicated to expose it."""
+    return _reserved_and_settled_total(conn)
+
+
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
     """Every dollar this application has ever spent or committed to spend,
     across every run -- `LIVE_EVALUATION_MAX_USD` is an application-wide

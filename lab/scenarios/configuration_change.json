@@ -39,10 +39,20 @@
   },
   "seed_variants": {
     "development": {
-      "change_offsets": [-60, -240]
+      "change_offsets": [-60, -240],
+      "traffic_volume_bump": 0
     },
     "evaluation": {
-      "change_offsets": [-90, -300]
+      "change_offsets": [-90, -300],
+      "traffic_volume_bump": 2
+    },
+    "evaluation_b": {
+      "change_offsets": [-100, -310],
+      "traffic_volume_bump": 2
+    },
+    "evaluation_c": {
+      "change_offsets": [-110, -320],
+      "traffic_volume_bump": 2
     }
   }
 }
