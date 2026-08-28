@@ -1563,12 +1563,17 @@ def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
 
 def test_preflight_worst_case_batch_usd_scales_with_model_calls() -> None:
     """The formula itself: runs-per-invocation (fixed, regardless of which
-    curve point is selected) x `budgets.model_calls` x
-    `MAXIMUM_POSSIBLE_RESERVATION_USD`."""
+    curve point is selected) x `budgets.model_calls + budgets.repairs` (the
+    non-repair pool and the separate, additive repair pool both count
+    toward the worst case) x `MAXIMUM_POSSIBLE_RESERVATION_USD`."""
     runs = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2
     for executed_tools in EVIDENCE_BUDGET_CURVE:
         budgets = resolve_budgets(executed_tools)
-        expected = runs * budgets.model_calls * MAXIMUM_POSSIBLE_RESERVATION_USD
+        expected = (
+            runs
+            * (budgets.model_calls + budgets.repairs)
+            * MAXIMUM_POSSIBLE_RESERVATION_USD
+        )
         assert _preflight_worst_case_batch_usd(budgets) == pytest.approx(expected)
 
 

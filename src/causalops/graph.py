@@ -312,8 +312,24 @@ def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
     ).slots_left()
 
 
-def _model_calls_left(model_calls_used: int, budgets: Budgets) -> int:
-    return budgets.model_calls - model_calls_used
+def _model_calls_left(
+    *, model_calls_used: int, repairs_used: int, budgets: Budgets
+) -> int:
+    """How many non-repair calls remain against `budgets.model_calls`.
+
+    `model_calls_used`/`repairs_used` are keyword-only, the same standard
+    `_render_stage_request`'s own docstring states for its `run_id`/
+    `graph_phase`/`model_turn`: two adjacent bare `int`s with no keyword
+    enforcement is exactly the shape a transposed call could type-check
+    cleanly and go unnoticed.
+
+    `repairs_used` is subtracted out of `model_calls_used` because a repair
+    attempt is funded from the separate `budgets.repairs` pool, not this one
+    -- see `_StageCounters.may_repair`. A policy denial (which still counts
+    as an ordinary, non-repair call) must not be able to starve the repair a
+    later, unrelated invalid response may still need.
+    """
+    return budgets.model_calls - (model_calls_used - repairs_used)
 
 
 def _denied_check_notes(
@@ -593,10 +609,7 @@ class _StageCounters:
         self.usage = _accumulate_usage(self.usage, latest)
 
     def may_repair(self, budgets: Budgets) -> bool:
-        return (
-            self.repairs_used < budgets.repairs
-            and _model_calls_left(self.model_calls_used, budgets) > 0
-        )
+        return self.repairs_used < budgets.repairs
 
 
 def _render_stage_request(
@@ -605,11 +618,12 @@ def _render_stage_request(
     store: EvidenceStore,
     receipts: Sequence[ToolReceipt],
     budgets: Budgets,
-    model_calls_used: int,
     stage: Stage,
     repair_errors: str | None,
     passages: Sequence[RunbookPassage] = (),
     *,
+    model_calls_used: int,
+    repairs_used: int,
     run_id: str,
     graph_phase: str,
     model_turn: int,
@@ -628,6 +642,11 @@ def _render_stage_request(
     formula itself (system text + context text + repair errors) is
     unchanged, so replay's requests and every existing digest-based
     assertion are unaffected.
+
+    `model_calls_used`/`repairs_used` are keyword-only for the same reason
+    as the trio above and the same reason `_model_calls_left` itself is:
+    two adjacent bare `int`s with no keyword enforcement is exactly the
+    shape a transposed call could type-check cleanly and go unnoticed.
     """
     evidence, markers = store.context_evidence(
         derive_context_quotas(budgets.executed_tools)
@@ -637,7 +656,11 @@ def _render_stage_request(
         scope,
         evidence,
         markers,
-        _model_calls_left(model_calls_used, budgets),
+        _model_calls_left(
+            model_calls_used=model_calls_used,
+            repairs_used=repairs_used,
+            budgets=budgets,
+        ),
         _tools_left(receipts, budgets),
         passages,
         _denied_check_notes(receipts, budgets),
@@ -688,7 +711,14 @@ def _ask_with_repair[T](
         counters.stop_reason = ReasonCode.WALL_CLOCK_EXPIRED
         on_stop(counters.stop_reason)
         return None
-    if _model_calls_left(counters.model_calls_used, budgets) <= 0:
+    if (
+        _model_calls_left(
+            model_calls_used=counters.model_calls_used,
+            repairs_used=counters.repairs_used,
+            budgets=budgets,
+        )
+        <= 0
+    ):
         counters.stop_reason = ReasonCode.MODEL_CALL_BUDGET_EXHAUSTED
         on_stop(counters.stop_reason)
         return None
@@ -751,10 +781,11 @@ def _make_investigate(
                 store,
                 receipts,
                 budgets,
-                counters.model_calls_used,
                 stage,
                 repair_errors,
                 passages,
+                model_calls_used=counters.model_calls_used,
+                repairs_used=counters.repairs_used,
                 run_id=state["run_id"],
                 graph_phase=GraphPhase.INVESTIGATE.value,
                 model_turn=turn_index,
@@ -1154,10 +1185,11 @@ def _make_final_assessment(
                 store,
                 receipts,
                 budgets,
-                counters.model_calls_used,
                 Stage.FINAL_ASSESSMENT,
                 repair_errors,
                 passages,
+                model_calls_used=counters.model_calls_used,
+                repairs_used=counters.repairs_used,
                 run_id=state["run_id"],
                 graph_phase=GraphPhase.FINAL_ASSESSMENT.value,
                 model_turn=state["model_turn"],
@@ -1512,18 +1544,23 @@ def _make_route_after_normalize(
         #
         # `_tools_left(...) > 0` (at most two *executed* checks -- a denial
         # never spends a slot) and `_model_calls_left(...) >= 2` (at most
-        # four model calls total, with one always reserved for
+        # four *non-repair* model calls total, with one always reserved for
         # `final_assessment`: one more for the next `INVESTIGATE` turn, one
         # for the assessment that must follow it) are both unchanged and
-        # still do all the real bounding -- `>= 2`, not `> 0`, is load-
-        # bearing: a repaired turn consumes two of the four calls
-        # (`_StageCounters.record_call` increments on every attempt,
-        # `_ask_with_repair` calls `ask_once` a second time on a repair), so
-        # weakening it to `> 0` would let a run spend its last call on a
-        # proposal and reach `final_assessment` with nothing left,
-        # `MODEL_CALL_BUDGET_EXHAUSTED` instead of a real disposition.
+        # still do all the real bounding. `_model_calls_left` now excludes
+        # `state["repairs_used"]` from the count it charges against
+        # `budgets.model_calls` (a repair is funded from the separate
+        # `budgets.repairs` pool -- see `_StageCounters.may_repair`), so an
+        # invalid response that gets repaired can no longer eat into the
+        # reserve this `>= 2` threshold protects -- a repair, wherever it
+        # happens, is now funded from `budgets.repairs`, not counted twice
+        # against this pool. A policy denial's own call is still charged the
+        # same as any ordinary turn, unchanged by this fix. The threshold
+        # itself still guarantees a call remains for the next `INVESTIGATE`
+        # turn AND for the `final_assessment` that must follow it, exactly
+        # as before.
         #
-        # `state["model_turn"] < budgets.model_calls` is a new hard backstop,
+        # `state["model_turn"] < budgets.model_calls` is a hard backstop,
         # not a rewritten rule: with the `< 2` term gone, nothing else in
         # this condition bounds `model_turn` by construction (every
         # `INVESTIGATE` turn past 0 maps to the same `HYPOTHESIS_UPDATE`
@@ -1533,7 +1570,12 @@ def _make_route_after_normalize(
         # stay true for more turns than `model_calls` alone would allow.
         if (
             _tools_left(receipts, budgets) > 0
-            and _model_calls_left(state["model_calls_used"], budgets) >= 2
+            and _model_calls_left(
+                model_calls_used=state["model_calls_used"],
+                repairs_used=state["repairs_used"],
+                budgets=budgets,
+            )
+            >= 2
             and not _expired(state["started_at"], budgets, clock)
             and state["model_turn"] < budgets.model_calls
         ):

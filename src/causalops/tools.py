@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "6"
+TOOL_REGISTRY_VERSION = "7"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -138,7 +138,14 @@ class QueryLogsArguments(BaseModel):
     )
     # The schema allows a wider range than the budget so that an oversized request
     # is a policy decision with a reason code, not a silent schema rejection.
-    row_limit: int = Field(ge=1, le=200)
+    row_limit: int = Field(
+        ge=1,
+        le=200,
+        description=(
+            "How many matching log rows to return. Policy allows at most 40; a "
+            "larger request is denied and costs a turn without returning any rows."
+        ),
+    )
 
 
 class ListRecentChangesArguments(BaseModel):
@@ -194,7 +201,15 @@ class SearchRunbooksArguments(BaseModel):
     # a headroom multiple of the current default (4x, versus row_limit's
     # 5x), not a value derived from the corpus's own size (ten passages
     # today) -- the corpus can grow without this bound needing to change.
-    limit: int = Field(ge=1, le=20)
+    limit: int = Field(
+        ge=1,
+        le=20,
+        description=(
+            "How many runbook passages to return. Policy allows at most 5; a "
+            "larger request is denied and costs a turn without returning any "
+            "passages."
+        ),
+    )
 
 
 # This union is the tool registry. A second lookup table would be a competing

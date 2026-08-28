@@ -168,6 +168,73 @@ def test_a_stage_stop_reason_cannot_be_empty(
         stage(hypotheses=hypotheses(), stop_reason="")
 
 
+@pytest.mark.parametrize("stage", [InitialPlan, HypothesisUpdate])
+def test_a_stage_stop_reason_accepts_600_characters_and_rejects_601(
+    stage: type[InitialPlan] | type[HypothesisUpdate],
+) -> None:
+    """Raised from 300 to 600 alongside `FinalAssessment.uncertainty` and
+    `StopRecord.stop_reason` (`live_model.py`) -- a real evidence-heavy
+    live run exhausted the old 300-char bound on this same field shape with
+    no repair budget left to fix it."""
+    stage(hypotheses=hypotheses(), stop_reason="x" * 600)
+
+    with pytest.raises(ValidationError):
+        stage(hypotheses=hypotheses(), stop_reason="x" * 601)
+
+
+def test_final_assessment_uncertainty_accepts_600_characters_and_rejects_601() -> None:
+    """`FinalAssessment.uncertainty` was raised from 300 to 600 characters --
+    see the field's own comment in `domain.py` for the real live run this
+    fixes."""
+    FinalAssessment(
+        disposition=ModelDisposition.DIAGNOSED,
+        root_cause=RootCauseCode.CONFIG_CHANGE,
+        supporting_evidence_ids=(SYMPTOM_EVIDENCE_ID,),
+        uncertainty="x" * 600,
+        next_step="confirm the change with the owner",
+    )
+
+    with pytest.raises(ValidationError):
+        FinalAssessment(
+            disposition=ModelDisposition.DIAGNOSED,
+            root_cause=RootCauseCode.CONFIG_CHANGE,
+            supporting_evidence_ids=(SYMPTOM_EVIDENCE_ID,),
+            uncertainty="x" * 601,
+            next_step="confirm the change with the owner",
+        )
+
+
+def test_final_assessment_uncertainty_accepts_a_length_that_used_to_fail() -> None:
+    """The real observed failure shape, not just the boundary: a measured
+    accuracy-vs-evidence-budget curve saw `uncertainty`'s median length
+    climb with the amount of evidence gathered (210->230->240 chars across
+    `executed_tools`=2/3/4) and hit the old 300-char bound outright at the
+    top of that range. A representative 350-char value -- comfortably past
+    the old bound, comfortably under the new one -- must validate now where
+    it would have been refused before."""
+    FinalAssessment(
+        disposition=ModelDisposition.DIAGNOSED,
+        root_cause=RootCauseCode.CONFIG_CHANGE,
+        supporting_evidence_ids=(SYMPTOM_EVIDENCE_ID,),
+        uncertainty="x" * 350,
+        next_step="confirm the change with the owner",
+    )
+
+
+def test_budgets_repairs_is_bounded_between_zero_and_two() -> None:
+    """`may_repair` (`graph.py`) now checks `repairs_used < budgets.repairs`
+    with no other gate, so this field alone bounds how many structured-
+    output repairs one run may attempt -- it needs its own validation
+    rather than trusting every caller to pass a sane value."""
+    Budgets(repairs=0)
+    Budgets(repairs=2)
+
+    with pytest.raises(ValidationError):
+        Budgets(repairs=-1)
+    with pytest.raises(ValidationError):
+        Budgets(repairs=3)
+
+
 def test_a_plan_keeps_two_or_three_hypotheses() -> None:
     with pytest.raises(ValidationError):
         InitialPlan(hypotheses=hypotheses()[:1], stop_reason="only one cause")

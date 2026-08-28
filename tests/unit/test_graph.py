@@ -581,18 +581,25 @@ def test_a_turn_0_denial_s_guidance_still_appears_in_a_later_turn(
         assert denial_line in request.context_text
 
 
-def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
+def test_a_denial_heavy_investigation_still_gets_its_repair(
     tmp_path: Path,
 ) -> None:
-    """Builds on the fixture above: two denials plus one allowed check
-    consume 3 of the default 4 model calls before `FINAL_ASSESSMENT` is
-    even asked, leaving that stage exactly one call and zero repair
-    headroom (`_StageCounters.may_repair` requires
-    `_model_calls_left(...) > 0` AFTER the attempt that already failed is
-    counted, which it is not once the fourth call itself has run). A
-    malformed `FINAL_ASSESSMENT` response must still terminate cleanly
-    through the existing `REPAIR_EXHAUSTED` path, not crash and not attempt
-    a fifth (repair) call it has no budget left to make."""
+    """Two denials plus one allowed check consume 3 of the default 4
+    *non-repair* model calls before `FINAL_ASSESSMENT` is even asked
+    (`_model_calls_left` reports exactly 1 of those 4 remaining once the
+    third `INVESTIGATE` call is spent), so `FINAL_ASSESSMENT`'s own first
+    attempt is the fourth and last of that pool. This is the real incident
+    this test reproduces at the orchestrator level: a run that had spent
+    its regular calls entirely on denials and one check used to lose its
+    repair too, because `_StageCounters.may_repair` also required
+    `_model_calls_left(...) > 0` AFTER that fourth call was counted, which
+    a denial-heavy run always fails -- `REPAIR_EXHAUSTED` with no repair
+    attempt ever made. Repairs now draw from their own separate,
+    additive `budgets.repairs` pool (`may_repair` checks only
+    `repairs_used < budgets.repairs`, nothing about calls remaining in the
+    other pool), so a malformed `FINAL_ASSESSMENT` response here is
+    genuinely repaired -- a fifth call, funded from that pool -- instead of
+    failing safe with the repair budget still untouched."""
     scope = incident_scope()
     before_scope = ToolProposal(
         arguments=ListRecentChangesArguments(
@@ -620,7 +627,7 @@ def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
             plan_json(proposal=after_scope),
             plan_json(proposal=changes_proposal()),
         ],
-        "final_assessment": [malformed_assessment],
+        "final_assessment": [malformed_assessment, assessment_json()],
     }
     model = ReplayToolCallingModel(replay_model(tmp_path, script))
     registry = registry_with(run_changes=RecordingChangesBackend())
@@ -632,9 +639,92 @@ def test_a_denial_heavy_investigation_reports_repair_exhausted_not_a_crash(
         "hypothesis_update",
         "hypothesis_update",
         "final_assessment",
+        "final_assessment",
     ]
-    assert result.report.reason_code is ReasonCode.REPAIR_EXHAUSTED
-    assert result.report.model_calls_used == 4
+    assert result.report.disposition is Disposition.DIAGNOSED
+    assert result.report.reason_code is None
+    assert result.report.repairs_used == 1
+    assert result.report.invalid_responses == 1
+    assert result.report.model_calls_used == 5
+
+
+def test_repairs_never_starve_on_a_small_budget_with_a_denial_and_two_checks(
+    tmp_path: Path,
+) -> None:
+    """The centerpiece regression for the repair-budget fix, at a
+    genuinely tight `Budgets(executed_tools=2, model_calls=4, repairs=1)`:
+    one denied proposal (`row_limit` over `Budgets().log_rows` -- the exact
+    Fix 1 shape) plus a full two-check budget spend the run's entire
+    non-repair pool before `FINAL_ASSESSMENT` is even asked, the fourth and
+    last non-repair call. Before this fix, a malformed `FINAL_ASSESSMENT`
+    response here would have ended `REPAIR_EXHAUSTED` with `repairs_used`
+    still 0 -- `may_repair` also required a remaining non-repair call this
+    run, by construction, never has. It is now genuinely repaired: five
+    calls total, the fifth funded from the separate `budgets.repairs`
+    pool."""
+    over_limit_logs = logs_proposal(row_limit=45)
+    executed_logs = logs_proposal(row_limit=20)
+    executed_orders = another_logs_proposal()
+    malformed_assessment = assessment_json()
+    del malformed_assessment["disposition"]
+    script = {
+        "initial_plan": [plan_json(proposal=over_limit_logs)],
+        "hypothesis_update": [
+            plan_json(proposal=executed_logs),
+            plan_json(proposal=executed_orders),
+        ],
+        "final_assessment": [malformed_assessment, assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    budgets = Budgets(executed_tools=2, model_calls=4, repairs=1)
+
+    result, _ = investigate_via_graph(model, budgets=budgets)
+
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.reason_code is None
+    assert report.tools_executed == 2
+    assert report.repairs_used == 1
+    assert report.invalid_responses == 1
+    assert report.model_calls_used == 5
+
+
+@pytest.mark.parametrize("repairs", [0, 1])
+def test_a_denial_heavy_run_never_exceeds_model_calls_plus_repairs(
+    tmp_path: Path, repairs: int
+) -> None:
+    """The hard ceiling `budgets.repairs`'s own separate pool creates: no
+    matter how many policy denials an investigation racks up, or whether a
+    repair is attempted and also fails, `model_calls_used` (every real
+    provider call this run ever makes) cannot exceed `budgets.model_calls +
+    budgets.repairs`. Every `INVESTIGATE` turn below is denied (a distinct
+    over-`row_limit` proposal each time, so none is refused as a mere
+    duplicate) until the router itself stops the loop, and both
+    `FINAL_ASSESSMENT` attempts are malformed, so this run spends every
+    call either pool could possibly fund -- the bound is exact, not just an
+    upper limit that happens not to be hit."""
+    over_limit_proposals = [logs_proposal(row_limit=41 + i) for i in range(3)]
+    malformed_assessment = assessment_json()
+    del malformed_assessment["disposition"]
+    script = {
+        "initial_plan": [plan_json(proposal=over_limit_proposals[0])],
+        "hypothesis_update": [
+            plan_json(proposal=proposal) for proposal in over_limit_proposals[1:]
+        ],
+        "final_assessment": [malformed_assessment, malformed_assessment],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    budgets = Budgets(executed_tools=2, model_calls=4, repairs=repairs)
+
+    result, _ = investigate_via_graph(model, budgets=budgets)
+
+    assert result.report.disposition is Disposition.FAILED_SAFE
+    assert result.report.reason_code in (
+        ReasonCode.REPAIR_EXHAUSTED,
+        ReasonCode.MODEL_OUTPUT_INVALID,
+    )
+    assert result.report.tools_executed == 0
+    assert result.report.model_calls_used == 4 + repairs
 
 
 def test_a_denied_proposal_still_gets_a_proposal_recorded_event(tmp_path: Path) -> None:
@@ -2724,25 +2814,78 @@ def test_model_calls_left_reflects_the_configured_model_calls_budget(
     run could ever reach -- is bounded on one side by
     `_tools_left` (proven above) and on the other by how many model calls
     remain once one turn's worth is spent, which is exactly what
-    `_model_calls_left` reports."""
+    `_model_calls_left` reports. `repairs_used=0` throughout: with no
+    repair attempted yet, `_model_calls_left` behaves exactly as it did
+    before repairs got their own separate pool -- the exclusion this
+    function now applies only shows up once `repairs_used > 0`, covered by
+    the dedicated test below."""
     budgets = Budgets(executed_tools=executed_tools, model_calls=model_calls)
 
-    assert graph_module._model_calls_left(0, budgets) == model_calls
-    assert graph_module._model_calls_left(model_calls, budgets) == 0
-    assert graph_module._model_calls_left(model_calls - 1, budgets) == 1
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=0, repairs_used=0, budgets=budgets
+        )
+        == model_calls
+    )
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=model_calls, repairs_used=0, budgets=budgets
+        )
+        == 0
+    )
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=model_calls - 1, repairs_used=0, budgets=budgets
+        )
+        == 1
+    )
 
 
-def test_repair_headroom_is_present_when_model_calls_is_executed_tools_plus_two() -> (
-    None
-):
-    """The coupling this whole curve depends on: at `model_calls = executed_
-    tools + 2`, a repair is still possible on the LAST reachable turn --
-    `may_repair` requires both an unused repair slot and at least one
-    remaining model call after the attempt that already failed."""
+def test_model_calls_left_excludes_repairs_from_the_non_repair_pool() -> None:
+    """The behavior this whole fix adds: a repair attempt is funded from
+    `budgets.repairs`, not `budgets.model_calls`, so `_model_calls_left`
+    must not charge it against the non-repair pool. With `model_calls_used`
+    fixed at the budget's own ceiling, reporting more remaining calls as
+    `repairs_used` climbs is exactly what proves the exclusion is real, not
+    just that the formula happens not to go negative."""
+    budgets = Budgets(model_calls=4, repairs=2)
+
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=4, repairs_used=0, budgets=budgets
+        )
+        == 0
+    )
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=4, repairs_used=1, budgets=budgets
+        )
+        == 1
+    )
+    assert (
+        graph_module._model_calls_left(
+            model_calls_used=4, repairs_used=2, budgets=budgets
+        )
+        == 2
+    )
+
+
+def test_repair_headroom_no_longer_needs_a_spare_non_repair_call() -> None:
+    """Before this fix, `may_repair` required both an unused repair slot
+    AND at least one remaining call in `budgets.model_calls` itself --
+    the `+ 2` headroom `Budgets(model_calls=executed_tools + 2)` existed
+    specifically to keep one such call in reserve for a repair. That
+    coupling is gone: a repair is still possible even at the TIGHTEST
+    possible budget, `model_calls == executed_tools` (zero non-repair
+    calls left once the run has spent its `executed_tools`+1 investigate
+    calls), because it is funded from the separate `budgets.repairs` pool
+    instead."""
     for executed_tools in (2, 3, 4):
-        budgets = Budgets(executed_tools=executed_tools, model_calls=executed_tools + 2)
+        budgets = Budgets(
+            executed_tools=executed_tools, model_calls=executed_tools, repairs=1
+        )
         counters = graph_module._StageCounters(
-            model_calls_used=executed_tools + 1,
+            model_calls_used=budgets.model_calls,
             repairs_used=0,
             invalid_responses=0,
             usage=None,
@@ -2752,19 +2895,28 @@ def test_repair_headroom_is_present_when_model_calls_is_executed_tools_plus_two(
         assert counters.may_repair(budgets) is True
 
 
-def test_repair_headroom_is_absent_when_model_calls_equals_executed_tools() -> None:
-    """The trap this design avoids: without the `+ 2` headroom, a run that
-    spends its budget on checks has no model call left to repair a failed
-    FINAL_ASSESSMENT attempt -- `may_repair` correctly reports `False`, not
-    a silent truncation the caller has to notice on its own."""
-    for executed_tools in (2, 3, 4):
-        budgets = Budgets(executed_tools=executed_tools, model_calls=executed_tools)
-        counters = graph_module._StageCounters(
-            model_calls_used=executed_tools,
-            repairs_used=0,
-            invalid_responses=0,
-            usage=None,
-            context_digest="",
-        )
+def test_repair_headroom_is_governed_by_budgets_repairs_alone() -> None:
+    """`may_repair` no longer reads `model_calls_used`/`budgets.model_calls`
+    at all -- `Budgets.repairs` alone decides. `repairs=0` refuses even
+    with a fresh, unused non-repair pool (`model_calls_used=0`); `repairs=1`
+    still allows one repair even with that pool already fully spent
+    (`model_calls_used == budgets.model_calls`)."""
+    budgets_with_no_repairs = Budgets(model_calls=4, repairs=0)
+    fresh_pool = graph_module._StageCounters(
+        model_calls_used=0,
+        repairs_used=0,
+        invalid_responses=0,
+        usage=None,
+        context_digest="",
+    )
+    assert fresh_pool.may_repair(budgets_with_no_repairs) is False
 
-        assert counters.may_repair(budgets) is False
+    budgets_with_one_repair = Budgets(model_calls=4, repairs=1)
+    exhausted_pool = graph_module._StageCounters(
+        model_calls_used=budgets_with_one_repair.model_calls,
+        repairs_used=0,
+        invalid_responses=0,
+        usage=None,
+        context_digest="",
+    )
+    assert exhausted_pool.may_repair(budgets_with_one_repair) is True

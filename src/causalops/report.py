@@ -132,7 +132,13 @@ def budget_section(report: InvestigationReport) -> list[str]:
     return [
         "## What it spent",
         "",
-        f"- Model calls: {report.model_calls_used} of {report.budgets.model_calls}",
+        # `model_calls_used` counts every attempt, including repairs, which
+        # are now funded from the separate `budgets.repairs` pool -- the
+        # true ceiling a run can reach is the two pools added together, not
+        # `budgets.model_calls` alone (that would misreport, e.g., "7 of 6"
+        # after a repair).
+        f"- Model calls: {report.model_calls_used} of "
+        f"{report.budgets.model_calls + report.budgets.repairs}",
         f"- Repairs: {report.repairs_used} of {report.budgets.repairs}",
         f"- Checks executed: {report.tools_executed} of "
         f"{report.budgets.executed_tools}",

@@ -144,7 +144,7 @@ def test_every_check_appears_including_the_denied_ones() -> None:
 def test_the_budget_section_reports_what_was_spent() -> None:
     text = render_report(diagnosed_report(("evidence-1",)), [], [], "replay")
 
-    assert "- Model calls: 3 of 4" in text
+    assert "- Model calls: 3 of 5" in text
     assert "- Checks executed: 2 of 2" in text
     assert "- Token usage: not reported by this model" in text
     assert "- Runbook retrieval mode: `disabled`" in text

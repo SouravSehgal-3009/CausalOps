@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from fake_incident import alert_packet, incident_scope
+from fake_incident import alert_packet, hypotheses, incident_scope
 from langchain_core.messages import AIMessage
 from langchain_core.messages.tool import ToolCall, invalid_tool_call
 from pydantic import ValidationError
@@ -52,6 +52,7 @@ from causalops.live_model import (
     LiveClaudeModel,
     MissingCredential,
     MissingProviderUsage,
+    StopRecord,
     _build_chat_anthropic,
     _domain_tool_definitions,
     _final_assessment_tool_definition,
@@ -241,12 +242,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """Before this fix, `_send` reserved
-    against prose alone, never the current ~13,404-token tool schema `bind_tools`
+    against prose alone, never the current ~13,714-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~13,404" restates
+    the pinned, directly-measured figure this comment's "~13,714" restates
     in prose."""
     model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
@@ -290,8 +291,21 @@ def test_the_stop_tool_definition_requires_a_non_null_stop_reason(
     assert "default" not in stop_reason_property
     assert stop_reason_property["type"] == "string"
     assert stop_reason_property["minLength"] == 1
-    assert stop_reason_property["maxLength"] == 300
+    assert stop_reason_property["maxLength"] == 600
     assert "stop_reason" in plan_tool["input_schema"]["required"]
+
+
+def test_stop_record_stop_reason_accepts_600_characters_and_rejects_601() -> None:
+    """`StopRecord.stop_reason`'s bound was raised from 300 to 600 -- a real
+    live run once exhausted the old 300-char bound on this exact field with
+    no repair budget left to fix it (see `graph.py`'s repair-budget fix).
+    Anthropic does not enforce `maxLength` server-side, so this bound is
+    the one thing standing between a live model and an unbounded reply --
+    it must actually reject past it, not just describe it in prose."""
+    StopRecord(hypotheses=hypotheses(), stop_reason="x" * 600)
+
+    with pytest.raises(ValidationError):
+        StopRecord(hypotheses=hypotheses(), stop_reason="x" * 601)
 
 
 def test_the_final_assessment_tool_definition_drops_schema_version_and_description(
@@ -352,18 +366,26 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
     # once, in only its own tool's schema (query_metric, query_logs), not
     # duplicated across all five domain tools the way `HypothesesRecord` is.
     # A third growth (12,839 -> 13,404) is a real drift this pin exists to
-    # catch each time, not one to explain away.
-    assert len(payload) == 13_404
+    # catch each time, not one to explain away. A fourth growth (13,404 ->
+    # 13,714) came from naming the real budget behind three previously-
+    # undescribed schema bounds in prose: `QueryLogsArguments.row_limit` and
+    # `SearchRunbooksArguments.limit` each gained a `Field(description=...)`
+    # (each appears once, in only its own tool's schema, not duplicated
+    # across all five domain tools), and `StopRecord.stop_reason`'s bound
+    # and description both moved from 300 to 600 characters -- a real
+    # evidence-heavy live run once exhausted that field's old bound with no
+    # repair budget left to fix it.
+    assert len(payload) == 13_714
     # `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 13_404
+    assert estimate_input_tokens(payload) == 13_714
 
 
 def test_maximum_possible_reservation_usd_reuses_the_real_propose_schema() -> None:
     """Proves `maximum_possible_reservation_usd` genuinely calls
     `_domain_tool_definitions`/`_stop_tool_definition` -- the same real
-    functions `propose()`'s own tool payload (pinned at 13,404 tokens by
+    functions `propose()`'s own tool payload (pinned at 13,714 tokens by
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` above) is
     built from -- rather than a hand-typed constant that could silently
     drift from the real schema."""

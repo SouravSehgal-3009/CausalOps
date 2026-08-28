@@ -107,10 +107,14 @@ EVALUATION_SEEDS: tuple[str, ...] = ("evaluation", "evaluation_b", "evaluation_c
 # The evidence-budget curve this evaluation script sweeps, one point per
 # `causalops-evaluate --executed-tools N` invocation. `model_calls =
 # executed_tools + 2` at every point: one call per reachable check, plus one
-# always held back for the FINAL_ASSESSMENT turn, plus one more so a single
-# repair is still possible on the last reachable turn -- see `graph.py`'s
-# `test_repair_headroom_is_present_when_model_calls_is_executed_tools_plus_
-# two` for the reachable-checks arithmetic this coupling depends on.
+# always held back for the FINAL_ASSESSMENT turn, plus one more so a policy
+# denial mid-investigation does not starve that reserved FINAL_ASSESSMENT
+# call -- see `graph.py`'s `_make_route_after_normalize` for the
+# `_model_calls_left(...) >= 2` gate this headroom feeds. A structured-
+# output repair does not need headroom here at all: it is funded from the
+# separate `Budgets.repairs` pool, not `budgets.model_calls` -- see
+# `graph.py`'s `_StageCounters.may_repair` and `test_graph.py`'s
+# `test_repair_headroom_is_governed_by_budgets_repairs_alone`.
 # `Budgets()`'s own class-level defaults (2, 4) are the first point on this
 # curve and are themselves unchanged -- this curve is applied by
 # constructing a `Budgets` instance per invocation, never by editing those
@@ -400,15 +404,22 @@ def _preflight_worst_case_batch_usd(budgets: Budgets) -> float:
     invocation, regardless of which curve point `--executed-tools` selects
     (the baseline arm always runs alongside the tool-enabled arm; see
     `run_evaluation`'s own docstring for why baseline is not skipped on a
-    later phase) -- times `budgets.model_calls`, the most model calls any
-    one of those runs could make, times `MAXIMUM_POSSIBLE_RESERVATION_USD`,
-    the most any one of those calls could ever reserve. A real batch will
-    cost far less than this in practice (most calls never hit the input
-    cap, most turns never need a repair), but a pre-flight check exists to
-    catch a genuinely insufficient ceiling before any scenario runs, not to
-    estimate the likely real cost precisely."""
+    later phase) -- times `budgets.model_calls + budgets.repairs`, the most
+    calls any one of those runs could ever make (repairs are funded from
+    their own separate, additive pool now -- see `graph.py`'s
+    `_model_calls_left` -- not drawn from `budgets.model_calls` itself), times
+    `MAXIMUM_POSSIBLE_RESERVATION_USD`, the most any one of those calls could
+    ever reserve. A real batch will cost far less than this in practice
+    (most calls never hit the input cap, and most turns need no repair at
+    all), but a pre-flight check exists to catch a genuinely insufficient
+    ceiling before any scenario runs, not to estimate the likely real cost
+    precisely."""
     runs = len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2
-    return runs * budgets.model_calls * MAXIMUM_POSSIBLE_RESERVATION_USD
+    return (
+        runs
+        * (budgets.model_calls + budgets.repairs)
+        * MAXIMUM_POSSIBLE_RESERVATION_USD
+    )
 
 
 def _check_preflight_cost(
@@ -441,7 +452,7 @@ def _check_preflight_cost(
             f"of ${worst_case:.4f} for this --executed-tools "
             f"{budgets.executed_tools} batch "
             f"({len(EVALUATION_FAMILIES) * len(EVALUATION_SEEDS) * 2} runs x "
-            f"{budgets.model_calls} model calls x "
+            f"{budgets.model_calls + budgets.repairs} model calls x "
             f"${MAXIMUM_POSSIBLE_RESERVATION_USD:.6f} per call), plus the "
             f"${RESERVATION_CEILING_BUFFER_USD:.2f} reservation buffer. "
             "Raise LIVE_EVALUATION_MAX_USD, or wait for headroom to free up, "

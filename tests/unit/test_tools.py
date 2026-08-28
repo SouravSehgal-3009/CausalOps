@@ -4,6 +4,7 @@ import pytest
 from fake_incident import WINDOW_END, WINDOW_START, logs_proposal, metric_proposal
 from pydantic import TypeAdapter, ValidationError
 
+from causalops.domain import Budgets
 from causalops.tools import (
     GetTopologyArguments,
     ListRecentChangesArguments,
@@ -75,6 +76,34 @@ def test_a_row_limit_outside_the_schema_range_is_rejected() -> None:
         logs_proposal(row_limit=0)
     with pytest.raises(ValidationError):
         logs_proposal(row_limit=500)
+
+
+def test_row_limit_description_names_the_real_policy_budget() -> None:
+    """The schema (`le=200`) is a hard shape bound; `Budgets.log_rows` (40)
+    is the number policy actually enforces -- the model has no way to see
+    the gap between them unless the description says so. 21 of 21 policy
+    denials across a real 3-batch accuracy-vs-evidence-budget curve were
+    exactly this: a `row_limit` the model guessed (its own default, 50)
+    landing above the real budget, costing a turn with no rows returned.
+    Derived from the real `Budgets` default, not hand-typed, so this test
+    fails the moment the description and the enforced budget disagree
+    again, rather than only when someone remembers to update both."""
+    description = QueryLogsArguments.model_json_schema()["properties"]["row_limit"][
+        "description"
+    ]
+
+    assert str(Budgets().log_rows) in description
+
+
+def test_search_runbooks_limit_description_names_the_real_policy_budget() -> None:
+    """The same undescribed-limit trap as `row_limit` above, on the
+    sibling `search_runbooks` tool -- dormant only because retrieval was
+    disabled on every real run to date, not because the gap isn't real."""
+    description = SearchRunbooksArguments.model_json_schema()["properties"]["limit"][
+        "description"
+    ]
+
+    assert str(Budgets().runbook_passages) in description
 
 
 def test_the_same_request_always_has_the_same_fingerprint() -> None:

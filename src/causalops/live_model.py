@@ -118,9 +118,9 @@ class StopRecord(HypothesesRecord):
     # check calls.
     stop_reason: str = Field(
         min_length=1,
-        max_length=300,
+        max_length=600,
         description=(
-            "Why you are stopping instead of proposing a check, in 300 "
+            "Why you are stopping instead of proposing a check, in 600 "
             "characters or fewer. This must be a non-empty reason."
         ),
     )
@@ -209,7 +209,7 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     The provider tool name selects the internal argument variant, so the
     duplicate internal `tool` discriminator is deliberately not exposed.
 
-    This is the mechanical reason the emitted schema payload is 13,404
+    This is the mechanical reason the emitted schema payload is 13,714
     tokens (`_send`'s own comment pins the exact figure): Anthropic tool
     schemas are self-contained, with no cross-tool `$ref`, so each of the
     five loop iterations below embeds its own full copy of
@@ -538,14 +538,17 @@ class LiveClaudeModel:
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
         # binds `_stop_tool_definition()` plus the five `_domain_tool_
-        # definitions()`, 13,404 tokens in the current emitted schema
+        # definitions()`, 13,714 tokens in the current emitted schema
         # (a `MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_
         # CAPACITY` rename -- from `RESOURCE_POOL_UTILIZATION`, a name that
         # falsely implied boundedness -- added 10 bytes to `query_metric`'s
         # embedded schema over the prior 12,829; a later change then added a
         # `Field(description=...)` to `QueryMetricArguments.service` and
         # `QueryLogsArguments.service`, growing the figure again, 12,839 ->
-        # 13,404, the third growth of this figure to date);
+        # 13,404; a fourth growth, 13,404 -> 13,714, came from naming the
+        # real budget behind `QueryLogsArguments.row_limit` and
+        # `SearchRunbooksArguments.limit` in prose, and raising
+        # `StopRecord.stop_reason`'s bound from 300 to 600 characters);
         # `respond()` binds only `_final_assessment_tool_definition()`,
         # 2,292 tokens in the current emitted schema.
         # `test_live_model.py` pins both figures separately, so this

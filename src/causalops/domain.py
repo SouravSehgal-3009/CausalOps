@@ -279,7 +279,22 @@ class Budgets(BaseModel):
     # separate one -- this only bounds how many passages one call may ask
     # for.
     runbook_passages: int = 5
-    repairs: int = 1
+    # `may_repair` (`graph.py`) checks `repairs_used < repairs` with no other
+    # gate, so this field alone now bounds how many structured-output
+    # repairs one run may attempt -- it needs its own validation rather than
+    # trusting every caller to pass a sane value. `le=2`, not unbounded:
+    # `repairs_used` is cumulative across the whole run in `GraphState`, not
+    # reset per stage, so `repairs=2` covers the two kinds of stage a repair
+    # could ever be spent on -- an `INVESTIGATE` turn's invalid response, and
+    # the separate `FINAL_ASSESSMENT` turn that must eventually follow it --
+    # each getting its own repair rather than the first one to fail claiming
+    # the whole budget. (A run with several `INVESTIGATE` turns could in
+    # principle want more than one INVESTIGATE-side repair; `le=2` is this
+    # design's intended per-run allocation, not a proof that a third repair
+    # could never help.) Nothing in production constructs `repairs=2` today
+    # (the default stays 1); the bound exists so a future caller cannot pass
+    # a value this design has no stated meaning for.
+    repairs: int = Field(default=1, ge=0, le=2)
     log_rows: int = 40
 
 
@@ -440,11 +455,14 @@ class Hypothesis(BaseModel):
     supporting_evidence_ids: tuple[str, ...] = ()
     contrary_evidence_ids: tuple[str, ...] = ()
     # `maxLength: 300` is a schema keyword Anthropic's
-    # structured outputs do not enforce server-side (a real live call once
-    # exceeded an equivalent bound on `FinalAssessment.uncertainty` on its
-    # first, uncorrected attempt) -- prose stating the bound in words is the
-    # only mechanism that can actually keep a model under it, so the limit
-    # is named here rather than left to the schema alone.
+    # structured outputs do not enforce server-side -- a real live call once
+    # exceeded this same 300-char shape on `FinalAssessment.uncertainty`'s
+    # first, uncorrected attempt (that field's bound has since been raised
+    # to 600 -- see its comment below) -- so prose stating the bound in
+    # words is the only mechanism that can actually keep a model under it,
+    # and the limit is named here rather than left to the schema alone.
+    # This field's own bound stays 300: real evidence-heavy runs have shown
+    # no failures here, only on `uncertainty`.
     missing_evidence: str = Field(
         max_length=300,
         description=(
@@ -458,6 +476,13 @@ class ToolProposal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     arguments: ToolArguments
+    # These two, and `FinalAssessment.next_step` below, were checked
+    # against real saved investigation data alongside `uncertainty` and
+    # `stop_reason` before deciding not to raise them too, not left
+    # unexamined: `evidence_gap` and `expected_observation` measured
+    # max 215/232 chars (n=531 each, median 52/40), `next_step` measured
+    # max 216 chars (n=585, median 56) -- all three at least 68 characters
+    # under the 300 bound with zero observed failures, unlike `uncertainty`.
     evidence_gap: str = Field(max_length=300)
     expected_observation: str = Field(max_length=300)
 
@@ -551,7 +576,7 @@ class InitialPlan(BaseModel):
     schema_version: str = SCHEMA_VERSION
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
     proposal: ToolProposal | None = None
-    stop_reason: str | None = Field(default=None, min_length=1, max_length=300)
+    stop_reason: str | None = Field(default=None, min_length=1, max_length=600)
 
     @model_validator(mode="after")
     def check_proposal_or_stop(self) -> Self:
@@ -567,7 +592,7 @@ class HypothesisUpdate(BaseModel):
     schema_version: str = SCHEMA_VERSION
     hypotheses: tuple[Hypothesis, ...] = Field(min_length=2, max_length=3)
     proposal: ToolProposal | None = None
-    stop_reason: str | None = Field(default=None, min_length=1, max_length=300)
+    stop_reason: str | None = Field(default=None, min_length=1, max_length=600)
 
     @model_validator(mode="after")
     def check_proposal_or_stop(self) -> Self:
@@ -664,14 +689,20 @@ class FinalAssessment(BaseModel):
     # fields above) score exactly what they scored before this field
     # existed.
     runbook_citations: tuple[str, ...] = ()
-    # See `Hypothesis.missing_evidence`'s comment above --
-    # a live run once exceeded this same bound on
-    # an unrepaired first attempt, and the provider does not enforce
-    # `maxLength` server-side, so the word limit has to be stated in prose.
+    # See `Hypothesis.missing_evidence`'s comment above -- a live run once
+    # exceeded this field's then-300 bound on an unrepaired first attempt,
+    # and the provider does not enforce `maxLength` server-side, so the word
+    # limit has to be stated in prose. Later real evidence-heavy runs (a
+    # measured accuracy-vs-evidence-budget curve, `executed_tools`=2/3/4)
+    # showed this field's median length grows with the amount of evidence
+    # gathered (210->230->240 chars across the curve) and hit 300 outright at
+    # the top of that range, exhausting the run's repair budget with no
+    # attempt left -- raised to 600 to give real headroom above the observed
+    # growth, not just above one failure.
     uncertainty: str = Field(
-        max_length=300,
+        max_length=600,
         description=(
-            "What remains unresolved about this diagnosis, in 300 characters or fewer."
+            "What remains unresolved about this diagnosis, in 600 characters or fewer."
         ),
     )
     next_step: str = Field(
