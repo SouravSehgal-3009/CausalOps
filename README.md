@@ -120,9 +120,10 @@ reason (a `row_limit` mismatch between the tool's schema, which allows up
 to 200, and the policy-enforced budget of 40). That gap between schema and
 budget is deliberate and permanent, not a bug: a schema bound is a hard
 shape limit, a budget is what policy actually allows through, and the two
-are meant to stay independently editable. What changed is only the denial
-message itself, which now names the real allowed number instead of a
-generic refusal.
+are meant to stay independently editable. What changed here was only the
+denial message — the field's own schema description still said nothing
+about the real number. The same guess kept recurring at scale; see "Paired
+live evaluation" below for how that was found and fixed.
 
 This is this project's clearest example of a defect invisible to code
 review — visible only by running real evaluations and reading what the
@@ -214,22 +215,24 @@ currently-passing test rather than a design intention:
 
 These boundaries have been tested by real defects during development, and
 they held. Most were unrelated to any boundary at all: a mismeasured lab
-metric, the wrong-service-argument defect described above, a scoring bug
-that vacuously passed a citation check with nothing cited. One
-was boundary-adjacent and more serious: an early cost-ledger implementation
-settled a request's real cost without checking it against the reservation
-that authorized it, so an overrun on one request could become permanently
-invisible to the spend ceiling — reproduced concretely (a $0.01 reservation
-settling at $0.03 under a $0.02 cap, after which a further $0.01 request was
-still wrongly accepted, for $0.04 of real spend against a $0.02 authorized
-limit) and fixed before merge.
+metric, the wrong-service-argument defect described above, the row-limit
+guess and repair-starvation defect described under "Paired live evaluation"
+below, a scoring bug that vacuously passed a citation check with nothing
+cited. One was boundary-adjacent and more serious: an early cost-ledger
+implementation settled a request's real cost without checking it against
+the reservation that authorized it, so an overrun on one request could
+become permanently invisible to the spend ceiling — reproduced concretely
+(a $0.01 reservation settling at $0.03 under a $0.02 cap, after which a
+further $0.01 request was still wrongly accepted, for $0.04 of real spend
+against a $0.02 authorized limit) and fixed before merge.
 
 Every one of these was caught before it became a trust-boundary violation —
-most by review before a live run, the wrong-service-argument defect only by
-running real paid evaluations and reading what the model actually did, not
-by review beforehand. That is the honest claim: not "no boundary-adjacent
-bug ever happened," but "none of them ever crossed a boundary above,
-whether review or evaluation is what caught it."
+most by review before a live run, the wrong-service-argument and
+row-limit/repair-starvation defects only by running real paid evaluations
+and reading what the model actually did, not by review beforehand. That is
+the honest claim: not "no boundary-adjacent bug ever happened," but "none of
+them ever crossed a boundary above, whether review or evaluation is what
+caught it."
 
 ## Setup
 
@@ -406,6 +409,97 @@ the record, not an afterthought. Results are partitioned by `(arm,
 retrieval_mode, executed_tools)` and reported as counts and ranges, never
 blended across a retrieval mode or evidence-budget setting and never as a
 p95 or a broad performance claim.
+
+**The first full run of this curve found two mechanical bugs, not a model
+problem.** `executed_tools`=2/3/4 against the same 12 incidents produced a
+non-monotonic tool-enabled diagnosis-correct count — 6/12, then 9/12, then
+5/12 — that traced back to `query_logs`'s `row_limit` argument: the model's
+near-universal guess was 50, above the real 40-row policy budget, and that
+guess drew a policy denial in 21 of the 36 tool-enabled runs, spread across
+all three budget levels. Each denial still cost a model call. `model_calls =
+executed_tools + 2` reserves exactly one spare call for a structured-output
+repair, and a denial silently spent that spare before any repair was ever
+needed — so when a later validation failure needed it (several runs'
+`uncertainty`/`stop_reason` fields exceeded the 300-character cap then in
+force, and that field's length genuinely grows with the evidence gathered),
+nothing was left, and the run ended `REPAIR_EXHAUSTED` or
+`MODEL_CALL_BUDGET_EXHAUSTED` instead of a diagnosis.
+
+Three fixes landed together: the real 40-row limit is now named
+directly in `QueryLogsArguments.row_limit`'s own schema description, not
+only the denial message — see "A real defect this project found and fixed"
+above — and likewise for `SearchRunbooksArguments.limit`; structured-output
+repairs now draw from their own independent budget (`Budgets.repairs`), so
+a denial earlier in a run can no longer starve a repair a later turn needs;
+and the fields that hit the 300-character cap in real runs were raised to
+600.
+
+Re-run against the fix, same 12 incidents, same model config:
+
+| `executed_tools` | baseline diagnosis-correct | tool-enabled diagnosis-correct | correct-and-grounded | `FAILED_SAFE` |
+|---|---:|---:|---:|---:|
+| 2 | 3/12 | 6/12 | 3/12 | 0 |
+| 3 | 3/12 | 9/12 | 8/12 | 0 |
+| 4 | 3/12 | 8/12 | 8/12 | 1 |
+
+The one `FAILED_SAFE` at `executed_tools`=4 is unrelated to the row_limit
+and repair-budget bug this section is about: that run hit
+`MODEL_OUTPUT_INVALID` — the model returned a structurally empty assessment
+object, missing required fields, on both its original attempt and its one
+guaranteed repair — a separate, still-open failure mode.
+
+The cleanest result: 21 policy denials across the three pre-fix batches'
+36 tool-enabled runs became 0 across the three post-fix batches' 36
+tool-enabled runs, and every one of the 24 paired incidents at
+`executed_tools`=2 and =3 scored identically before and after — nothing
+shuffled except the denial/repair mechanics. Tool-enabled also beat the
+no-tool baseline at every budget level tested (6, 9, 8 against a flat
+3/12), consistent across all six batches.
+
+At `executed_tools`=4, three incidents flipped from incorrect to correct
+and none regressed:
+
+- **Flip 1 (attributable):** a `row_limit=50` denial, then an `uncertainty`
+  cap failure with zero repairs attempted — `REPAIR_EXHAUSTED`. Post-fix:
+  no denial, a clean diagnosis.
+- **Flip 2 (attributable):** the same denial, then a `stop_reason` cap
+  failure whose repair itself succeeded — but the denial's wasted call left
+  no budget for the final-assessment call that came after, so the run still
+  ended `MODEL_CALL_BUDGET_EXHAUSTED` at 6 of 6 calls used. Post-fix: no
+  denial, a clean diagnosis.
+- **Flip 3 (not attributable):** zero denials both before and after.
+  Pre-fix, the run had already reached a correct, safe
+  `INSUFFICIENT_EVIDENCE`/`UNDETERMINED` abstention after one successful
+  repair — not a failure. Post-fix it diagnosed correctly instead, because
+  the model chose to call `list_recent_changes` this time, which it hadn't
+  pre-fix — a difference traceable to the model's own first-turn hypothesis
+  ranking, before either run ever touched a tool call, denial, or repair.
+  Read as ordinary run-to-run variance, not the fix working a third time.
+
+The 12 incidents are 4 fault families × 3 seeds each, near-replicates
+rather than independent draws — every seed within a family scored
+identically at `executed_tools`=2 and =3, and 11 of 12 did at =4, so the
+effective sample size behind this curve is closer to 4 than 12. That isn't
+enough to establish an optimal evidence budget or a real accuracy trend;
+the denial-elimination result above is the defensible claim, and the
+per-point accuracy numbers are reported honestly and explained by the
+traced mechanism, not asserted as a statistically established curve.
+
+One family, `ambiguous_telemetry`, is correctly answered only by
+abstaining. The no-tool baseline abstained correctly in all 18 runs across
+all six batches; the tool-enabled arm never abstained once, diagnosing
+something — almost always `RESOURCE_POOL_SATURATION` — every time. Tools
+didn't help, and by these numbers hurt, on this one family.
+
+`search_runbooks` was never called in any of the 72 tool-enabled records
+across all six batches, at any budget level, though it's always available
+in the tool-enabled arm — the model consistently preferred direct
+telemetry tools when the evidence-check budget was scarce, so the
+`SearchRunbooksArguments` fix above has not yet been exercised by a live
+call.
+
+The three post-fix batches cost $3.02 in real spend; all six batches in
+this investigation, pre- and post-fix combined, cost $6.40.
 
 ## Development
 
