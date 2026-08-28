@@ -1,37 +1,29 @@
-"""The LangGraph orchestrator: one replay incident run end to end through the
-policy-wrapped dispatch node `tool_wrappers.py` built and nothing else consumed
-before this module.
-
-This file was built beside `workflow.py`'s `Investigation` loop, unchanged, so
-an owner could run either path against the same incident and compare --
-bounded tool-graph parity, demonstrated with a 144-pair differential sweep
-across 13 dimensions before the loop was retired, `workflow.py` and
-`cli.py`'s `--orchestrator` flag included. This file is now the only
-orchestrator.
+"""The LangGraph orchestrator: one incident investigation run end to end
+through the policy-wrapped dispatch node `tool_wrappers.py` builds -- the
+only orchestrator in this codebase.
 
 Graph state is a JSON-only `TypedDict`: nothing here lives off-state.
 `tool_wrappers.py`'s `ReservationLedger` and `evidence.py`'s `EvidenceStore`
 are both rebuilt fresh, inside a node, from state's `receipts`/`evidence`
 lists on every call that needs them -- there is no live object surviving
-between graph turns, so SQLite-checkpointed resume needs no
-redesign of anything in this file. `RunRecorder` used to be a
-factory-closure object shared and mutated across every node call, which
-would have lost every recorded event at a process boundary. Events are now
-a `state["events"]` list, rebuilt into a
-local `RunRecorder` by `_rebuild_recorder` at the top of each node exactly as
-`_rebuild_receipts` already did for receipts, and written back whole in that
-node's return -- the same "read the full field, extend it, return the full
-field" pattern `dispatch_tool` already used for `evidence`. Every node
-factory that touches the recorder takes two `Clock` parameters, not one:
-`clock` times domain data and `event_clock` times `RunEvent.at` only, kept
-apart so recording an event never perturbs a domain-timing read -- see
+between graph turns, so SQLite-checkpointed resume needs no redesign of
+anything in this file. Events follow the same rule: `state["events"]` is a
+plain list, rebuilt into a local `RunRecorder` by `_rebuild_recorder` at the
+top of each node exactly as `_rebuild_receipts` does for receipts, and
+written back whole in that node's return -- the same "read the full field,
+extend it, return the full field" pattern `dispatch_tool` uses for
+`evidence`. A recorder object shared and mutated across node calls would
+lose every recorded event at a process boundary, since a checkpoint only
+persists what is actually in `state` -- keeping the recorder a plain
+list-in/list-out value avoids that entirely. Every node factory that
+touches the recorder takes two `Clock` parameters, not one: `clock` times
+domain data and `event_clock` times `RunEvent.at` only, kept apart so
+recording an event never perturbs a domain-timing read -- see
 `build_graph`'s docstring for the full reasoning.
 
 Two nodes decide whether the run continues, stops safely, or asks for a
 diagnosis; `final_report` never makes that decision, it only serializes
-whatever `investigate`/`dispatch_tool`/`final_assessment` already decided,
-the same separation the retired `workflow.py`'s `Investigation.report()`
-kept between deciding an outcome and writing it down.
+whatever `investigate`/`dispatch_tool`/`final_assessment` already decided.
 
 Every node that can raise mid-attempt (`investigate`, `dispatch_tool`,
 `final_assessment`) wraps its own body in `try`/`except`: LangGraph gives a
@@ -44,10 +36,9 @@ re-raised first in all three, since it is a control-flow signal that
 `interrupt()` produces (interrupt, drain, parent command), not a failure.
 
 This file binds `ToolCallingModel` -- the `propose()`/`respond()` protocol in
-`models.py` -- not the plain `ReasoningModel` protocol `workflow.py` used.
-`ReplayToolCallingModel` is its first implementation; a live Claude adapter is
-the second, which is what makes this a protocol worth naming rather than a
-concrete type these nodes bind directly.
+`models.py`. `ReplayToolCallingModel` is its first implementation; a live
+Claude adapter is the second, which is what makes this a protocol worth
+naming rather than a concrete type these nodes bind directly.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -97,7 +88,12 @@ from causalops.domain import (
     Versions,
     utc_now,
 )
-from causalops.evidence import EvidenceStore, digest_text, new_opaque_id
+from causalops.evidence import (
+    EvidenceStore,
+    derive_context_quotas,
+    digest_text,
+    new_opaque_id,
+)
 from causalops.models import ModelRequest, Stage, ToolCallingModel, parse_response
 from causalops.policy import POLICY_VERSION
 from causalops.pricing import InputTooLarge
@@ -147,16 +143,15 @@ class GraphState(TypedDict):
     incident_id: str
     # Set once, in `run_graph_investigation`'s `initial_state`,
     # from a caller-supplied name (or `REPLAY_MODEL_NAME` if the caller does
-    # not pass one). Never written by any
-    # node after that. This is what fixes `cli.py`'s resume path: a resumed
-    # thread used to relabel its own artifact `REPLAY_MODEL_NAME`
-    # unconditionally, because nothing durable said which model actually
-    # produced the original investigation. `cli.py` reads this back from the
-    # checkpoint's `channel_values` the same way it already reads
-    # `incident_id` back (`_resolve_thread_incident_id`), with a
-    # `REPLAY_MODEL_NAME` default so a checkpoint written before this field
-    # existed still resumes and is labelled correctly (it can only ever have
-    # been a replay run).
+    # not pass one). Never written by any node after that -- without a
+    # durable record of which model actually produced the original
+    # investigation, a resumed thread has no way to know whether its
+    # artifact should be labelled `REPLAY_MODEL_NAME` or the real model
+    # name. `cli.py` reads this back from the checkpoint's `channel_values`
+    # the same way it already reads `incident_id` back
+    # (`_resolve_thread_incident_id`), with a `REPLAY_MODEL_NAME` default so
+    # a checkpoint written before this field existed still resumes and is
+    # labelled correctly (it can only ever have been a replay run).
     model_name: str
     phase: str
     model_turn: int
@@ -183,7 +178,8 @@ class GraphState(TypedDict):
     # local `RunRecorder` from this list (`_rebuild_recorder`), records its
     # own events into that local copy, and returns the full extended list --
     # the same pattern `receipts`/`evidence` already use. See the module
-    # docstring for why this replaced a shared closure-captured recorder.
+    # docstring for why a shared, mutated recorder object would lose events
+    # at a process boundary instead.
     events: list[dict[str, JsonValue]]
     pending_proposal: dict[str, JsonValue] | None
     assessment: dict[str, JsonValue] | None
@@ -362,12 +358,10 @@ def _money_refusal_reason_code(
     *before* sending it, mapped to the specific `ReasonCode` an owner reads
     in a report -- shared by `investigate`'s and `final_assessment`'s
     identical except-blocks below, rather than repeating a three-way
-    `isinstance` chain in both (the exact "same fix, two places, one
-    missed" shape that recurs elsewhere in this codebase's own history).
+    `isinstance` chain in both.
 
-    The third branch used to be a bare
-    fall-through (`return ReasonCode.AMBIGUOUS_MODEL_REQUEST` with no
-    check at all) -- correct today, since the parameter type is a
+    A bare fall-through (`return ReasonCode.AMBIGUOUS_MODEL_REQUEST` with no
+    check at all) would be correct today, since the parameter type is a
     three-member union and every member is covered above, but a future
     FOURTH refusal type added to that union without also updating this
     function would silently misreport as `AMBIGUOUS_MODEL_REQUEST`,
@@ -391,8 +385,8 @@ def _expired(started_at: str, budgets: Budgets, clock: Clock) -> bool:
 def _accumulate_usage(
     existing: dict[str, JsonValue] | None, latest: ModelUsage | None
 ) -> dict[str, JsonValue] | None:
-    """Mirrored `workflow.py`'s `add_usage`: the report publishes the total
-    across every model call, not the last one."""
+    """The report publishes the total across every model call, not the
+    last one."""
     if latest is None:
         return existing
     if existing is None:
@@ -569,8 +563,7 @@ class _StageCounters:
 
     A plain stateful object, not `nonlocal` split across two near-identical
     node bodies, because a top-level helper has no way to mutate a caller's
-    locals -- the same reason `BudgetLedger` existed in `workflow.py`.
-    `record_call` must run *before* the model call it is counting, not
+    locals. `record_call` must run *before* the model call it is counting, not
     after, so that a node's `except` handler still reports an attempt that
     raised -- the same "reserve before the risky call" ordering
     `tool_wrappers.py`'s `ReservationLedger` uses for tool budget, applied
@@ -622,16 +615,7 @@ def _render_stage_request(
     model_turn: int,
 ) -> tuple[ModelRequest, str]:
     """The context-render-and-digest step every model call needs, identical
-    for `INVESTIGATE` and `FINAL_ASSESSMENT`. While `workflow.py` still ran,
-    its `call_model` kept its own copy of this same logic rather than
-    importing this function -- the two orchestrators ran side by side and
-    reaching across that boundary for one shared helper would have coupled
-    their lifecycles for no present benefit, with `test_parity.py` guarding
-    the two copies from drifting apart in the meantime. Retiring
-    `workflow.py` retired that duplication with it; this function now has no
-    copy to drift from, and `test_graph_frozen_reports.py` (`test_parity.py`,
-    renamed) is a plain regression pin on this file's own behaviour, not a
-    two-orchestrator drift guard.
+    for `INVESTIGATE` and `FINAL_ASSESSMENT`.
 
     `run_id`/`graph_phase`/`model_turn` are keyword-only and
     required, not defaulted: every caller already has all three in scope
@@ -645,7 +629,9 @@ def _render_stage_request(
     unchanged, so replay's requests and every existing digest-based
     assertion are unaffected.
     """
-    evidence, markers = store.context_evidence()
+    evidence, markers = store.context_evidence(
+        derive_context_quotas(budgets.executed_tools)
+    )
     context = render_context(
         packet,
         scope,
@@ -816,11 +802,11 @@ def _make_investigate(
                 "context_digest": counters.context_digest,
                 "usage": counters.usage,
                 "pending_proposal": None,
-                # Turn 0 failing mirrors `run()`'s `if plan is None: return
-                # self.failed_safe()`. Turn >=1 failing mirrors
-                # `plan_second_check()` discarding a failed second stage and
-                # letting the run continue to FINAL_ASSESSMENT unchanged --
-                # `reason` only becomes a terminal failure on the first turn.
+                # Turn 0 failing is terminal -- there is no earlier evidence
+                # to fall back on. Turn >=1 failing instead lets the run
+                # continue to FINAL_ASSESSMENT with whatever evidence it
+                # already has -- `reason` only becomes a terminal failure on
+                # the first turn.
                 "failure_reason": (
                     reason.value if reason is not None and turn_index == 0 else None
                 ),
@@ -921,13 +907,8 @@ def _make_investigate(
             # this point must not vanish with this node's frame -- the same
             # hazard `dispatch_tool` closes for a reserved tool receipt,
             # applied here to the model-call budget. Unlike the turn-0-only
-            # rule above, a crash always ends the run: `workflow.py`'s
-            # `plan_second_check()` only ever swallowed a stage that returned
-            # `None` normally, never one that raised -- a raise there
-            # propagated out of `run()` to the loop's own top-level entry
-            # point (`workflow.py`'s own `run_investigation`, a different
-            # function from `cli.py`'s dispatcher of the same name today)
-            # regardless of which stage crashed.
+            # rule above, a crash always ends the run, regardless of which
+            # turn it happens on.
             recorder.event(
                 GraphPhase.INVESTIGATE.value,
                 "internal_error",
@@ -977,18 +958,16 @@ def _make_dispatch_tool(
 
             # `authorize()` runs inside `wrapper.dispatch`, invisible from
             # here, so this node cannot emit an event at the exact moment
-            # authorization passes the way `workflow.py`'s `check_started`
-            # once did. What it can restore is the retired loop's event
-            # *vocabulary*:
-            # a denial is `proposal_denied`, never `check_finished`, and an
-            # executed check gets both `check_started` and `check_finished`
-            # rather than one event carrying `policy_result` for both cases.
+            # authorization passes. Instead it emits a fixed event
+            # vocabulary: a denial is `proposal_denied`, never
+            # `check_finished`, and an executed check gets both
+            # `check_started` and `check_finished` rather than one event
+            # carrying `policy_result` for both cases.
             #
             # `check_started` and `check_finished` are both emitted here,
             # after `wrapper.dispatch` has already returned -- the backend
             # call already happened in the gap *before* `check_started`, so
-            # this pair is not a timing bracket the way the retired loop's
-            # was. The
+            # this pair is not a timing bracket. The
             # receipt's own `duration_ms` (measured inside the wrapper,
             # around the real call) is the authoritative figure;
             # `check_finished` carries it explicitly so nothing has to
@@ -1521,17 +1500,15 @@ def _make_route_after_normalize(
         if state["failure_reason"] is not None:
             return "final_report"
         receipts = _rebuild_receipts(state)
-        # This router used to cap at
-        # `state["model_turn"] < 2`, reproducing `workflow.py`'s retired loop,
-        # which called `plan_second_check()` at most once regardless of
-        # whether the second proposal was allowed or denied. That bound made
-        # a denial cost a turn permanently: `eda0135b…`'s real incident asked
-        # for `list_recent_changes` first, was denied on a strict window
-        # comparison, and never got a second chance at any check at all. Now
-        # that the incident window is clamped rather than compared strictly,
-        # making that class of denial rare rather than
-        # frequent, a denial should no longer be able to consume a run's last
-        # opportunity, so the `< 2` term is dropped.
+        # This router does not cap on `state["model_turn"] < 2`: a denial
+        # must not be able to permanently cost a run its last opportunity to
+        # gather evidence -- the real incident `eda0135b…` (reproduced in
+        # `test_graph.py`) is what this fixes: its first-ever proposal was
+        # denied, and it never got another chance at any evidence at all.
+        # Because the incident window is clamped rather than compared
+        # strictly (see `tool_wrappers.resolve_effective_window`), that
+        # class of denial is rare, so a fixed low turn cap is not needed
+        # here to bound the loop.
         #
         # `_tools_left(...) > 0` (at most two *executed* checks -- a denial
         # never spends a slot) and `_model_calls_left(...) >= 2` (at most
@@ -1768,10 +1745,9 @@ def _settle_invocation(
     (a fresh start) or `compiled.invoke(Command(resume=...), config)` (a
     resume) -- everything below this point treats both identically, which
     is exactly the claim being made by sharing this code at all.
-    `fallback_state` stands in for what `run_graph_investigation` used to
-    call `initial_state` in its own crash-containment branches: the state
-    to fall back to if `compiled.get_state(config).values` is somehow
-    empty. A resume always has a real checkpoint to read by the time it
+    `fallback_state` is the state to fall back to if
+    `compiled.get_state(config).values` is somehow empty. A resume always
+    has a real checkpoint to read by the time it
     reaches here -- `resume_graph_investigation`'s own pending-interrupt
     assertion has already confirmed that -- so it passes the state it read
     while confirming that, never a manufactured empty one.
@@ -1953,13 +1929,11 @@ def run_graph_investigation(
     if investigation_id is None:
         investigation_id = new_opaque_id()
     # `recorder.clock` -- not the `clock` parameter above -- times every
-    # `RunEvent`. The caller's `RunRecorder` used to be the only
-    # thing that ever called `.event(...)`, so its own clock never shared
-    # ticks with `clock`, which times domain data (budget expiry, tool
-    # duration, evidence timestamps). Rebuilding a recorder from state inside
-    # each node must preserve that same isolation -- see `build_graph`'s
-    # docstring for why entangling the two is an observable behaviour change,
-    # not just a style choice.
+    # `RunEvent`, kept isolated from `clock`, which times domain data
+    # (budget expiry, tool duration, evidence timestamps). Rebuilding a
+    # recorder from state inside each node must preserve that same
+    # isolation -- see `build_graph`'s docstring for why entangling the two
+    # is an observable behaviour change, not just a style choice.
     event_clock = recorder.clock
     # `run_id` is internal bookkeeping -- unlike `investigation_id`, evidence
     # IDs, and receipt IDs, it is never cited by a model, displayed in a

@@ -97,6 +97,39 @@ implicit. Retrieved runbook text is untrusted data — it is quoted and
 delimited in the model's context and cannot alter policy, extend scope, or
 authorize a tool call on its own.
 
+### A real defect this project found and fixed
+
+Paired evaluation runs are how this project catches problems code review
+alone misses. One showed up in the tool arguments themselves, not in the
+policy or the graph.
+
+`QueryMetricArguments.service` and `QueryLogsArguments.service` started as
+bare, undescribed `str` fields — nothing told the model which service
+actually emits which metric or log category. Across two real paid
+evaluation batches (8 tool-enabled runs total), the model guessed
+`service="inventory"` for `resource_pool_attempts_per_capacity`, a metric
+only `orders` ever records, in 3 of the 8 runs. Each wrong guess returned
+zero samples and burned half of that run's 2-check evidence budget on a
+query that could never have returned anything.
+
+The fix was a `Field(description=...)` on both arguments, naming the exact
+per-service restrictions in prose (`src/causalops/tools.py`) — no policy or
+graph code changed, only what the model was told about a tool it already
+had. Re-run after the fix: zero wrong-service guesses, and `query_logs`
+executed successfully in a real batch for the first time in this project's
+history — it had been proposed once before and denied for an unrelated
+reason (a `row_limit` mismatch between the tool's schema, which allows up
+to 200, and the policy-enforced budget of 40). That gap between schema and
+budget is deliberate and permanent, not a bug: a schema bound is a hard
+shape limit, a budget is what policy actually allows through, and the two
+are meant to stay independently editable. What changed is only the denial
+message itself, which now names the real allowed number instead of a
+generic refusal.
+
+This is this project's clearest example of a defect invisible to code
+review — visible only by running real evaluations and reading what the
+model actually did, not by reading the tool's code.
+
 ### Budgets
 
 | Limit | Default |
@@ -148,8 +181,8 @@ currently-passing test rather than a design intention:
 
 These boundaries have been tested by real defects during development, and
 they held. Most were unrelated to any boundary at all: a mismeasured lab
-metric, a model that occasionally guessed the wrong service argument, a
-scoring bug that vacuously passed a citation check with nothing cited. One
+metric, the wrong-service-argument defect described above, a scoring bug
+that vacuously passed a citation check with nothing cited. One
 was boundary-adjacent and more serious: an early cost-ledger implementation
 settled a request's real cost without checking it against the reservation
 that authorized it, so an overrun on one request could become permanently
@@ -158,10 +191,12 @@ settling at $0.03 under a $0.02 cap, after which a further $0.01 request was
 still wrongly accepted, for $0.04 of real spend against a $0.02 authorized
 limit) and fixed before merge.
 
-Every one of these, including that one, was caught by review before it ever
-reached a live-exploited state — never after. That is the honest claim:
-not "no boundary-adjacent bug ever happened," but "review caught every one
-before it mattered."
+Every one of these was caught before it became a trust-boundary violation —
+most by review before a live run, the wrong-service-argument defect only by
+running real paid evaluations and reading what the model actually did, not
+by review beforehand. That is the honest claim: not "no boundary-adjacent
+bug ever happened," but "none of them ever crossed a boundary above,
+whether review or evaluation is what caught it."
 
 ## Setup
 
@@ -208,12 +243,12 @@ above; defaults to 5.00 if unset).
 | `causalops doctor` | Checks this machine can run CausalOps; see Setup above. |
 | `causalops lab up` | Starts the Docker Compose lab and waits for it to be healthy. |
 | `causalops lab down` | Stops the lab. |
-| `causalops scenario start <family> --seed <development\|evaluation>` | Starts one incident, prints its opaque incident ID. |
+| `causalops scenario start <family> --seed <development\|evaluation\|evaluation_b\|evaluation_c>` | Starts one incident, prints its opaque incident ID. |
 | `causalops scenario reset <incident-id>` | Clears one incident's active lab state. Never touches `results/`. |
 | `causalops investigate <incident-id> --model <replay\|claude>` | Runs a full investigation; `replay` is free and deterministic, `claude` is a real billed request. |
 | `causalops approve <thread-id>` | Accepts a paused investigation's diagnosis or abstention. |
 | `causalops reject <thread-id> "<reason>"` | Rejects a paused investigation and records why. |
-| `causalops-evaluate` | Runs the fixed paired live-evaluation corpus (separate binary, takes no arguments). |
+| `causalops-evaluate [--executed-tools <2\|3\|4>]` | Runs the fixed paired live-evaluation corpus at one evidence-budget curve point (separate binary; defaults to 2). |
 
 ## Running an investigation
 
@@ -304,27 +339,40 @@ lab-state changes left behind).
 ### Paired live evaluation
 
 ```bash
-uv run causalops-evaluate
+uv run causalops-evaluate                      # executed_tools=2 (default)
+uv run causalops-evaluate --executed-tools 3
+uv run causalops-evaluate --executed-tools 4
 ```
 
 A genuinely separate console script, not a `causalops` subcommand — it runs
-a fixed, held-out four-family corpus against the live model, one no-tool
-baseline and one tool-enabled run per family, saving every record and a
-per-arm summary under `results/evaluations/<id>/`. It
-requires `ANTHROPIC_API_KEY`, persists each completed record as it finishes
-(not only at the end), and stops issuing further paid requests only after an
-infrastructure-level failure (a missing credential, a provider error, or the
-cost ceiling itself) — an ordinary model mistake is still scored as a
-result, not treated as a reason to abort the batch.
+a fixed, held-out 12-incident corpus (4 families x 3 seeds — `evaluation`,
+`evaluation_b`, `evaluation_c`) against the live model: one no-tool baseline
+and one tool-enabled run per incident, saving every record and a per-group
+summary under `results/evaluations/<id>/`. Each invocation runs exactly one
+point on an evidence-budget curve — `Budgets(executed_tools=N,
+model_calls=N + 2)` for `N` in `{2, 3, 4}` — never all three in one run, so
+real spend can be checked between phases rather than committed at once; the
+owner runs the command up to three times, once per `--executed-tools`
+value, to build the full curve. Before any scenario starts, a pre-flight
+check refuses cleanly if the configured ceiling could not possibly cover
+this invocation's own worst-case batch cost, on top of what the application
+has already spent or committed. It requires `ANTHROPIC_API_KEY`, persists
+each completed record as it finishes (not only at the end), and stops
+issuing further paid requests only after an infrastructure-level failure (a
+missing credential, a provider error, or the cost ceiling itself) — an
+ordinary model mistake is still scored as a result, not treated as a reason
+to abort the batch.
 
 Reported scores are mechanical: diagnosis and disposition correctness
 against evaluator-only labels, citation validity and sufficiency against
 required-evidence predicates, and a joint correct-and-grounded figure
 combining the two. Every record also carries the git SHA, clean/dirty
-status, fixture and prompt versions, retrieval mode, exact model, tokens,
-latency, and cost — reproducibility is part of the record, not an
-afterthought. Given the small sample size, results are reported as counts
-and ranges, never as a p95 or a broad performance claim.
+status, fixture and prompt versions, retrieval mode, seed name, evidence
+budget, exact model, tokens, latency, and cost — reproducibility is part of
+the record, not an afterthought. Results are partitioned by `(arm,
+retrieval_mode, executed_tools)` and reported as counts and ranges, never
+blended across a retrieval mode or evidence-budget setting and never as a
+p95 or a broad performance claim.
 
 ## Development
 
