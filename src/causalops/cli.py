@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "'claude' sends a live, billed request to Anthropic; see "
-            "TECHNICAL_OVERVIEW.md before using it."
+            "README.md before using it."
         ),
     )
 
