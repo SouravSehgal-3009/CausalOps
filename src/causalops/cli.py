@@ -61,13 +61,12 @@ from causalops.system_probe import SystemProbe
 from causalops.telemetry import RunPaths
 
 # The live adapter deliberately does not add this specific
-# check: the authenticated `GET /v1/models/claude-sonnet-5` metadata request
-# `TECHNICAL_OVERVIEW.md`'s "Tests specified for the live Claude adapter"
-# section describes is a second, routine network call from a command
-# (`doctor`) an owner runs far more casually than `investigate --model
-# claude` -- adding it here would give this project a second, easy-to-trip
-# path to the network beyond the one deliberate smoke call the live adapter
-# exists to make safe. Deferred, not forgotten.
+# check: an authenticated `GET /v1/models/claude-sonnet-5` metadata request
+# would be a second, routine network call from a command (`doctor`) an owner
+# runs far more casually than `investigate --model claude` -- adding it here
+# would give this project a second, easy-to-trip path to the network beyond
+# the one deliberate smoke call the live adapter exists to make safe.
+# Deferred, not forgotten.
 MODEL_CHECK_NOTE = (
     "Not checked: causalops doctor never calls the network. The "
     "authenticated claude-sonnet-5 metadata request is deliberately not "
@@ -496,9 +495,10 @@ def run_decision_command(
     4. A first decision with no pending interrupt is refused
        (`NO_PENDING_INTERRUPT`): this thread never paused through this
        mechanism, or was resumed outside it. A first decision with a
-       pending interrupt is recorded -- before resume, per
-       `TECHNICAL_SPEC.md:170-172` -- against the checkpoint id the pending
-       snapshot names. A matching-but-unfinished decision skips this write
+       pending interrupt is recorded -- before resume, so a crash between
+       the write and the resume call still leaves a durable record of the
+       decision -- against the checkpoint id the pending snapshot names. A
+       matching-but-unfinished decision skips this write
        (it already exists) and goes straight to resume; whether the graph
        is still pending or already settled from a prior attempt,
        `resume_graph_investigation`'s `Command(resume=...)` call handles

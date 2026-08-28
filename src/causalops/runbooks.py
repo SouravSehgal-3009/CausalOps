@@ -1,6 +1,6 @@
 """Local retrieval over a small, curated runbook corpus.
 
-`TECHNICAL_SPEC.md` §7's fifth read-only tool, `search_runbooks`. The default
+The fifth read-only tool, `search_runbooks`. The default
 mode is SQLite FTS5, labelled `fts5_lexical` -- it ships in this Python's
 stdlib `sqlite3` with a working `bm25()`, so this module needs no new
 dependency. Pinecone Starter is a later, opt-in, out-of-scope experiment;
@@ -10,7 +10,7 @@ The corpus lives in `runbook_corpus.json`, beside this module, not as Python
 literals in it -- the same convention `replay_fixtures/*.json` and
 `lab/scenarios/*.json` already use for curated, checked-in content: a module
 holding both retriever logic and corpus text would make one file do two
-jobs, code to debug and content to audit. §7 requires the corpus to exclude
+jobs, code to debug and content to audit. The corpus must exclude
 expected answers, evaluator-only predicates, semantic scenario keys,
 secrets, and controller-only instructions; `tests/unit/test_runbooks.py` and
 `tests/security/test_ground_truth_isolation.py` check that directly against
@@ -89,9 +89,9 @@ class RunbookIndex:
         # other "_version" field in this codebase
         # (`SCHEMA_VERSION`, `SCORER_VERSION`, `prompt_version`, ...), all
         # of which are strings regardless of how small the underlying
-        # number is. `TECHNICAL_SPEC.md` §10's reproducibility manifest is
-        # the first real reader, via `EvaluationRecord.runbook_corpus_
-        # version`. `None` for a corpus file that predates this key rather
+        # number is. `EvaluationRecord.runbook_corpus_version` is the
+        # first real reader, part of the evaluation record's own
+        # reproducibility fields. `None` for a corpus file that predates this key rather
         # than a hard `KeyError`, so an older checked-in corpus still loads.
         raw_corpus_version = loaded.get("corpus_version")
         self.corpus_version: str | None = (

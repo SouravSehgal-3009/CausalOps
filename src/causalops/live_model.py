@@ -87,8 +87,8 @@ from causalops.tools import (
     ToolName,
 )
 
-# `TECHNICAL_OVERVIEW.md`'s "Default limits" table: "Claude ... claude-sonnet-5
-# ... specified for the live adapter." Not a free choice this module makes.
+# claude-sonnet-5 is the model specified for the live adapter, not a free
+# choice this module makes.
 MODEL_NAME = "claude-sonnet-5"
 
 # Neither collides with any `ToolName` value (`tools.py`) -- Claude echoes
@@ -352,11 +352,10 @@ class MissingCredential(Exception):
 class MissingProviderUsage(Exception):
     """The provider returned a response with no usage metadata at all.
 
-    `TECHNICAL_SPEC.md` §5's durable-operation rules name this explicitly:
-    "a response that omits provider usage" is one of the conditions the
-    amended `PENDING` record exists to survive, alongside a timeout or a
-    mid-request crash -- "the reservation left visible for accounting," not
-    silently accepted as free. Raised rather than settling with a
+    A response that omits provider usage is one of the durable-operation
+    conditions the `RESERVED` cost-ledger row exists to survive, alongside a
+    timeout or a mid-request crash -- the reservation is left visible for
+    accounting, not silently accepted as free. Raised rather than settling with a
     substituted value, so the reservation stays `RESERVED` (never `SETTLED`
     on a guess) and this surfaces as `FAILED_SAFE`/`INTERNAL_ERROR` through
     `graph.py`'s existing blanket handler -- the same path a crash or
@@ -419,25 +418,23 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
 
     `ChatAnthropic()` resolves `ANTHROPIC_API_KEY` from the environment
     itself when no `anthropic_api_key=` is passed -- this module never
-    reads, stores, formats, or logs the key's value, the
-    "environment-only credential" rule `TECHNICAL_OVERVIEW.md`'s threat
-    table names (`doctor.py`'s `check_api_key` already gates its presence
-    before a live run starts; `cli.py`'s `credential_present` check gates
-    it again, cheaply, before this function is ever called for a real run
-    -- see `MissingCredential`'s docstring). `max_retries=0`:
-    `TECHNICAL_OVERVIEW.md`'s "Default limits" table specifies no
-    automatic retries anywhere in this project, and the cost gate in
-    `_send` already made one deliberate send decision for this
-    reservation -- a silent SDK-level retry would send a second request
-    under a reservation sized for one, the same failure mode the reservation
-    math itself exists to close.
+    reads, stores, formats, or logs the key's value; credentials are
+    environment-only throughout this project (`doctor.py`'s `check_api_key`
+    already gates its presence before a live run starts; `cli.py`'s
+    `credential_present` check gates it again, cheaply, before this
+    function is ever called for a real run -- see `MissingCredential`'s
+    docstring). `max_retries=0`: this project adds no automatic retries
+    anywhere, and the cost gate in `_send` already made one deliberate send
+    decision for this reservation -- a silent SDK-level retry would send a
+    second request under a reservation sized for one, the same failure mode
+    the reservation math itself exists to close.
     `thinking`/`reasoning_effort`: Claude Sonnet 5 runs adaptive thinking
     regardless (omitting `thinking` already runs adaptive per the
     installed SDK's own model-support table), set explicitly here so the
     request is self-documenting rather than relying on a default an owner
-    reading this code cannot see. No `temperature`/`top_p`/`top_k`:
-    `TECHNICAL_OVERVIEW.md` specifies none, and Sonnet 5 rejects all three
-    outright once `thinking` is on.
+    reading this code cannot see. No `temperature`/`top_p`/`top_k`: this
+    project leaves all three at the provider's own default, and Sonnet 5
+    rejects all three outright once `thinking` is on.
 
     Keyword-only aliases (`model_name`/`max_tokens_to_sample`/`effort`),
     not the plain field names (`model`/`max_tokens`/`reasoning_effort`) a
@@ -448,12 +445,11 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     assumed) -- `model_config`'s `populate_by_name=True` means the plain
     names work at runtime too, but only the aliases satisfy `mypy src lab`.
 
-    `timeout=MAX_REQUEST_SECONDS` closes
-    `TECHNICAL_OVERVIEW.md`'s "Default limits" table's own "Model call |
-    90 seconds | specified, not enforced" row -- a request that hangs past
-    this many seconds raises rather than tying up the process indefinitely,
-    the same "bounded, not unbounded" reasoning every other limit in that
-    table already gets. `stop=None` is the field's own real default
+    `timeout=MAX_REQUEST_SECONDS` (90 seconds, `pricing.py`) is what makes
+    the "specified" model-call timeout actually enforced -- a request that
+    hangs past this many seconds raises rather than tying up the process
+    indefinitely, the same "bounded, not unbounded" reasoning every other
+    limit in this project gets. `stop=None` is the field's own real default
     (`stop_sequences`, `None`) -- passed explicitly only because mypy's
     pydantic-field-driven constructor synthesis reports it as required
     despite that default (confirmed at a Python prompt against the
@@ -560,11 +556,10 @@ class LiveClaudeModel:
         # see `InputTooLarge`'s docstring for why folding tools into the
         # cap is the wrong fix -- but a dollar reservation that omits real,
         # billed tokens is not conservative: counting the tool schema here
-        # is what keeps `actual_usd <= reserved_usd` the ORDINARY case
-        # (`TECHNICAL_OVERVIEW.md`'s own corrected wording -- not a
-        # code-enforced invariant; `cost_ledger.settle_reservation` still
-        # commits and logs a real overrun rather than refusing it, since the
-        # money is already spent by the time settlement runs).
+        # is what keeps `actual_usd <= reserved_usd` the ORDINARY case --
+        # not a code-enforced invariant; `cost_ledger.settle_reservation`
+        # still commits and logs a real overrun rather than refusing it,
+        # since the money is already spent by the time settlement runs.
         tool_definition_tokens = estimate_input_tokens(json.dumps(tools))
         reserved_usd = self._pricing.reservation_usd(
             estimated_input_tokens + tool_definition_tokens
@@ -572,7 +567,7 @@ class LiveClaudeModel:
         requested_at = self._clock()
         # Raises `CostCeilingExceeded` and writes nothing further if this
         # reservation would exceed the remaining application-wide balance --
-        # refuse rather than send, `TECHNICAL_SPEC.md` §10's own words.
+        # refuse rather than send.
         reservation, is_new = record_reservation_before_request(
             self._conn,
             run_id=request.run_id,
@@ -603,9 +598,8 @@ class LiveClaudeModel:
         # function never reaches `settle_reservation` below: the caller's
         # exception propagates to `graph.py`'s existing blanket
         # `except Exception`, which reports `FAILED_SAFE`/`INTERNAL_ERROR`
-        # with the reservation intact for accounting, exactly
-        # `TECHNICAL_SPEC.md` §5's "a timeout, crash, or missing provider
-        # usage never reissues that key" rule.
+        # with the reservation intact for accounting -- a timeout, crash, or
+        # missing provider usage never reissues that key.
         message = self._client.bind_tools(tools, parallel_tool_calls=False).invoke(
             messages
         )

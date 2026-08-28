@@ -28,8 +28,9 @@ class ModelRequest(BaseModel):
     """One stage's full ask.
 
     `run_id`/`graph_phase`/`model_turn`/`context_digest` are
-    `TECHNICAL_SPEC.md` §5's amended model-request idempotency key --
-    `run_id + graph_phase + model_turn + context_digest` -- carried on the
+    the model-request idempotency key -- `cost_ledger.py`'s cost-ledger row
+    primary key is exactly `(run_id, graph_phase, model_turn,
+    context_digest)` -- carried on the
     request itself rather than threaded through `ToolCallingModel.propose`/
     `.respond` as extra parameters, so a live adapter can persist its own
     `PENDING` reservation record from the one object it already has, exactly
@@ -199,7 +200,7 @@ class ReplayToolCallingModel:
     reading `InitialPlan.proposal`/`HypothesisUpdate.proposal` off a
     structured response directly.
 
-    `TECHNICAL_SPEC.md` §5 requires the replay adapter to emit an
+    The replay adapter must emit an
     `AIMessage.tool_calls`-equivalent message, not merely a structured field
     a live provider happens not to use. `propose()` is that requirement: it
     turns a parsed proposal into a `NativeToolCall` with `to_tool_call`, the

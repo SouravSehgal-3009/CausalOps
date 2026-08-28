@@ -610,8 +610,8 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
 
 def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
     """The gap this test exists for: `main()` used to print one line per
-    record and never a batch-level aggregate at all. `TECHNICAL_SPEC.md`
-    §10 forbids p95 or any other broad performance claim from a small
+    record and never a batch-level aggregate at all. This project
+    forbids p95 or any other broad performance claim from a small
     synthetic sample -- this asserts the rendered text carries the counts
     and ranges an `EvaluationSummary` holds, including the honest "how many
     runs' cost is actually known" annotation, citation counts, and
@@ -1143,7 +1143,7 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     the same batch can legitimately land in different retrieval modes. This
     builds exactly that: one tool-enabled run that never retrieved
     (`DISABLED`) and one that did (`FTS5_LEXICAL`), reproducing the scenario
-    `TECHNICAL_SPEC.md`'s "never... mix modes in one benchmark aggregate"
+    this project's "never mix modes in one benchmark aggregate"
     rule forbids blending. Before this fix, `summarize_paired_evaluation`
     partitioned by arm alone, so both records would have landed in one
     `tool_enabled` bucket with no way to tell the two retrieval modes

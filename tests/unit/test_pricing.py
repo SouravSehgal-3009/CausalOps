@@ -140,7 +140,7 @@ def test_a_settled_request_never_costs_more_than_its_own_reservation() -> None:
 
 
 def test_claude_sonnet_5_pricing_names_a_source_and_a_date() -> None:
-    # `TECHNICAL_SPEC.md` section 10: "Record ... the pricing source/date."
+    # Every evaluation record must carry the pricing source and date.
     assert CLAUDE_SONNET_5_PRICING.source.startswith("https://")
     assert CLAUDE_SONNET_5_PRICING.verified_on
     assert CLAUDE_SONNET_5_PRICING.model_name == "claude-sonnet-5"

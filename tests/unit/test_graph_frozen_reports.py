@@ -1,7 +1,7 @@
 """The graph reproduces the loop's own recorded outcome on five scripts.
 
 Earlier in this project's history, this file ran the loop and the graph side by
-side and compared their live output (`TECHNICAL_SPEC.md` §12's bounded
+side and compared their live output (the bounded
 tool-graph parity gate for retiring `workflow.py`). That gate is now met -- a
 144-pair differential sweep found zero divergence across 13 dimensions -- and
 this file was converted accordingly: each scenario below now runs the graph
@@ -66,8 +66,7 @@ What each test pins, and what it does not:
   run for `d6f06cd`, an identical tree, measured 0 ms on Linux and passed.
   `0` was never a frozen fact about the graph; it was an assertion that the
   test machine is fast. This file's own stated contract is why fixing it
-  here is legitimate rather than a quiet literal update -- see
-  `TECHNICAL_OVERVIEW.md`'s own record of this fix for the full account. No
+  here is legitimate rather than a quiet literal update. No
   other literal moved alongside this fix: ids, digests, disposition, receipt
   shapes and evidence kinds were unaffected, and
   `test_a_simulated_slow_machine_still_matches_the_frozen_report` below

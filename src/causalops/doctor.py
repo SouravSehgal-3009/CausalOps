@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict
 
 from causalops.system_probe import SystemProbe
 
-# TECHNICAL_OVERVIEW.md's Supported development platforms section states the
-# memory thresholds in GiB and the disk threshold in GB, so memory uses 1024**3
-# and disk uses 10**9 on purpose.
+# Memory is reported in GiB (binary, 1024**3) and disk in GB (decimal,
+# 10**9) -- the two units operating systems and disk vendors conventionally
+# use for each, so the byte math below deliberately uses different bases.
 MINIMUM_TOTAL_MEMORY_BYTES = int(7.5 * 1024**3)
 ADVISORY_AVAILABLE_MEMORY_BYTES = int(2.5 * 1024**3)
 MINIMUM_FREE_DISK_BYTES = 12 * 10**9
@@ -128,9 +128,11 @@ def check_operating_system(probe: SystemProbe) -> CheckResult:
     `platform.system()`/`release()`/`machine()` return an empty string, never
     raise, when a value cannot be determined -- an empty `system` is the one
     case this refuses. `release`/`machine` being blank does not fail the
-    check; the message just omits whichever part is missing. See
-    "Supported development platforms" in TECHNICAL_OVERVIEW.md for why this
-    check carries no OS/build/architecture allowlist.
+    check; the message just omits whichever part is missing. No specific OS,
+    Windows build, or CPU architecture is allowlisted -- every capability
+    CausalOps actually needs (Docker, memory, disk, writable directories) has
+    its own explicit check instead, so a coarse platform-name check would
+    only add false refusals, not real safety. See README.md's Setup section.
     """
     found = probe.operating_system()
     if not found.system:

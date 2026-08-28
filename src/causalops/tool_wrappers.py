@@ -1,6 +1,6 @@
 """The only path from a parsed tool proposal to a backend.
 
-`TECHNICAL_SPEC.md` §5 makes a direct backend binding a critical trust-boundary
+A direct backend binding is a critical trust-boundary
 violation: a dispatch node may reach a backend only through a policy wrapper,
 never a bare backend function. This module is that wrapper for all five
 registered tools. The shape was proven against `query_logs` and a real backend
@@ -534,8 +534,8 @@ def _make_wrapper[ArgsT: BaseModel](
 
         if isinstance(outcome, RunbookCheckOutcome):
             # The retrieval branch: a passage is guidance, never `Evidence`
-            # -- `TECHNICAL_SPEC.md` §6/§7 draw that line, `EvidenceKind`'s
-            # own docstring explains why nothing here can blur it.
+            # -- `EvidenceKind`'s own docstring explains why nothing here
+            # can blur that line.
             # `result_digest`/`evidence_id` stay `None` regardless of
             # outcome, matching `Evidence`-free settlement; `retrieval_mode`
             # is carried onto `DispatchResult` from the outcome even when

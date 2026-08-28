@@ -543,10 +543,10 @@ def test_an_evaluation_record_keeps_the_expected_outcome_beside_the_scores() -> 
 
 
 def test_an_evaluation_record_carries_the_full_reproducibility_manifest() -> None:
-    """`TECHNICAL_SPEC.md` §10: "Record Git SHA, clean/dirty status,
+    """The full reproducibility manifest: Git SHA, clean/dirty status,
     fixture/prompt/policy/tool versions, retrieval mode/corpus version,
-    exact model, tokens, latency, cost, and raw artifact references.
-    Include the pricing source/date and configured ceiling." Tokens and
+    exact model, tokens, latency, cost, raw artifact references,
+    pricing source/date, and configured ceiling. Tokens and
     latency are proven on `scores.efficiency` by
     `test_efficiency_reports_what_the_run_actually_spent` above; this test
     proves the rest actually lands on the record, not just that the record
@@ -779,8 +779,8 @@ def _summary_record(
 
 
 def test_summarize_evaluation_reports_counts_and_ranges() -> None:
-    """`TECHNICAL_SPEC.md` §10: "Report counts and ranges for small
-    samples." A mix of correct/incorrect diagnoses and dispositions, with
+    """Report counts and ranges for small
+    samples. A mix of correct/incorrect diagnoses and dispositions, with
     one run's `actual_usd` unknown (never fully settled), proves both the
     counts and the ranges land correctly -- and that the unknown-cost run
     is reported as unknown, not excluded or zeroed."""
@@ -862,9 +862,9 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
 
 
 def test_summarize_evaluation_reports_citation_and_control_aggregates() -> None:
-    """`TECHNICAL_SPEC.md` §10 requires "citation validity and
-    citation sufficiency against required-evidence predicates" and
-    "policy/control behavior" as mechanical scores alongside
+    """Citation validity and
+    citation sufficiency against required-evidence predicates, and
+    policy/control behavior, are required mechanical scores alongside
     diagnosis/disposition -- `EvaluationSummary` had neither before this
     fix. Two records with deliberately different, non-default citation and
     control values prove the aggregates are computed from the records, not

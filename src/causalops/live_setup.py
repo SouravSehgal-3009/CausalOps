@@ -52,14 +52,13 @@ REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
 # `.env.example`-documented, application-wide, covering standalone
-# and paired-evaluation runs together (`TECHNICAL_SPEC.md` §10). Only an
+# and paired-evaluation runs together. Only an
 # ABSENT or BLANK `LIVE_EVALUATION_MAX_USD` silently falls back to the
 # default below -- an owner who never set the variable, or set it to
 # whitespace, gets the documented default rather than a startup failure.
 # That default was raised from 2.00 to 5.00, re-derived from a real
-# smoke call's measured per-call reservation size after the ratio replan;
-# the calibration record is in `TECHNICAL_OVERVIEW.md`. Extracted
-# here from `cli.py`, still the one ceiling both `causalops` and
+# smoke call's measured per-call reservation size after the ratio replan.
+# Extracted here from `cli.py`, still the one ceiling both `causalops` and
 # `causalops-evaluate` read.
 #
 # Every malformed or unusable shape -- unparseable text, a non-finite value
@@ -73,9 +72,7 @@ REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 # suggested they wanted. Only unset/blank still defaults, because there
 # both "the value the owner typed" and "the value the owner is implicitly
 # asking for" are the same thing -- nothing was typed, so there is no wrong
-# signal to silently override. Full design rationale is in
-# `TECHNICAL_OVERVIEW.md`'s
-# "Live-evaluation cost ceiling validation" section.
+# signal to silently override.
 #
 # A well-formed, finite, positive value can still be unusable: `cost_ledger.
 # record_reservation_before_request` always subtracts `cost_ledger.

@@ -342,7 +342,7 @@ def test_an_explicit_investigation_id_becomes_the_report_id_and_the_thread_id(
 
 
 def test_run_id_is_present_and_distinct_from_investigation_id(tmp_path: Path) -> None:
-    """`run_id` is `TECHNICAL_SPEC.md:140-142`'s own requirement and is not
+    """`run_id` is a distinct, required `GraphState` field and is not
     exposed on `InvestigationReport` -- the only way to observe it is through
     the checkpointed `GraphState` a real checkpointer records. This does not
     (and, before a resume path exists with something to diverge

@@ -54,28 +54,29 @@ class EvidenceKind(StrEnum):
     LOG = "LOG"
     CHANGE = "CHANGE"
 
-    # Deliberately no RUNBOOK member. `TECHNICAL_SPEC.md` §6 draws the line
-    # in words -- "An Evidence record is an incident-scoped observation ...
-    # A RunbookPassage is guidance ... it can never prove an incident cause
-    # or satisfy an incident-evidence predicate" -- and `RunbookCheckOutcome`
-    # below draws it in types: it has no `kind` field at all, so nothing can
+    # Deliberately no RUNBOOK member. An `Evidence` record is an
+    # incident-scoped observation gathered by a diagnostic check; a
+    # `RunbookPassage` is retrieved guidance and can never prove an incident
+    # cause or satisfy an incident-evidence predicate, so it must never be
+    # constructible as an `Evidence.kind`. `RunbookCheckOutcome` below draws
+    # that same line in types: it has no `kind` field at all, so nothing can
     # construct a runbook result that would reach `evidence.py`'s
     # `CONTEXT_QUOTAS[record.kind]` lookup. Adding a member here would give
     # runbook text a `CheckOutcome.kind` to travel under, undoing that.
 
 
 class RetrievalMode(StrEnum):
-    """`TECHNICAL_SPEC.md` §7's three literal values. `DISABLED` is the
-    default and means retrieval was never dispatched this run -- no
-    `search_runbooks` proposal was ever allowed and settled. It does
-    *not* mean "found nothing": a proposal that ran in `FTS5_LEXICAL` mode
-    and retrieved zero passages is `FTS5_LEXICAL`, not `DISABLED` --
-    that case is `RETRIEVAL_COVERAGE_INSUFFICIENT` instead, a different
-    fact about the same run. §7's own text, "`disabled` means no runbook
-    passage was retrieved," reads ambiguously between these two cases;
-    this codebase resolves it to "never dispatched." See `graph.py`'s
-    `dispatch_tool` for where this is set, from the backend's own
-    configuration rather than from what it found."""
+    """Which runbook-retrieval backend served this run, or `DISABLED` if
+    none did. `DISABLED` is the default and means retrieval was never
+    dispatched this run -- no `search_runbooks` proposal was ever allowed
+    and settled. It does *not* mean "found nothing": a proposal that ran in
+    `FTS5_LEXICAL` mode and retrieved zero passages is `FTS5_LEXICAL`, not
+    `DISABLED` -- that case is `RETRIEVAL_COVERAGE_INSUFFICIENT` instead, a
+    different fact about the same run. "Disabled" could otherwise read
+    ambiguously between "never dispatched" and "dispatched but found
+    nothing"; this codebase resolves it to "never dispatched." See
+    `graph.py`'s `dispatch_tool` for where this is set, from the backend's
+    own configuration rather than from what it found."""
 
     DISABLED = "disabled"
     FTS5_LEXICAL = "fts5_lexical"
@@ -177,8 +178,7 @@ class ReasonCode(StrEnum):
     # whether raising `Budgets.model_calls` would even help (it would not).
     COST_CEILING_EXCEEDED = "COST_CEILING_EXCEEDED"
     # The rendered request's pessimistic token estimate exceeded
-    # the 9,600-token input cap (`pricing.MAX_INPUT_TOKENS`,
-    # `TECHNICAL_OVERVIEW.md`'s "Default limits" table). Its own code, not
+    # the 9,600-token input cap (`pricing.MAX_INPUT_TOKENS`). Its own code, not
     # `COST_CEILING_EXCEEDED`: one is about a dollar balance across every
     # run this application has made, the other is about one request's shape
     # regardless of what anything has ever cost -- an owner reading
@@ -209,13 +209,16 @@ class ReasonCode(StrEnum):
 
 
 class GraphPhase(StrEnum):
-    """The LangGraph phases from `TECHNICAL_SPEC.md` §5's diagram.
+    """The LangGraph phases of the investigation workflow: existing CLI /
+    report -> investigator -> policy-wrapped read-only tools -> investigator
+    -> normalized evidence -> final assessment -> escalation interrupt ->
+    report.
 
-    This describes the graph the spec defines, not just what `graph.py`
-    builds today. Names every phase a state machine can reach, including
-    ones no code visits yet -- the same precedent `InvestigationState`, the
-    retired loop orchestrator's own state enum, set before it was removed
-    once `workflow.py` no longer used it.
+    This describes the graph the workflow's own design defines, not just
+    what `graph.py` builds today. Names every phase a state machine can
+    reach, including ones no code visits yet -- the same precedent
+    `InvestigationState`, the retired loop orchestrator's own state enum,
+    set before it was removed once `workflow.py` no longer used it.
     """
 
     CREATED = "CREATED"
@@ -228,8 +231,8 @@ class GraphPhase(StrEnum):
 
 
 class EscalationReason(StrEnum):
-    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, all four
-    now reachable.
+    """The four deterministic conditions under which an investigation pauses
+    for owner escalation, all four now reachable.
 
     `graph.py`'s `_escalation_reason` checks a receipt outcome, the model's
     own disposition, and its own contrary-citation list for the first
@@ -244,8 +247,9 @@ class EscalationReason(StrEnum):
     """
 
     CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
-    # `TECHNICAL_SPEC.md` §8 mandates this exact literal, which is also
-    # `ReasonCode.TOOL_UNAVAILABLE`'s value. Both are `StrEnum`, so
+    # Deliberately the same literal as `ReasonCode.TOOL_UNAVAILABLE`'s
+    # value -- both name the same underlying fact from two different
+    # vocabularies. Both are `StrEnum`, so
     # `EscalationReason.TOOL_UNAVAILABLE == ReasonCode.TOOL_UNAVAILABLE` is
     # `True` (plain string equality) even though they are different classes
     # and `is` says they are not the same member -- a trap for an `==`
@@ -270,10 +274,10 @@ class Budgets(BaseModel):
     # `policy.py`'s new `SearchRunbooksArguments` branch checks
     # `arguments.limit` against this, the same role `log_rows` plays for
     # `QueryLogsArguments.row_limit`. A `search_runbooks` call still spends
-    # one of the two `executed_tools` slots above -- `TECHNICAL_SPEC.md` §5
-    # is explicit that runbook retrieval counts against that shared budget,
-    # not a separate one -- this only bounds how many passages one call may
-    # ask for.
+    # one of the two `executed_tools` slots above -- runbook retrieval
+    # counts against that same shared per-investigation budget, not a
+    # separate one -- this only bounds how many passages one call may ask
+    # for.
     runbook_passages: int = 5
     repairs: int = 1
     log_rows: int = 40
@@ -464,10 +468,10 @@ class ToolProposal(BaseModel):
 
 class ReceiptState(StrEnum):
     """Has this check run yet? Separate from `ToolOutcome`, which answers what
-    happened once it did. `TECHNICAL_SPEC.md` §5 requires a wrapper to reserve
-    budget before it calls a backend; `RESERVED` is that reservation made
-    visible, so a crash between reserving and settling still leaves a receipt
-    instead of vanishing silently (see `tool_wrappers.py`)."""
+    happened once it did. A wrapper must reserve budget before it calls a
+    backend; `RESERVED` is that reservation made visible, so a crash between
+    reserving and settling still leaves a receipt instead of vanishing
+    silently (see `tool_wrappers.py`)."""
 
     RESERVED = "RESERVED"
     SETTLED = "SETTLED"
@@ -651,8 +655,8 @@ class FinalAssessment(BaseModel):
             "investigation."
         ),
     )
-    # `TECHNICAL_SPEC.md` §7: "The final assessment stores incident-evidence
-    # citations separately from runbook-guidance citations." Deliberately
+    # The final assessment stores incident-evidence citations separately
+    # from runbook-guidance citations. Deliberately
     # not merged into the two fields above -- `check_terminal_invariants`
     # below is unchanged, so "a diagnosis must cite supporting evidence"
     # still means incident evidence only, and `evaluation.py`'s
@@ -707,8 +711,8 @@ class CheckOutcome(BaseModel):
 
 
 class RunbookPassage(BaseModel):
-    """One retrieved passage of guidance. `TECHNICAL_SPEC.md` §6/§7's
-    contract, verbatim in shape: `passage_id, content, source_version,
+    """One retrieved passage of guidance, carrying the fields a citation
+    needs to be checked and reproduced: `passage_id, content, source_version,
     content_hash, score, retrieval_mode`.
 
     Deliberately not `Evidence`: no `incident_id` (guidance is not
@@ -913,7 +917,7 @@ class EscalatedInvestigation(BaseModel):
     `run_graph_investigation` already has both in hand at pause time, from
     the same state a finished run's report is built from, so carrying them
     costs nothing extra. `checkpoint_id`/`reason`/`remaining_check_count`/
-    `proposal_fingerprint` are `TECHNICAL_SPEC.md` §8's interrupt payload;
+    `proposal_fingerprint` are the LangGraph interrupt's own payload;
     `proposal_fingerprint` is always `None` today -- nothing in the
     codebase can produce a policy-approved next-check proposal at escalation
     time yet (see `graph.py`'s module docstring).

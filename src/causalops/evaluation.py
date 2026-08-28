@@ -155,11 +155,11 @@ class MechanicalScores(BaseModel):
 class EvaluationRecord(BaseModel):
     """One scored run of the paired live comparison.
 
-    The reproducibility fields below are `TECHNICAL_SPEC.md` §10's own list
-    verbatim ("Record Git SHA, clean/dirty status, fixture/prompt/policy/
-    tool versions, retrieval mode/corpus version, exact model, tokens,
-    latency, cost, and raw artifact references. Include the pricing
-    source/date and configured ceiling."). Tokens and latency are already
+    The reproducibility fields below cover everything a reader needs to
+    reconstruct exactly what produced this record: Git SHA, clean/dirty
+    status, fixture/prompt/policy/tool versions, retrieval mode/corpus
+    version, exact model, tokens, latency, cost, raw artifact references,
+    pricing source/date, and configured ceiling. Tokens and latency are already
     on `scores.efficiency`, so they are not repeated here. "Raw artifact
     references" is `investigation_id` itself, not a separate field:
     `run_records.finalize_investigation` already writes every raw artifact
@@ -430,9 +430,9 @@ class EvaluationSummary(BaseModel):
     """Batch-level counts and ranges across every `EvaluationRecord` in one
     `causalops-evaluate` run.
 
-    `TECHNICAL_SPEC.md` §10: "Report counts and ranges for small samples; do
-    not report p95 or broad performance claims from a small synthetic
-    benchmark." This model deliberately has no percentile, mean, or standard
+    Report counts and ranges for small samples; never a p95 or a broad
+    performance claim from a small synthetic benchmark. This model
+    deliberately has no percentile, mean, or standard
     deviation field -- a count and a min-max range are what a corpus this
     size (at most eight records, `EVALUATION_FAMILIES` in `evaluate_cli.py`)
     can honestly support, and adding a statistical field here would invite
@@ -461,10 +461,10 @@ class EvaluationSummary(BaseModel):
     correct_and_grounded_count: int
     diagnosis_correct_count: int
     disposition_correct_count: int
-    # `TECHNICAL_SPEC.md` §10 lists "citation validity and citation
-    # sufficiency against required-evidence predicates" as its own required
-    # mechanical score, alongside diagnosis/disposition -- these were
-    # missing entirely before this fix. `citations_valid_count` is counted
+    # Citation validity and citation sufficiency against required-evidence
+    # predicates are their own required mechanical scores, alongside
+    # diagnosis/disposition -- these were missing entirely before this fix.
+    # `citations_valid_count` is counted
     # the same way as `diagnosis_correct_count`/`disposition_correct_count`
     # above: a simple per-record boolean sum of `MechanicalScores.
     # citations_valid`, so a batch total is the same kind of number, not a
@@ -503,8 +503,8 @@ class EvaluationSummary(BaseModel):
     tools_executed_min: int | None = None
     tools_executed_max: int | None = None
 
-    # `TECHNICAL_SPEC.md` §10's other missing required score: "policy/control
-    # behavior." Each `ControlCounts` field (`evaluation.py`'s own
+    # Policy/control behavior is the other required mechanical score this
+    # summary was missing. Each `ControlCounts` field (`evaluation.py`'s own
     # `count_control`) is already a per-record integer, the same shape as
     # `tools_executed` above -- a min/max range across the batch, not a
     # single summed total, follows this file's existing "counts and ranges

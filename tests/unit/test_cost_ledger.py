@@ -196,9 +196,9 @@ def test_the_ceiling_accounts_for_earlier_reservations_in_the_same_run(
 def test_an_unsettled_reservation_still_counts_against_the_ceiling(
     conn: sqlite3.Connection,
 ) -> None:
-    """`TECHNICAL_SPEC.md` section 5: 'a timeout, crash, or missing provider
-    usage never reissues that key ... the reservation left visible for
-    accounting.' A `RESERVED` row that never settles must still spend its
+    """A timeout, crash, or missing provider usage never reissues that key --
+    the reservation is left visible for accounting. A `RESERVED` row that
+    never settles must still spend its
     share of the ceiling on the next request -- otherwise a crash loop could
     spend past the cap one silently-forgotten reservation at a time."""
     # `ceiling_usd` carries the buffer on top of the 2.00 this test is

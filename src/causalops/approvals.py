@@ -8,10 +8,10 @@ construction, at the CLI boundary -- before either durable write -- so both
 copies hold identical bytes.
 
 This is the first code in the project that takes an authorization
-instruction from outside the process (`TECHNICAL_SPEC.md` §12's dual-review
-trigger for exactly this kind of module): `causalops approve`/`reject` run in
-a second process from the one that paused, with nothing but a thread id and,
-for a reject, free text a person typed.
+instruction from outside the process -- exactly the kind of module that
+warrants independent trust-boundary review: `causalops approve`/`reject` run
+in a second process from the one that paused, with nothing but a thread id
+and, for a reject, free text a person typed.
 
 `CheckpointStoreError`/`CheckpointStoreReasonCode` are named for
 `results/checkpoints.db`, not for "approval," even though they are defined
@@ -228,8 +228,8 @@ def read_decision_for_thread(
     the write, never a later lookup against an already-advanced checkpoint.
     Today's reachable state has at most one decision per thread (there is
     no "approve one more check" path yet -- see `graph.py`'s module
-    docstring and `TECHNICAL_SPEC.md`'s own amendment note), so the most
-    recent row for a thread is unambiguous.
+    docstring for the escalation flow this feeds), so the most recent row
+    for a thread is unambiguous.
     """
     try:
         row = conn.execute(
@@ -275,8 +275,10 @@ def record_decision_before_resume(
     decided_at: datetime,
 ) -> None:
     """Writes one append-only row before the caller ever calls
-    `Command(resume=...)` (`TECHNICAL_SPEC.md:170-172`'s record-before-resume
-    rule) -- no update or delete path exists anywhere in this module.
+    `Command(resume=...)` -- the decision must be durable before the graph
+    resumes, so a crash between the two never leaves an unresumed graph with
+    no record of what the owner decided -- no update or delete path exists
+    anywhere in this module.
 
     Called only after the caller has already confirmed, via
     `read_decision_for_thread`, that no row exists yet for this thread at

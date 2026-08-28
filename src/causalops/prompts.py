@@ -1,7 +1,7 @@
 """Stage instructions and the model-visible context text.
 
 The context carries only incident-scoped facts, plus retrieved
-runbook guidance, which is explicitly not incident-scoped (`TECHNICAL_SPEC.md` §6/§7)
+runbook guidance, which is deliberately not incident-scoped
 but is still fenced as untrusted data alongside it, in the same fence. Scenario
 names, seeds, and expected causes have no place to appear in either.
 """

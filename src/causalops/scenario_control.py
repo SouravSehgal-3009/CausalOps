@@ -138,9 +138,9 @@ def validated_run_paths(root: Path, incident_id: str) -> RunPaths:
 
     This project is a single-operator local CLI, not a networked service,
     so a path-traversal argument here has no separate "attacker" from
-    "victim" the way `reset_scenario`'s destructive `rmtree` does -- see
-    `TECHNICAL_OVERVIEW.md`'s note on this call site for why it is
-    recorded as a defensive check rather than a security boundary. The
+    "victim" the way `reset_scenario`'s destructive `rmtree` does -- it is
+    recorded here as a defensive check rather than a security boundary,
+    since this project has no separate party to defend against. The
     identity-mismatch check this function's callers add afterward
     (comparing the loaded `StoredIncident.scope.incident_id` back against
     `incident_id`) is worth having regardless of the security framing: it

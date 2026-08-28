@@ -1,4 +1,4 @@
-"""`TECHNICAL_SPEC.md` section 11 requires tracing force-disabled at the
+"""Tracing must be force-disabled at the
 entry point, not merely documented. Importing `causalops` at all is that
 entry point (`src/causalops/__init__.py`) -- this proves it actually
 happens, not just that `.env.example` recommends it (`test_env_example.py`

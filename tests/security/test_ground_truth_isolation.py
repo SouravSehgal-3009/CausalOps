@@ -1,6 +1,6 @@
 """Ground truth must stay on the evaluator side of the line.
 
-(TECHNICAL_OVERVIEW.md's Logical ground-truth isolation section.)
+(README.md's "Ground-truth leakage" threat-model row.)
 """
 
 import subprocess
@@ -202,9 +202,8 @@ def test_the_context_fences_telemetry_as_untrusted() -> None:
 
 
 def test_a_retrieved_passage_leaks_no_cause_seed_or_scenario_either() -> None:
-    """`TECHNICAL_SPEC.md` §7 places the same
-    exclusion on the runbook corpus that §6 already places on evidence --
-    this is that claim checked against `render_context`'s actual output
+    """The runbook corpus must exclude ground truth the same way incident
+    evidence does -- this is that claim checked against `render_context`'s actual output
     once a passage is present, the same way the sibling test above checks
     it for evidence, not just against the checked-in corpus file
     (`tests/unit/test_runbooks.py` covers that half)."""

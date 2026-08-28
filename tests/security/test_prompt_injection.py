@@ -1,6 +1,6 @@
 """An instruction hidden inside stored evidence must stay inert.
 
-(TECHNICAL_OVERVIEW.md's Investigator tools and policy section.)
+(README.md's "Prompt injection" threat-model row.)
 
 Telemetry is untrusted data, not instructions. The first test below stores
 evidence whose summary is itself a prompt-injection attempt and drives a real
@@ -218,7 +218,7 @@ def test_policy_denies_an_action_urged_by_a_retrieved_runbook_passage(
 ) -> None:
     """A parallel injection case: the untrusted text this
     time is not stored evidence but a retrieved runbook passage --
-    guidance, not evidence, per `TECHNICAL_SPEC.md` §6/§7 -- and the
+    guidance, not evidence -- and the
     scripted model is the obedient one: its second turn proposes exactly
     the out-of-scope `billing` service the passage's injected text asks
     for, after its first turn retrieved that passage via `search_runbooks`.

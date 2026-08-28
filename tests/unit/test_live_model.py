@@ -1042,7 +1042,7 @@ def test_a_pending_reservation_refuses_to_resend_without_touching_the_transport(
     conn: sqlite3.Connection,
 ) -> None:
     """The double-spend bug.
-    Simulates the exact scenario `TECHNICAL_SPEC.md` §5's idempotency key
+    Simulates the exact scenario the model-request idempotency key
     exists for: a crash between an earlier reserve and its settle, then a
     LangGraph resume that re-renders the identical stage. Pre-inserts a
     `RESERVED` row for exactly the key `propose()` below will compute

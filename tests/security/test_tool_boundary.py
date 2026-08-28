@@ -1,4 +1,4 @@
-"""The tool-policy-bypass control `TECHNICAL_SPEC.md` §9 requires.
+"""The tool-policy-bypass control this project requires.
 
 No tool backend may be reachable except through a policy wrapper. An import
 scan alone cannot prove that: `graph.py` imports no backend module, yet
@@ -6,8 +6,8 @@ reaches every one of them through the registry `cli.py:160`'s
 `dispatch_registry(...)` call builds. Each backend arrives at that call as a
 `lambda` argument, never a name `graph.py` itself imports, and is wrapped by
 a factory into the `ToolWrapper` the registry actually holds -- control #2
-below checks exactly that construction. §9 requires three independent
-controls, and this file is all three:
+below checks exactly that construction. Proving this boundary requires three
+independent controls, and this file is all three:
 
 1. An AST import test -- necessary, not sufficient, for the reason above.
 2. A wrapper-identity test -- every dispatch-registry entry was produced by a
@@ -111,7 +111,7 @@ def out_of_scope_topology_proposal() -> ToolProposal:
 
 def out_of_scope_runbooks_proposal() -> ToolProposal:
     """`search_runbooks` has no service or window either -- guidance is not
-    incident-scoped (`TECHNICAL_SPEC.md` §6/§7). Its one refusable shape is
+    incident-scoped. Its one refusable shape is
     an oversized `limit`, the same `RESULT_LIMIT_EXCEEDED` category
     `QueryLogsArguments.row_limit` already uses, not a new denial category
     invented for this tool alone."""

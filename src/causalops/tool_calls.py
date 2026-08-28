@@ -1,11 +1,11 @@
 """Parses a native provider tool call into a strict registered `ToolProposal`.
 
-`TECHNICAL_SPEC.md` §5 requires the live Claude adapter and the replay adapter
-to speak the same native-tool-call protocol: the model proposes a check by
+The live Claude adapter and the replay adapter must speak the same
+native-tool-call protocol: the model proposes a check by
 calling a registered tool, not by writing a `proposal` field into a structured
 JSON response. `NativeToolCall` models that shape without depending on
 `langchain-core`'s own type, so the replay adapter can emit an
-"equivalent message" as the spec requires without importing anything from the
+equivalent message without importing anything from the
 new dependency the replay adapter deliberately leaves unused.
 
 Nothing here calls a backend or a policy wrapper. This module only answers:

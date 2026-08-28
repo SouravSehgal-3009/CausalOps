@@ -138,8 +138,8 @@ def budget_section(report: InvestigationReport) -> list[str]:
         f"{report.budgets.executed_tools}",
         f"- Invalid responses: {report.invalid_responses}",
         f"- Token usage: {usage_line(report)}",
-        # `TECHNICAL_SPEC.md` §7: "The CLI report ... must surface this
-        # value." Printed even when `disabled` -- an owner should be able to
+        # The CLI report must surface this value.
+        # Printed even when `disabled` -- an owner should be able to
         # tell "retrieval never ran" from "retrieval ran but this section
         # was silently dropped" by reading the report, not by knowing the
         # default.

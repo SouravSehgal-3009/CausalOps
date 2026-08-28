@@ -39,8 +39,9 @@ def test_prometheus_keeps_a_day_of_history() -> None:
     24h covers "run it in the morning, analyse it in the evening." Series
     cardinality growth over the longer window is bounded operationally, not
     by this retention setting -- a documented
-    container restart between evaluation batches is what keeps that in
-    check; see this repo's `TECHNICAL_OVERVIEW.md`."""
+    container restart between evaluation batches (`prometheus` excluded,
+    since it has no data volume mount and a restart would discard its
+    scraped history) is what keeps that in check."""
     command = compose()["services"]["prometheus"]["command"]
 
     assert "--storage.tsdb.retention.time=24h" in command

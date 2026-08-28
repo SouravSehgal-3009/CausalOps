@@ -7,8 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 MAX_INPUT_TOKENS = 9_600
 MAX_OUTPUT_TOKENS = 1_600
 
-# `TECHNICAL_OVERVIEW.md`'s "Default limits" table's own
-# "Model call | 90 seconds" row. Lives beside the
+# The specified model-call timeout: 90 seconds. Lives beside the
 # other two limits above rather than in `live_model.py` for the same reason
 # they do: one file an owner can read to see every number this gate bounds,
 # not three.
@@ -16,10 +15,10 @@ MAX_REQUEST_SECONDS = 90.0
 
 # A one-character ratio is a deliberately conservative empirical estimate,
 # not a universal tokenizer guarantee. Recalibrate only if saved provider usage
-# exceeds it, using that measured artifact rather than a preference. The full
-# calibration record (the 2.26 chars/token smoke-call measurement, and how
-# close a saturated response came to violating the reservation invariant) is
-# in `TECHNICAL_OVERVIEW.md`'s "The smoke call's findings" section.
+# exceeds it, using that measured artifact rather than a preference. This
+# figure comes from a real smoke call's measured 2.26 chars/token ratio, and
+# how close a saturated response came to violating the reservation invariant
+# was checked directly against that same call's own recorded usage.
 PESSIMISTIC_CHARS_PER_TOKEN = 1.0
 
 
@@ -38,11 +37,13 @@ class InputTooLarge(Exception):
     """Refuse an oversized prose request before sending or reserving it.
 
     The input cap excludes tool schemas so normal turns retain their context
-    budget; reservations include every billed schema token separately. Why
-    the tool schema stays out of this cap specifically -- including the
-    worked example of a turn that would actually exceed the folded
-    headroom -- is in `TECHNICAL_OVERVIEW.md`'s "Why the tool schema stays
-    out of MAX_INPUT_TOKENS" section.
+    budget; reservations include every billed schema token separately.
+    Folding the tool schema into this cap would make it unusable rather
+    than safer: the current tool-schema payload alone
+    (`live_model.py`'s `propose()` comment tracks its real size, currently
+    13,404 tokens) already exceeds `MAX_INPUT_TOKENS` (9,600), so a folded
+    cap would refuse every single turn regardless of how little prose
+    content it carried.
     """
 
     def __init__(self, estimated_tokens: int) -> None:
@@ -54,8 +55,8 @@ class InputTooLarge(Exception):
 
 
 class PricingSnapshot(BaseModel):
-    """One model's per-token rate, with the source and date `TECHNICAL_SPEC.md`
-    §10 requires every evaluation record to cite. Frozen so a reservation and
+    """One model's per-token rate, with the source and date every
+    evaluation record must cite. Frozen so a reservation and
     the settlement it is checked against always read the same numbers within
     one process."""
 
@@ -97,7 +98,7 @@ class PricingSnapshot(BaseModel):
 # `claude-sonnet-5`'s standard (post-introductory) per-token rate, confirmed
 # via two independent web searches against platform.claude.com's own pricing
 # page on the date below -- not a figure carried over from training data.
-# `TECHNICAL_SPEC.md` §10 requires this source/date to travel with every
+# This source and date must travel with every
 # evaluation record; re-verify against
 # https://platform.claude.com/docs/en/about-claude/pricing before trusting
 # this snapshot for real spend if much time has passed since `verified_on`.

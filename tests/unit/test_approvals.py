@@ -593,7 +593,7 @@ def test_approve_on_a_never_paused_thread_fails_no_pending_interrupt(
 def test_the_decision_is_recorded_before_the_graph_is_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`TECHNICAL_SPEC.md:170-172`'s record-before-resume rule, pinned
+    """The decision must be durably recorded before the graph resumes, pinned
     behaviourally rather than by call order: `resume_graph_investigation`
     is monkeypatched to crash before it can do anything, standing in for a
     real crash mid-resume. If the decision were recorded *after* resuming

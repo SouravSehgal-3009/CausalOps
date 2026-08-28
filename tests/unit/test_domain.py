@@ -275,8 +275,8 @@ def test_the_alert_packet_names_its_own_initial_evidence() -> None:
 
 
 def test_the_graph_phase_enum_matches_the_seven_phases_in_the_spec() -> None:
-    """`TECHNICAL_SPEC.md` §5's diagram, not just what `graph.py`
-    implements -- `graph.py` is the first consumer of this enum."""
+    """The seven phases of the documented LangGraph workflow, not just what
+    `graph.py` implements -- `graph.py` is the first consumer of this enum."""
     assert [phase.value for phase in GraphPhase] == [
         "CREATED",
         "INVESTIGATE",
@@ -289,10 +289,11 @@ def test_the_graph_phase_enum_matches_the_seven_phases_in_the_spec() -> None:
 
 
 def test_the_escalation_reason_enum_matches_the_four_triggers_in_the_spec() -> None:
-    """`TECHNICAL_SPEC.md` §8's four deterministic escalation triggers, named
-    in the order the spec lists them. `graph.py`'s `_escalation_reason` does
+    """The four deterministic escalation triggers, named
+    in `EscalationReason`'s own declaration order. `graph.py`'s
+    `_escalation_reason` does
     *not* check them in this same order -- it checks `TOOL_UNAVAILABLE`
-    first, deliberately ahead of the spec's own listing order, and says why
+    first, deliberately ahead of that declaration order, and says why
     in its own docstring. `RETRIEVAL_COVERAGE_INSUFFICIENT` was unreachable
     until retrieval landed; it is named here anyway, the same
     precedent `GraphPhase` above already sets."""

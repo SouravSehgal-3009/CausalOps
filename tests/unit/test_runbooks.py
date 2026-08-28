@@ -1,6 +1,6 @@
 """`search_runbooks`'s backend: the FTS5 index and the checked-in corpus.
 
-`TECHNICAL_SPEC.md` §7 requires the corpus to exclude expected answers,
+The corpus must exclude expected answers,
 evaluator-only predicates, semantic scenario keys, secrets, and
 controller-only instructions. The isolation tests below check that directly
 against `runbook_corpus.json`'s actual content, not by convention alone --

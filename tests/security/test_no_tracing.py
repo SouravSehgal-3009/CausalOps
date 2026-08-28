@@ -1,5 +1,5 @@
-"""`TECHNICAL_SPEC.md` section 11's second half: "a test proves no tracing
-client is constructed and no tracing request is attempted."
+"""The second half of the no-tracing requirement: a test proves no tracing
+client is constructed and no tracing request is attempted.
 `test_tracing_disabled.py` proved the force-disable mechanism (both env
 variables are set to `"false"` at import time); it could not prove the rest,
 because nothing imported `langchain-core` yet. `graph.py` is the first thing
@@ -13,7 +13,7 @@ through `langgraph -> langchain_core.runnables.base ->
 `langchain-core`, not from any LangGraph code of its own, and it happens
 whether or not tracing is enabled. So a test asserting
 `"langsmith" not in sys.modules` fails, and would be asserting something
-`TECHNICAL_SPEC.md` never actually requires. What section 11 asks for is
+never actually required. The real requirement is
 narrower and is what this file checks: after a full graph run, no
 `langsmith.client.Client` was ever instantiated, no HTTP request left the
 process through the two client libraries LangSmith uses to send traces, and

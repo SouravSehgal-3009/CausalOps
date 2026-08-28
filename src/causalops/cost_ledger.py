@@ -1,19 +1,16 @@
-"""The application-wide cost ledger -- `TECHNICAL_SPEC.md` §10's
-`LIVE_EVALUATION_MAX_USD` gate, and the amended §5 model-request idempotency
-record, unified into one table.
+"""The application-wide cost ledger -- both the `LIVE_EVALUATION_MAX_USD`
+spend gate and the model-request idempotency record, unified into one table.
 
 One row *is* both things at once, not two tables kept in sync: a cost
 reservation only ever exists in the context of one specific model request,
 so the row's primary key -- `(run_id, graph_phase, model_turn,
-context_digest)`, §5's amended key exactly -- is simultaneously "the request
-this reservation belongs to" and "the request this PENDING record is for."
-Splitting them would let a reservation and its request record disagree about
-whether a retry is the same request or a new one.
+context_digest)` -- is simultaneously "the request this reservation belongs
+to" and "the request this PENDING record is for." Splitting them would let a
+reservation and its request record disagree about whether a retry is the
+same request or a new one.
 
 Lives in `checkpoints.db` beside `owner_decisions`
-(`approvals.py`) and LangGraph's own tables -- `TECHNICAL_SPEC.md` §5's
-amendment ("SQLite stores checkpoints and approval/audit records... and the
-application-wide cost ledger") admits exactly this, for the same reason
+(`approvals.py`) and LangGraph's own tables, for the same reason
 `approvals.py`'s docstring already gives for `owner_decisions`: one physical
 file, not a second database.
 
@@ -110,8 +107,7 @@ _LOGGER = logging.getLogger(__name__)
 #     request -- $0.024198 actual against a $0.022168 reservation, a real
 #     smoke call's INITIAL_PLAN turn recomputed at full output
 #     saturation, under the input ratio since tightened by that same
-#     finding (`TECHNICAL_OVERVIEW.md`, "The smoke call's findings") -- was
-#     about $0.002.
+#     finding -- was about $0.002.
 #   - The largest full live run recorded to date, across every model call
 #     it made, totalled $0.059998 (a `configuration_change` run,
 #     4 settled reservations).
@@ -157,8 +153,8 @@ class AmbiguousReservationNotResent(Exception):
     between reserving and settling, followed by a LangGraph resume that
     re-renders the identical stage (same `context_digest`), correctly read
     the SAME ledger row back (no double-counted dollar in this table) but
-    still sent a SECOND real paid request under it -- the exact "reissue an
-    ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids, in the one
+    still sent a SECOND real paid request under it -- exactly the ambiguous,
+    possibly-duplicate model request this project never reissues, in the one
     scenario the idempotency key exists to prevent.
 
     Both states the pre-existing row could be in are refused the same way,
@@ -387,15 +383,15 @@ def run_cost_totals(conn: sqlite3.Connection, run_id: str) -> tuple[float, float
 
 def _reserved_and_settled_total(conn: sqlite3.Connection) -> float:
     """Every dollar this application has ever spent or committed to spend,
-    across every run -- `TECHNICAL_SPEC.md` §10's ceiling is
-    application-wide, not per-investigation, so this sums the whole table,
-    not one `run_id`.
+    across every run -- `LIVE_EVALUATION_MAX_USD` is an application-wide
+    ceiling, not per-investigation, so this sums the whole table, not one
+    `run_id`.
 
     A still-`RESERVED` row (never settled -- a crash, a timeout, missing
     provider usage) counts at its `reserved_usd` amount, unchanged from this
-    function's original behaviour: §10's own "ambiguous requests retain [the
-    reservation]" rule -- or a crash loop could spend past the cap one
-    silently-forgotten reservation at a time.
+    function's original behaviour: an ambiguous, never-settled request keeps
+    its reservation rather than releasing it -- or a crash loop could spend
+    past the cap one silently-forgotten reservation at a time.
 
     A `SETTLED` row counts at `max(reserved_usd, actual_usd)`, not
     `reserved_usd` alone. The reservation is meant to be a conservative
@@ -476,8 +472,8 @@ def record_reservation_before_request(
     `live_model.py`'s `_send` sent the request unconditionally either way
     -- a crash-then-resume with the same `context_digest` reserved against
     the same row correctly (no double-counted dollar in this table) but
-    still invoked the provider a second time for real money, the exact
-    "reissue an ambiguous model request" `TECHNICAL_SPEC.md` §5 forbids.
+    still invoked the provider a second time for real money -- exactly the
+    ambiguous, possibly-duplicate model request this project never reissues.
     This function still owns only the ledger's bookkeeping -- whether to
     actually send is `_send`'s decision, informed by the `is_new` flag this
     now returns, the same division of responsibility `CostCeilingExceeded`

@@ -2115,7 +2115,7 @@ def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
 def test_a_zero_passage_runbook_search_triggers_retrieval_coverage_insufficient(
     tmp_path: Path,
 ) -> None:
-    """`TECHNICAL_SPEC.md` §8's fourth trigger.
+    """`RETRIEVAL_COVERAGE_INSUFFICIENT`, the fourth `EscalationReason` trigger.
     A `search_runbooks` call that is allowed and settles but
     returns zero passages must pause the run even though the diagnosis
     itself is otherwise ordinary -- `DIAGNOSED`, no contrary citations, no

@@ -1,7 +1,7 @@
-"""This module's half of the "Credential leakage" threat-model row
-(`TECHNICAL_OVERVIEW.md`): "Environment-only API key plus redaction; verify
+"""This module's half of the "Provider and secret leakage" row in README.md's
+threat-model summary: environment-only API key plus redaction; verify
 it never reaches CLI text, config, artifacts, logs, reports, receipts, or
-errors."
+errors.
 
 `LiveClaudeModel` (`live_model.py`) never reads `ANTHROPIC_API_KEY` itself --
 it constructs a bare `ChatAnthropic(model_name=..., ...)` with no
@@ -48,7 +48,7 @@ def test_the_live_adapter_never_names_the_api_key_variable_in_code() -> None:
     variable name never appears as an actual code-level string literal,
     only in prose. If this ever legitimately needs to change (e.g. an
     explicit `anthropic_api_key=` for a future multi-key scenario), the
-    credential leakage row in `TECHNICAL_OVERVIEW.md` needs a real
+    the "Provider and secret leakage" threat-model row needs a real
     redaction test to replace this one, not a deleted assertion.
     """
     for node in ast.walk(LIVE_MODEL_AST):

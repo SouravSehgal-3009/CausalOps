@@ -4,10 +4,10 @@ before this module.
 
 This file was built beside `workflow.py`'s `Investigation` loop, unchanged, so
 an owner could run either path against the same incident and compare --
-`TECHNICAL_SPEC.md` §12 calls this bounded tool-graph parity, demonstrated
-with a 144-pair differential sweep across 13 dimensions before the loop was
-retired, `workflow.py` and `cli.py`'s `--orchestrator` flag included. This
-file is now the only orchestrator.
+bounded tool-graph parity, demonstrated with a 144-pair differential sweep
+across 13 dimensions before the loop was retired, `workflow.py` and
+`cli.py`'s `--orchestrator` flag included. This file is now the only
+orchestrator.
 
 Graph state is a JSON-only `TypedDict`: nothing here lives off-state.
 `tool_wrappers.py`'s `ReservationLedger` and `evidence.py`'s `EvidenceStore`
@@ -137,13 +137,12 @@ class GraphState(TypedDict):
     """
 
     investigation_id: str
-    # `TECHNICAL_SPEC.md:140-142` requires this as a distinct, immutable field
-    # alongside `investigation_id`/`thread_id`. Today they are minted
+    # Deliberately a distinct, immutable field alongside
+    # `investigation_id`/`thread_id`. Today they are minted
     # together and never diverge -- there is no resume path yet for them to
-    # diverge across. The distinction becomes load-bearing once
-    # the model-request idempotency key is `run_id + graph_phase +
-    # model_turn` (`TECHNICAL_SPEC.md:155-158`); this field exists now so
-    # that key has something stable to name.
+    # diverge across. The distinction is already load-bearing: `cost_ledger.
+    # py`'s model-request idempotency key is `(run_id, graph_phase,
+    # model_turn, context_digest)`, so this field is what that key names.
     run_id: str
     incident_id: str
     # Set once, in `run_graph_investigation`'s `initial_state`,
@@ -1286,13 +1285,13 @@ def _escalation_reason(
     budgets: Budgets,
     retrieved_passage_count: int,
 ) -> EscalationReason | None:
-    """`TECHNICAL_SPEC.md` §8's four triggers, all four now reachable.
-    `EscalationReason`'s own member order follows the
-    spec's listing (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
+    """The four `EscalationReason` triggers, all four now reachable.
+    `EscalationReason`'s own member declaration order in `domain.py`
+    (`CONFLICTING_EVIDENCE`, `TOOL_UNAVAILABLE`,
     `INSUFFICIENT_EVIDENCE_WITH_CHECK_REMAINING`,
-    `RETRIEVAL_COVERAGE_INSUFFICIENT`); the checks below deliberately do
-    not -- `TOOL_UNAVAILABLE` is checked first, ahead of the spec's own
-    listing order, and `RETRIEVAL_COVERAGE_INSUFFICIENT` is checked
+    `RETRIEVAL_COVERAGE_INSUFFICIENT`) is not the order these checks run
+    in -- `TOOL_UNAVAILABLE` is checked first, ahead of its declaration
+    order, and `RETRIEVAL_COVERAGE_INSUFFICIENT` is checked
     immediately after it, for the same reason. Pure, and called from both
     the router (to pick the edge) and the node (to build the `interrupt()`
     payload) -- the same reuse `_tools_left` already gets elsewhere in this
@@ -1309,7 +1308,7 @@ def _escalation_reason(
     choice, not an oversight: if this trigger is ever changed to read
     citations instead, a hallucinated `passage_id` becomes a way to
     manufacture (or dodge) an owner-facing escalation -- talking past the
-    owner gate `TECHNICAL_SPEC.md` §8 exists to guarantee. It is exactly
+    owner gate this trigger exists to guarantee. It is exactly
     why `_build_report`'s own unresolved-citation check (see its docstring)
     is allowed to be non-fatal: nothing about a forged citation can move
     this trigger, because this trigger never looks at citations at all. The
@@ -1394,16 +1393,16 @@ def _make_escalation_interrupt(budgets: Budgets, event_clock: Clock) -> GraphNod
         assert reason is not None
 
         # Everything above this line is a pure read of state -- no
-        # `recorder.event`, no reservation, no write. `TECHNICAL_SPEC.md`
-        # §5 requires an interrupt node to be side-effect-free before
-        # calling `interrupt()`, and a probe against the installed
-        # LangGraph confirmed why: only this node re-runs on resume, from
-        # its own top, so anything written here would run twice. The
-        # payload itself mirrors §8's interrupt-payload fields this
-        # codebase can supply today; `thread_id`/`run_id`/`checkpoint_id` are
-        # not included here because the node has no way to know its own
-        # checkpoint id before it exists -- `run_graph_investigation`
-        # attaches all three once `.invoke()` returns.
+        # `recorder.event`, no reservation, no write. An interrupt node
+        # must be side-effect-free before calling `interrupt()`, and a
+        # probe against the installed LangGraph confirmed why: only this
+        # node re-runs on resume, from its own top, so anything written
+        # here would run twice. The payload itself carries the interrupt
+        # fields this codebase can supply today; `thread_id`/`run_id`/
+        # `checkpoint_id` are not included here because the node has no
+        # way to know its own checkpoint id before it exists --
+        # `run_graph_investigation` attaches all three once `.invoke()`
+        # returns.
         payload: dict[str, JsonValue] = {
             "reason": reason.value,
             "evidence_ids": [record.evidence_id for record in store.ordered()],
@@ -1571,8 +1570,8 @@ def _make_route_after_final_assessment(
     budgets: Budgets, *, suppress_escalation: bool = False
 ) -> Callable[[GraphState], str]:
     """`suppress_escalation` is the scored-run mode's only real
-    mechanism: `TECHNICAL_SPEC.md` §10 requires the paired live comparison to
-    "not invoke the escalation path." Set `True`, this router never reaches
+    mechanism: the paired live comparison must never invoke the escalation
+    path. Set `True`, this router never reaches
     `_escalation_reason` at all -- not "compute the reason but ignore it,"
     which would still leave a way for a future edit to accidentally wire the
     result back in, but skip the call entirely, so a scored run's route to
@@ -1641,9 +1640,9 @@ def build_graph(
     `no_tool_baseline=True` builds a strictly smaller graph -- `investigate`,
     `dispatch_tool`, and `normalize_evidence` are never added as nodes at
     all, not merely left unreached, and `START` edges directly to
-    `final_assessment` -- because `TECHNICAL_SPEC.md` §10's no-tool baseline
-    has to mean the model never sees a domain-tool schema, not "tools bound
-    but budget exhausted." `_make_final_assessment` already tolerates empty
+    `final_assessment` -- because a genuine no-tool baseline has to mean the
+    model never sees a domain-tool schema, not "tools bound but budget
+    exhausted." `_make_final_assessment` already tolerates empty
     receipts/evidence/passages at `model_turn=0` on every existing call
     path (a `final_assessment` reached after zero investigate turns is not a
     new state this graph has never produced), so no node factory changes are
@@ -1653,14 +1652,12 @@ def build_graph(
     purpose -- it still tells the model it "may ask for registered
     read-only checks by name and typed arguments" even though
     `no_tool_baseline=True` never binds a single one. This is
-    deliberately kept identical, not overlooked: `TECHNICAL_SPEC.md`'s
-    paired-comparison rule requires identical model, initial packet,
-    budgets, taxonomy, and safe prompt constraints wherever applicable, and
-    the prompt itself is one of those constraints -- diverging it between
-    the two conditions, even just to drop a sentence that no longer
-    applies, would itself become the confound this comparison exists to
-    avoid. See `TECHNICAL_OVERVIEW.md`'s section on the paired live
-    comparison for the full reasoning.
+    deliberately kept identical, not overlooked: a paired comparison
+    requires identical model, initial packet, budgets, taxonomy, and safe
+    prompt constraints wherever applicable, and the prompt itself is one of
+    those constraints -- diverging it between the two conditions, even just
+    to drop a sentence that no longer applies, would itself become the
+    confound this comparison exists to avoid.
 
     `suppress_escalation=True` is unrelated to topology -- see
     `_make_route_after_final_assessment`'s own docstring for the mechanism.
@@ -1930,11 +1927,10 @@ def run_graph_investigation(
     these two, because a scored run that never pauses has nothing to
     resume.
 
-    `investigation_id` doubles as LangGraph's own `thread_id`
-    (`TECHNICAL_SPEC.md:140-142`). It is `None` for every caller today --
-    minting a fresh one is what every existing caller already gets -- and
-    becomes a real input once the resume path needs to reopen a
-    specific thread rather than start a new one.
+    `investigation_id` doubles as LangGraph's own `thread_id`. It is `None`
+    for every caller today -- minting a fresh one is what every existing
+    caller already gets -- and becomes a real input once the resume path
+    needs to reopen a specific thread rather than start a new one.
 
     `model_name` is defaulted, not required: it exists so
     `GraphState["model_name"]` carries the label a resumed thread's artifact
@@ -2074,15 +2070,16 @@ def resume_graph_investigation(
     ever called, so `escalation_interrupt`'s own resume-parsing loop
     (`_parse_resume_decision`) exits on the first pass and the run falls
     straight through to `final_report` -- there is no path back to a second
-    pause in this graph (the spec's "approve one additional check"
-    route to `DISPATCH_TOOL` does not exist yet; see this module's
-    docstring and `TECHNICAL_SPEC.md`'s own amendment note).
+    pause in this graph (an "approve one additional check" route back to
+    `DISPATCH_TOOL` does not exist yet; see this module's docstring).
 
     `cli.py` owns every guard this function assumes has already passed:
     that `thread_id` names a real, pending interrupt, that `decision`/
     `rejection_note` are a validated pair, and that the owner's decision is
     already durably recorded in `owner_decisions` before this function is
-    ever called (`TECHNICAL_SPEC.md:170-172`'s record-before-resume rule).
+    ever called -- the decision must be durable before the graph resumes,
+    the same record-before-resume rule `approvals.py`'s
+    `record_decision_before_resume` establishes.
     This function's only job is the graph turn itself -- the assertion
     below is a "recompute, don't trust the caller" check of the one
     precondition (a real checkpoint exists) that would otherwise fail

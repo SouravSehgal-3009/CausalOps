@@ -1,7 +1,7 @@
 """`causalops-evaluate`: the paired live comparison.
 
-`TECHNICAL_SPEC.md` §10: "same model and same answer-neutral initial alert
-compare a no-tool baseline against the tool-enabled LangGraph workflow,"
+Runs the same model against the same answer-neutral initial alert to
+compare a no-tool baseline against the tool-enabled LangGraph workflow,
 over a predefined paired set of held-out incidents, without ever invoking
 the escalation path (HITL is demonstrated and tested separately).
 
@@ -75,10 +75,8 @@ from causalops.scenario_control import (
 
 # The frozen four-pair held-out corpus. `lab/scenarios/*.json` has exactly
 # these four families today, each already carrying a `seed_variants.
-# evaluation` block distinct from `seed_variants.development` --
-# `TECHNICAL_SPEC.md` §10 permits up to six held-out incidents; this project
-# chose four. Adding a fifth or sixth family later is a one-line change
-# here, not a redesign.
+# evaluation` block distinct from `seed_variants.development`. Adding a
+# fifth or sixth family later is a one-line change here, not a redesign.
 EVALUATION_FAMILIES: tuple[str, ...] = (
     "ambiguous_telemetry",
     "configuration_change",
@@ -86,9 +84,9 @@ EVALUATION_FAMILIES: tuple[str, ...] = (
     "resource_pool_saturation",
 )
 
-# The two arms of the paired comparison, `TECHNICAL_SPEC.md` §10's "same
-# model and same answer-neutral initial alert compare a no-tool baseline
-# against the tool-enabled LangGraph workflow." `_run_one` writes one of
+# The two arms of the paired comparison: the same model and same
+# answer-neutral initial alert, run once with no tools and once through the
+# tool-enabled LangGraph workflow. `_run_one` writes one of
 # these two words as `run_key`'s final `/`-separated segment
 # (`f"{incident_id}/{model_name}/{mode}"`); `_arm_of` below is the one place
 # that reads it back out, so a change to either constant only has to update
@@ -133,9 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _git_provenance(root: Path) -> tuple[str, bool]:
-    """`(sha, dirty)` for `TECHNICAL_SPEC.md` §10's "Record Git SHA,
-    clean/dirty status." A published evaluation record from a dirty tree is
-    not reproducible -- recording both facts here lets whoever reads the
+    """`(sha, dirty)`, recorded so every evaluation record states exactly
+    what code produced it. An evaluation record from a dirty tree is not
+    reproducible -- recording both facts here lets whoever reads the
     record judge that for themselves rather than this script silently
     deciding it for them."""
     sha = subprocess.run(
@@ -424,7 +422,8 @@ def _range_str(low: float | int | None, high: float | int | None) -> str:
 
 def render_evaluation_summary(summary: EvaluationSummary) -> str:
     """Counts and ranges only, one line per figure -- no percentile or mean,
-    per `TECHNICAL_SPEC.md` §10 (see `EvaluationSummary`'s own docstring).
+    since a sample this small (a handful of held-out incidents) cannot
+    support one honestly (see `EvaluationSummary`'s own docstring).
     `causalops doctor`'s `render_report` is this project's other CLI-summary
     formatter; this follows its "one line per fact, plain labels" shape
     rather than inventing a second style.
@@ -499,11 +498,11 @@ _RETRIEVAL_MODE_ORDER: tuple[RetrievalMode, ...] = (
 class EvaluationGroupSummary(BaseModel):
     """One `(arm, retrieval_mode)` group's own batch summary.
 
-    `TECHNICAL_SPEC.md` (line ~281): "Never silently fall back, mix modes in
-    one benchmark aggregate, or represent FTS5 as semantic retrieval."
-    Partitioning summaries by arm alone (`baseline`/`tool_enabled`) is not
-    sufficient, because `retrieval_mode` is not reliably coupled to arm.
-    The no-tool baseline is always `RetrievalMode.
+    A benchmark aggregate must never silently fall back, mix retrieval
+    modes together, or represent FTS5 as semantic retrieval. Partitioning
+    summaries by arm alone (`baseline`/`tool_enabled`) is not sufficient,
+    because `retrieval_mode` is not reliably coupled to arm. The no-tool
+    baseline is always `RetrievalMode.
     DISABLED` structurally: `graph.py`'s baseline path never calls any tool,
     including `search_runbooks`. But within the TOOL-ENABLED arm,
     `retrieval_mode` depends on whether the model actually chose to call
@@ -512,7 +511,7 @@ class EvaluationGroupSummary(BaseModel):
     its initial `DISABLED` default once a retrieval call actually happens).
     So two tool-enabled runs in the same batch can legitimately carry
     different `retrieval_mode` values, and an arm-only partition can
-    silently blend them into one reported figure -- exactly what the spec
+    silently blend them into one reported figure -- exactly what this rule
     forbids. Partitioning by the `(arm, retrieval_mode)` pair instead means
     every group this class represents came from records that share both
     facts, so no group can mix retrieval modes."""
@@ -616,13 +615,13 @@ def render_paired_evaluation_summary(paired: PairedEvaluationSummary) -> str:
     record count -- never a benchmark figure that spans more than one
     retrieval mode. Each group's own label states both facts it was
     partitioned on, so two tool-enabled groups that differ only in
-    retrieval mode -- exactly the case `TECHNICAL_SPEC.md` forbids
-    blending -- render as visibly separate blocks, never one merged
+    retrieval mode -- exactly the blending this project's evaluation
+    reporting forbids -- render as visibly separate blocks, never one merged
     number. The trailing total is a count only, not a call into
     `render_evaluation_summary` (which reports diagnosis/citation/control/
     latency/cost figures) -- see `PairedEvaluationSummary`'s own docstring
     for why even a clearly labeled version of that figure is still the
-    thing the spec forbids."""
+    thing this project's evaluation reporting forbids."""
     blocks = [
         f"[{group.arm}, retrieval_mode={group.retrieval_mode.value}]\n"
         f"{render_evaluation_summary(group.summary)}"
