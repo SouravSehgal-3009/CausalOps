@@ -501,6 +501,10 @@ call.
 The three post-fix batches cost $3.02 in real spend; all six batches in
 this investigation, pre- and post-fix combined, cost $6.40.
 
+All six batches above ran under `PROMPT_VERSION`/`TOOL_REGISTRY_VERSION`
+`"7"`/`"7"`; a run made after these moved to `"8"`/`"8"` is not directly
+comparable to the numbers in this section.
+
 ## Development
 
 ```bash

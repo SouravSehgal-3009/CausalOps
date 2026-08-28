@@ -55,12 +55,22 @@ class ModelRequest(BaseModel):
 
 
 class ModelResponse(BaseModel):
-    """Raw structured content. The caller validates it against the stage schema."""
+    """Raw structured content. The caller validates it against the stage schema.
+
+    `errors` mirrors `ProposedTurn.errors`: set only when `content` is
+    deliberately empty because the adapter itself refused the turn (visible
+    text alongside a tool call, the wrong number of tool calls, a malformed
+    call, or a reserved field the model is not allowed to set) -- the real
+    reason, not the generic "field required" a caller's schema validation
+    would otherwise report in its place. Defaults to `""` so a valid
+    `content` never needs a caller to check it.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     content: dict[str, JsonValue]
     usage: ModelUsage | None = None
+    errors: str = ""
 
 
 class ReasoningModel(Protocol):

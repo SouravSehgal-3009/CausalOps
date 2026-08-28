@@ -303,6 +303,41 @@ event vocabulary are unaffected for all six scenarios -- this fix only changes
 what a `CHANGE` evidence record's `.summary` field says, never whether a check
 executes, what it returns as its typed payload, or which ids the counting-id
 harness mints.
+
+**The co-occurring-causes/contrary-evidence edit moves every
+`final_context_digest` literal below a seventh time, and moves
+`assert_report_matches_frozen`'s `prompt_version` and `tool_registry_version`
+fields, and nothing else.** `SYSTEM_TEXT` (`prompts.py`) gained one paragraph
+telling the model that claiming one allowed cause caused another needs actual
+retrieved evidence, not an assumption, and to answer UNDETERMINED rather than
+collapse two evidenced causes without it -- the same stage-independent
+mechanism as every earlier `SYSTEM_TEXT` edit above, so it shifts every
+digest in this file again. `STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]`
+also gained one sentence asking the model to state contrary evidence for its
+top hypothesis before ranking, which only shifts a turn whose OWN stage is
+`HYPOTHESIS_UPDATE` -- for the five scenarios below whose final turn is
+`Stage.FINAL_ASSESSMENT`, this second edit changes nothing further (their
+digest already moved from the `SYSTEM_TEXT` edit alone); for `test_the_graph_
+reproduces_the_frozen_report_when_the_second_call_raises`, whose final
+(second, raising) turn is a `HYPOTHESIS_UPDATE` turn (see the abstention-
+citation note above for why), both edits land on the same one digest. Net
+effect either way is one new literal per scenario, confirmed by running the
+suite before and after: exactly the six `final_context_digest` literals
+changed and nothing else -- no scenario below proposes `search_runbooks` or
+depends on `contrary_evidence_ids`' presence for its stage sequence, ids,
+disposition, receipt shapes, or event vocabulary. `TOOL_REGISTRY_VERSION`
+also bumped, from renaming `MetricTemplate.DOWNSTREAM_TIMEOUT_RATE` to
+`DOWNSTREAM_TIMEOUT_SHARE` and reformulating its PromQL as a proportion --
+the same reasoning as the two `RESOURCE_POOL_*` metric-template renames
+above: this template id appears only in `QueryMetricArguments`'s own tool
+schema (pinned separately in `test_live_model.py`), never in this file's
+rendered context text or any replay fixture (grep-confirmed), so this bump
+carries no digest movement of its own beyond what the `SYSTEM_TEXT`/
+`STAGE_INSTRUCTIONS` edits above already account for. `POLICY_VERSION` is
+untouched by any of this. `assert_report_matches_frozen`'s `Versions(...)`
+literal moves from `prompt_version="7"`/`tool_registry_version="7"` to
+`prompt_version="8"`/`tool_registry_version="8"`, with `policy_version="4"`
+unchanged.
 """
 
 from pathlib import Path
@@ -648,9 +683,9 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="7",
+        prompt_version="8",
         policy_version="4",
-        tool_registry_version="7",
+        tool_registry_version="8",
     )
 
 
@@ -685,7 +720,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "5e23922a6e074e97bff9f8ddfe95f387fca4e7ea279e36a1ef76f7013b7c66b5"
+            "f78b1a4d91b7f6d71ac48639409fb32a5dd59759b84cf2c992a5b42d0f9bbb15"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -761,7 +796,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "1d148df5d5178a0a0018f548ee8264c07091353fca5e5357046b22c2fc384d58"
+            "afb9f1018cbcda00e480920b32fb90a102e8f6ddcbb4c8d02d70a81ea86e00a1"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -842,7 +877,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "c5763dbd66a075b22af00959f33f4bd28ca0162cedd688e49fd4a5c11af2f36f"
+            "e1d2c57f8a1177ee3ecb23641cead99ce9b9ad49a9ea4f4823133a3a83996a52"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -912,7 +947,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "66751c77d0ff62b0480ad3857e4bf5d8382dd27195c46e7e9f7735f0d5df96a3"
+            "8a3f6d470aa18625eb879b40090d0d6948c9e451f3b99c9456fa9f69770ebb24"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -969,7 +1004,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "3786401ae111fc74873d78f9d9da23ddd5eee316fa8ea88c74b964ce7bf1ddd4"
+            "eba5f8d616199dbfb8414efb63d6ae1ef1a25961a5a52f280cbd2bde146f153b"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -1070,7 +1105,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "3786401ae111fc74873d78f9d9da23ddd5eee316fa8ea88c74b964ce7bf1ddd4"
+            "eba5f8d616199dbfb8414efb63d6ae1ef1a25961a5a52f280cbd2bde146f153b"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

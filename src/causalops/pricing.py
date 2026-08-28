@@ -41,7 +41,7 @@ class InputTooLarge(Exception):
     Folding the tool schema into this cap would make it unusable rather
     than safer: the current tool-schema payload alone
     (`live_model.py`'s `propose()` comment tracks its real size, currently
-    13,714 tokens) already exceeds `MAX_INPUT_TOKENS` (9,600), so a folded
+    13,716 tokens) already exceeds `MAX_INPUT_TOKENS` (9,600), so a folded
     cap would refuse every single turn regardless of how little prose
     content it carried.
     """

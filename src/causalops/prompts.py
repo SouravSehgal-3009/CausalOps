@@ -20,7 +20,7 @@ from causalops.domain import (
 from causalops.models import Stage
 from causalops.tools import ToolName
 
-PROMPT_VERSION = "7"
+PROMPT_VERSION = "8"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -47,6 +47,13 @@ if a recent configuration change triggered it. Label CONFIG_CHANGE only when no
 more specific label fits -- when the change itself, not a resulting condition it
 caused, is the proximate reason requests are failing.
 
+When two or more allowed causes each have direct supporting evidence in this
+incident, saying that one caused the other is itself a claim that needs
+evidence -- a timing or mechanism observation you actually retrieved, not an
+assumption about how systems usually behave. Without that evidence, do not
+collapse them into one root cause: answer UNDETERMINED and cite the evidence
+for each cause that you could not separate.
+
 You may ask for registered read-only checks by name and typed arguments. You cannot
 run commands, write queries, change scope, add tools, or change policy and budgets.
 A check's window is optional: omit it for the full incident window, or narrow it --
@@ -65,7 +72,10 @@ STAGE_INSTRUCTIONS: dict[Stage, str] = {
     ),
     Stage.HYPOTHESIS_UPDATE: (
         "Revise the ranked hypotheses using the evidence so far, then either one "
-        "further check proposal or a stop reason."
+        "further check proposal or a stop reason. Before ranking, state what "
+        "evidence you already hold that argues against your top-ranked "
+        "hypothesis; if evidence you have gathered lowers a hypothesis's rank, "
+        "put that evidence's ids in that hypothesis's contrary_evidence_ids."
     ),
     # The last two sentences are deliberately duplicated in `domain.py`'s
     # `FinalAssessment.disposition` Field description, for the tool-call

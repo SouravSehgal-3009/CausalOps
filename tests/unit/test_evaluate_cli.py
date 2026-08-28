@@ -1125,7 +1125,7 @@ def _paired_record(
                     RequiredEvidencePredicate(
                         source="query_metric",
                         kind=EvidenceKind.METRIC,
-                        template="downstream_timeout_rate",
+                        template="downstream_timeout_share",
                         field="timeouts_per_minute",
                         operator=PredicateOperator.AT_LEAST,
                         value=10,

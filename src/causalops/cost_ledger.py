@@ -113,7 +113,7 @@ _LOGGER = logging.getLogger(__name__)
 #     4 settled reservations).
 #   - The largest theoretical SINGLE-request reservation under the current
 #     pricing snapshot and token caps -- a proposal turn carrying the full
-#     9,600-token prose budget plus the current 13,714-token tool-schema
+#     9,600-token prose budget plus the current 13,716-token tool-schema
 #     payload, at the full 1,600-token output allowance -- prices to about
 #     $0.0626 by `pricing.PricingSnapshot.reservation_usd`'s own formula.
 # $0.10 comfortably clears all three: roughly 50x the one measured overrun,

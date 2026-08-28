@@ -1785,7 +1785,7 @@ def test_a_changes_check_never_surfaces_another_incidents_entries(
 def test_w5_narrows_only_the_two_rate_templates_the_finding_measured(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    """`GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
+    """`GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_SHARE`
     render `[30s]`; `GATEWAY_LATENCY_P95` -- whose own `rate(...)` feeds
     `histogram_quantile`, a different computation this narrowing does not touch
     -- still renders `[1m]`, confirmed directly rather than assumed."""
@@ -1796,7 +1796,7 @@ def test_w5_narrows_only_the_two_rate_templates_the_finding_measured(
         5,
     )
     run_metric_check(
-        metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_RATE),
+        metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_SHARE),
         incident_scope(),
         fake_prometheus.url,
         5,
@@ -1851,15 +1851,41 @@ def test_topology_decides_from_paths_not_the_argument_incident_id(
 # confirm the remaining registered templates and filters run end to end.
 
 
-def test_the_downstream_timeout_rate_template_executes(
+def test_the_downstream_timeout_share_template_executes(
     fake_prometheus: RecordingPrometheus,
 ) -> None:
-    arguments = metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_RATE)
+    arguments = metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_SHARE)
 
     outcome = run_metric_check(arguments, incident_scope(), fake_prometheus.url, 5)
 
     assert outcome.outcome is ToolOutcome.EXECUTED
-    assert outcome.payload["template"] == MetricTemplate.DOWNSTREAM_TIMEOUT_RATE.value
+    assert outcome.payload["template"] == MetricTemplate.DOWNSTREAM_TIMEOUT_SHARE.value
+
+
+def test_the_downstream_timeout_share_query_divides_timeouts_by_all_outcomes(
+    fake_prometheus: RecordingPrometheus,
+) -> None:
+    """Unlike its predecessor `DOWNSTREAM_TIMEOUT_RATE` (an absolute,
+    unbounded rate), `DOWNSTREAM_TIMEOUT_SHARE` is a proportion -- the
+    timeout-outcome rate divided by the all-outcome rate for the same
+    service and incident, with no `outcome` filter on the denominator side,
+    so it reads on the same `[0, 1]` scale `RESOURCE_POOL_ATTEMPTS_PER_
+    CAPACITY` already does."""
+    run_metric_check(
+        metric_arguments(template=MetricTemplate.DOWNSTREAM_TIMEOUT_SHARE),
+        incident_scope(),
+        fake_prometheus.url,
+        5,
+    )
+
+    (query,) = fake_prometheus.queries[-1:]
+    numerator, denominator = query.split(" / ")
+    assert 'outcome="timeout"' in numerator
+    assert "outcome=" not in denominator
+    assert f'incident="{incident_scope().incident_id}"' in numerator
+    assert f'incident="{incident_scope().incident_id}"' in denominator
+    assert "[30s]" in numerator
+    assert "[30s]" in denominator
 
 
 def test_the_resource_pool_attempts_per_capacity_template_executes(

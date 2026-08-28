@@ -1197,6 +1197,8 @@ def _make_final_assessment(
             counters.record_call(digest)
             response = model.respond(request)
             counters.record_usage(response.usage)
+            if response.errors:
+                return None, response.errors
             return parse_response(FinalAssessment, response.content)
 
         def log_invalid(reason: str) -> None:

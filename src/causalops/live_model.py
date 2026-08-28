@@ -209,7 +209,7 @@ def _domain_tool_definitions() -> list[dict[str, Any]]:
     The provider tool name selects the internal argument variant, so the
     duplicate internal `tool` discriminator is deliberately not exposed.
 
-    This is the mechanical reason the emitted schema payload is 13,714
+    This is the mechanical reason the emitted schema payload is 13,716
     tokens (`_send`'s own comment pins the exact figure): Anthropic tool
     schemas are self-contained, with no cross-tool `$ref`, so each of the
     five loop iterations below embeds its own full copy of
@@ -538,19 +538,12 @@ class LiveClaudeModel:
         # every call -- this `tools` list differs by caller, so the fixed
         # payload size differs by STAGE, not one shared figure: `propose()`
         # binds `_stop_tool_definition()` plus the five `_domain_tool_
-        # definitions()`, 13,714 tokens in the current emitted schema
-        # (a `MetricTemplate.RESOURCE_POOL_ATTEMPTS_PER_
-        # CAPACITY` rename -- from `RESOURCE_POOL_UTILIZATION`, a name that
-        # falsely implied boundedness -- added 10 bytes to `query_metric`'s
-        # embedded schema over the prior 12,829; a later change then added a
-        # `Field(description=...)` to `QueryMetricArguments.service` and
-        # `QueryLogsArguments.service`, growing the figure again, 12,839 ->
-        # 13,404; a fourth growth, 13,404 -> 13,714, came from naming the
-        # real budget behind `QueryLogsArguments.row_limit` and
-        # `SearchRunbooksArguments.limit` in prose, and raising
-        # `StopRecord.stop_reason`'s bound from 300 to 600 characters);
-        # `respond()` binds only `_final_assessment_tool_definition()`,
-        # 2,292 tokens in the current emitted schema.
+        # definitions()`, currently 13,716 tokens; `respond()` binds only
+        # `_final_assessment_tool_definition()`, currently 2,422 tokens.
+        # Both figures have grown several times as the tool schema changed
+        # (renamed enum values, added `Field(description=...)` prose, a
+        # raised character bound) -- see git history for the cause behind
+        # any one jump; it is not tracked here.
         # `test_live_model.py` pins both figures separately, so this
         # comment cannot drift from either real payload the way an earlier
         # version of the `propose()` figure already did, three times, and
@@ -638,48 +631,74 @@ class LiveClaudeModel:
 
     def respond(self, request: ModelRequest) -> ModelResponse:
         """FINAL_ASSESSMENT has no proposal to encode -- one forced-shape
-        tool (`record_final_assessment`), no domain tools offered at all."""
+        tool (`record_final_assessment`), no domain tools offered at all.
+
+        Each rejection branch below sets `ModelResponse.errors` to the real
+        reason the turn was refused, mirroring `propose()`'s equivalent
+        branches where one exists -- an empty `content` dict used to fail
+        `FinalAssessment`'s own required-field validation instead
+        (`disposition`/`root_cause: Field required`), which discarded
+        whichever of these five distinct reasons actually happened and fed
+        that generic message back into the repair prompt, where it could not
+        tell the model what to actually correct.
+
+        Branch order matters: `len(message.tool_calls) != 1` is checked
+        before `message.tool_calls[0]` is ever indexed, so the name and
+        `schema_version` checks below can only run once exactly one tool
+        call is confirmed to exist -- indexing an empty `tool_calls` first
+        would raise `IndexError` instead of returning a refusal.
+        """
         message = self._send(request, [_final_assessment_tool_definition()])
         usage = self._usage(message)
         if _has_visible_content(message.content):
-            return ModelResponse(content={}, usage=usage)
-        matching_calls = [
-            call
-            for call in message.tool_calls
-            if call["name"] == RECORD_FINAL_ASSESSMENT_TOOL_NAME
-        ]
-        # No error channel on `ModelResponse` -- an empty `content` dict
-        # fails `FinalAssessment`'s own required-field validation for a
-        # genuine, informative reason (`disposition`/`root_cause` missing)
-        # rather than this module fabricating one. This module used to
-        # take the FIRST matching call via `next(...)`,
-        # silently discarding a second, possibly conflicting, call NAMED
-        # `record_final_assessment` -- the same rule the proposal path's
-        # exact-one-call validation in `propose()` already enforces. Zero
-        # or two-or-more MATCHING calls are refused the same way, through
-        # the same repair path, rather than the codebase silently picking
-        # a winner.
-        #
-        # Checking only the matching-name count is still not enough: a
-        # turn that sends exactly
-        # one `record_final_assessment` call ALONGSIDE some other,
-        # unbound tool name would pass through under a matching-name-only
-        # check, silently dropping the extra call the same way this whole
-        # check exists to prevent. `message.tool_calls`'s installed
-        # client (`langchain-anthropic==1.6.1`, confirmed by reading
-        # `output_parsers.py:80-92`) copies whatever tool name the
-        # provider sends with no validation against the bound list, so
-        # this is not proven reachable offline -- but nothing rules it
-        # out either, and the fix costs one more length check.
-        if (
-            len(message.tool_calls) != 1
-            or len(matching_calls) != 1
-            or message.invalid_tool_calls
-            or "schema_version" in matching_calls[0]["args"]
-        ):
-            return ModelResponse(content={}, usage=usage)
+            return ModelResponse(
+                content={},
+                usage=usage,
+                errors="tool-call response must not include visible text",
+            )
+        if message.invalid_tool_calls:
+            reasons = "; ".join(
+                f"{call.get('name') or '<unnamed>'}: "
+                f"{call.get('error') or 'unparseable'}"
+                for call in message.invalid_tool_calls
+            )
+            return ModelResponse(
+                content={}, usage=usage, errors=f"malformed tool call(s): {reasons}"
+            )
+        if len(message.tool_calls) != 1:
+            return ModelResponse(
+                content={},
+                usage=usage,
+                errors=(
+                    f"the model called {len(message.tool_calls)} tools in one turn; "
+                    "exactly one is required"
+                ),
+            )
+        # Only one tool is bound here (`_final_assessment_tool_definition()`),
+        # so a real Anthropic response can only ever name it -- but
+        # `message.tool_calls`'s installed client (`langchain-anthropic==
+        # 1.6.1`, confirmed by reading `output_parsers.py:80-92`) copies
+        # whatever tool name the provider sends with no validation against
+        # the bound list, so this check is still real defense, not dead
+        # code, against a malformed or test-double response naming the
+        # wrong tool.
+        call = message.tool_calls[0]
+        if call["name"] != RECORD_FINAL_ASSESSMENT_TOOL_NAME:
+            return ModelResponse(
+                content={},
+                usage=usage,
+                errors=(
+                    f"expected {RECORD_FINAL_ASSESSMENT_TOOL_NAME}, got {call['name']}"
+                ),
+            )
+        if "schema_version" in call["args"]:
+            return ModelResponse(
+                content={},
+                usage=usage,
+                errors="schema_version is set by the application; do not send it",
+            )
         return ModelResponse(
-            content={**matching_calls[0]["args"], "schema_version": SCHEMA_VERSION},
+            content={**call["args"], "schema_version": SCHEMA_VERSION},
             usage=usage,
         )
 

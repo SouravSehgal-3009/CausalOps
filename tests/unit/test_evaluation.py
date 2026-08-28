@@ -48,7 +48,7 @@ from causalops.evidence import build_evidence
 from causalops.tools import ToolName
 
 TIMEOUT_PAYLOAD: dict[str, JsonValue] = {
-    "template": "downstream_timeout_rate",
+    "template": "downstream_timeout_share",
     "timeouts_per_minute": 12,
     "note": "inventory timed out repeatedly",
 }
@@ -73,7 +73,7 @@ def timeout_predicate(
     return RequiredEvidencePredicate(
         source="query_metric",
         kind=EvidenceKind.METRIC,
-        template="downstream_timeout_rate",
+        template="downstream_timeout_share",
         field=field,
         operator=operator,
         value=value,
@@ -185,7 +185,7 @@ def test_equals_and_contains_operators() -> None:
         timeout_predicate(
             field="template",
             operator=PredicateOperator.EQUALS,
-            value="downstream_timeout_rate",
+            value="downstream_timeout_share",
         ),
         evidence,
     )
@@ -1143,6 +1143,10 @@ def test_a_pre_f6_record_missing_correct_and_grounded_still_summarizes_correctly
         '"investigation_id": "inv-1", "incident_id": "incident-1", '
         '"expected": {"root_cause": "DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION", '
         '"disposition": "DIAGNOSED", "predicates": [{"source": "query_metric", '
+        # Deliberately still "downstream_timeout_rate", not the renamed
+        # "downstream_timeout_share" used everywhere else in this file --
+        # this fixture simulates a record written before that rename, so
+        # it must keep the pre-rename name. Do not "fix" it to match.
         '"kind": "METRIC", "template": "downstream_timeout_rate", '
         '"field": "timeouts_per_minute", "operator": "AT_LEAST", "value": 10}]}, '
         '"scores": {"diagnosis_correct": true, "disposition_correct": true, '

@@ -72,6 +72,8 @@ from causalops.evaluation import count_control
 from causalops.evidence import build_evidence
 from causalops.graph import GRAPH_RECURSION_LIMIT, build_graph, run_graph_investigation
 from causalops.models import (
+    ModelRequest,
+    ModelResponse,
     ReplayReasoningModel,
     ReplayToolCallingModel,
     Stage,
@@ -1229,6 +1231,69 @@ def test_a_malformed_single_tool_call_consumes_a_repair_then_fail_safe(
     assert report.repairs_used == 1
     assert report.invalid_responses == 2
     assert report.tools_executed == 0
+
+
+class _RespondRejectsOnceModel:
+    """Wraps a `ReplayToolCallingModel` so its FIRST `respond()` call returns
+    a rejected `ModelResponse` carrying a distinguishable `errors` string --
+    the shape `LiveClaudeModel.respond()` returns when a real provider turn
+    is refused (e.g. two tool calls in one FINAL_ASSESSMENT turn) --
+    unreachable through `ReplayToolCallingModel` alone, which never sets
+    `errors`. Every later `respond()` call delegates to the wrapped fixture
+    unchanged, so a repair attempt gets the fixture's own scripted valid
+    response. `respond_requests` records every `ModelRequest` this model
+    itself saw, independent of the wrapped fixture's own bookkeeping, so a
+    test can inspect exactly what the SECOND (repair) request's
+    `repair_errors` field carried."""
+
+    REJECTION_REASON = "the model called 2 tools in one turn; exactly one is required"
+
+    def __init__(self, inner: ReplayToolCallingModel) -> None:
+        self.inner = inner
+        self.respond_requests: list[ModelRequest] = []
+
+    def propose(self, request: Any, schema: Any) -> Any:
+        return self.inner.propose(request, schema)
+
+    def respond(self, request: ModelRequest) -> ModelResponse:
+        self.respond_requests.append(request)
+        if len(self.respond_requests) == 1:
+            return ModelResponse(content={}, usage=None, errors=self.REJECTION_REASON)
+        return self.inner.respond(request)
+
+
+def test_a_response_rejection_reason_reaches_the_repair_prompt_verbatim() -> None:
+    """The centerpiece test for Unit A: `LiveClaudeModel.respond()` refusing
+    a FINAL_ASSESSMENT turn must reach the repair prompt's own `##
+    Correction needed` text as its OWN specific reason, not
+    `FinalAssessment`'s generic Pydantic "root_cause: Field required" that
+    validating an empty `content` dict against the schema would otherwise
+    produce.
+
+    Reverting `graph.py`'s `if response.errors: return None, response.errors`
+    guard back to `return parse_response(FinalAssessment, response.content)`
+    must fail this test: with the guard gone, the repair request's
+    `repair_errors` would carry `parse_response`'s generic field-required
+    summary instead of `_RespondRejectsOnceModel.REJECTION_REASON` verbatim
+    -- proven by mutation testing, not merely asserted here."""
+    inner = fixture_model("valid_diagnosis.json")
+    wrapped = _RespondRejectsOnceModel(inner)
+    registry = registry_with(
+        run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
+    )
+
+    result, _ = investigate_via_graph(wrapped, registry=registry)
+
+    assert len(wrapped.respond_requests) == 2
+    first, repair = wrapped.respond_requests
+    assert first.repair_errors is None
+    assert repair.stage is first.stage
+    assert repair.repair_errors == _RespondRejectsOnceModel.REJECTION_REASON
+
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.repairs_used == 1
+    assert report.invalid_responses == 1
 
 
 def test_a_graphbubbleup_escape_still_syncs_the_callers_recorder() -> None:

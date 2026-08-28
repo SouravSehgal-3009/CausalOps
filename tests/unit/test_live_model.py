@@ -242,12 +242,12 @@ def test_propose_reserves_at_least_the_full_wire_payload(
     conn: sqlite3.Connection,
 ) -> None:
     """Before this fix, `_send` reserved
-    against prose alone, never the current ~13,714-token tool schema `bind_tools`
+    against prose alone, never the current ~13,716-token tool schema `bind_tools`
     also sends on every call -- this would have failed against the frozen
     code (mutation-verified: reverting the reservation math to prose-only
     drops `reserved_usd` well below this floor). See
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` below for
-    the pinned, directly-measured figure this comment's "~13,714" restates
+    the pinned, directly-measured figure this comment's "~13,716" restates
     in prose."""
     model, fake = make_model(conn, [message([stop_call(stop_reason="done")])])
 
@@ -347,45 +347,24 @@ def test_the_tool_payload_size_matches_what_pricingpy_assumes(
 
     (tools,) = fake.bound_tools
     payload = json.dumps(tools)
-    # `QueryMetricArguments`/`QueryLogsArguments`/
-    # `ListRecentChangesArguments` each gained two optional window fields
-    # with their own descriptions, so the emitted schema grew from 12,011 to
-    # 12,824 bytes -- not a drift, the mechanical cost of the window
-    # contract, five-fold-duplicated the same way `_domain_tool_definitions`'s
-    # own docstring already explains for `HypothesesRecord`'s schema.
-    # `MetricTemplate.RESOURCE_POOL_UTILIZATION`
-    # ("resource_pool_utilization", 25 chars, a false claim of boundedness)
-    # was renamed to `RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`
-    # ("resource_pool_attempts_per_capacity", 35 chars, honestly unbounded
-    # above) inside `QueryMetricArguments`'s own schema -- this pinned
-    # literal grew twice for that rename (12,824 -> 12,829 for the
-    # original rename, then 12,829 -> 12,839 once the name was further
-    # revised). `QueryMetricArguments.
-    # service`/`QueryLogsArguments.service` each later gained a `Field(description=...)`
-    # naming which service records which metric/log category -- each appears
-    # once, in only its own tool's schema (query_metric, query_logs), not
-    # duplicated across all five domain tools the way `HypothesesRecord` is.
-    # A third growth (12,839 -> 13,404) is a real drift this pin exists to
-    # catch each time, not one to explain away. A fourth growth (13,404 ->
-    # 13,714) came from naming the real budget behind three previously-
-    # undescribed schema bounds in prose: `QueryLogsArguments.row_limit` and
-    # `SearchRunbooksArguments.limit` each gained a `Field(description=...)`
-    # (each appears once, in only its own tool's schema, not duplicated
-    # across all five domain tools), and `StopRecord.stop_reason`'s bound
-    # and description both moved from 300 to 600 characters -- a real
-    # evidence-heavy live run once exhausted that field's old bound with no
-    # repair budget left to fix it.
-    assert len(payload) == 13_714
+    # Pinned so reservations and docs cannot silently drift from the real,
+    # measured payload -- see the reservation comment in `live_model.py`'s
+    # `_send` for why this figure matters and what it must cover. It has
+    # grown several times as the tool schema changed (renamed enum values,
+    # added `Field(description=...)` prose, a raised character bound); if
+    # this assertion needs updating, that is expected drift, not a bug --
+    # confirm the cause via git blame before just bumping the number.
+    assert len(payload) == 13_716
     # `PESSIMISTIC_CHARS_PER_TOKEN` is 1.0, so ceiling division
     # makes the token estimate equal the character count exactly -- this
     # is the real behaviour, not a coincidence to simplify away.
-    assert estimate_input_tokens(payload) == 13_714
+    assert estimate_input_tokens(payload) == 13_716
 
 
 def test_maximum_possible_reservation_usd_reuses_the_real_propose_schema() -> None:
     """Proves `maximum_possible_reservation_usd` genuinely calls
     `_domain_tool_definitions`/`_stop_tool_definition` -- the same real
-    functions `propose()`'s own tool payload (pinned at 13,714 tokens by
+    functions `propose()`'s own tool payload (pinned at 13,716 tokens by
     `test_the_tool_payload_size_matches_what_pricingpy_assumes` above) is
     built from -- rather than a hand-typed constant that could silently
     drift from the real schema."""
@@ -517,11 +496,17 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # `STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]` gained one sentence
     # requiring an abstention to still cite the evidence that made the causes
     # indistinguishable, and `context_text` above renders that exact stage's
-    # instructions.
-    assert len(total) == 2_025
+    # instructions. It moved a fifth time, from 2,025 to 2,448: `SYSTEM_TEXT`
+    # gained one paragraph on co-occurring causes, requiring retrieved
+    # evidence (not an assumption) before naming one allowed cause as the
+    # trigger for another. `STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]` also
+    # gained a sentence in this same change, but `context_text` above renders
+    # only `Stage.FINAL_ASSESSMENT`'s instructions, so that second edit does
+    # not touch this pinned figure.
+    assert len(total) == 2_448
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 2_025
+    assert estimate_input_tokens(total) == 2_448
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
@@ -873,16 +858,24 @@ def test_respond_binds_only_the_final_assessment_tool(conn: sqlite3.Connection) 
 def test_respond_returns_empty_content_when_the_tool_is_never_called(
     conn: sqlite3.Connection,
 ) -> None:
+    """Unit A: `errors` names the real reason (0 tool calls, not the
+    generic empty-`content` failure `FinalAssessment` validation would
+    otherwise report) so a repair prompt can act on it."""
     model, _ = make_model(conn, [message([])])
 
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+    assert response.errors == (
+        "the model called 0 tools in one turn; exactly one is required"
+    )
 
 
 def test_respond_returns_empty_content_on_a_provider_invalid_tool_call(
     conn: sqlite3.Connection,
 ) -> None:
+    """Unit A: `errors` names the malformed call's own tool name and the
+    provider's own error string, not a generic refusal."""
     invalid = invalid_tool_call(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args="{not valid",
@@ -894,11 +887,16 @@ def test_respond_returns_empty_content_on_a_provider_invalid_tool_call(
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+    assert response.errors == (
+        f"malformed tool call(s): {RECORD_FINAL_ASSESSMENT_TOOL_NAME}: unparseable"
+    )
 
 
 def test_respond_refuses_visible_text_alongside_tool_calls(
     conn: sqlite3.Connection,
 ) -> None:
+    """Unit A: `errors` names visible text as the reason, distinct from
+    every other refusal branch's own wording."""
     call = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args={
@@ -915,9 +913,13 @@ def test_respond_refuses_visible_text_alongside_tool_calls(
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+    assert response.errors == "tool-call response must not include visible text"
 
 
 def test_respond_refuses_a_provider_schema_version(conn: sqlite3.Connection) -> None:
+    """Unit A: `errors` names the reserved-field reason, distinguishable
+    from a plain wrong-tool-count refusal even though this is also a
+    single, otherwise-well-formed call."""
     call = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args={
@@ -932,7 +934,12 @@ def test_respond_refuses_a_provider_schema_version(conn: sqlite3.Connection) -> 
     )
     model, _ = make_model(conn, [message([call])])
 
-    assert model.respond(make_request(stage=Stage.FINAL_ASSESSMENT)).content == {}
+    response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    assert response.content == {}
+    assert response.errors == (
+        "schema_version is set by the application; do not send it"
+    )
 
 
 def test_respond_accepts_provider_tool_and_redacted_thinking_blocks(
@@ -1033,20 +1040,21 @@ def test_respond_refuses_two_conflicting_final_assessment_calls_in_one_turn(
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+    assert response.errors == (
+        "the model called 2 tools in one turn; exactly one is required"
+    )
 
 
 def test_respond_refuses_a_matching_call_alongside_an_unbound_extra_call(
     conn: sqlite3.Connection,
 ) -> None:
-    """The fix above checked only
-    `len(matching_calls) != 1` -- a turn with exactly one `record_final_
-    assessment` call AND some other tool name `respond()` never bound
-    (`_final_assessment_tool_definition()` is the only tool offered) would
-    have passed that check, silently dropping the extra call the same way
-    that fix was built to stop happening for a second MATCHING call. Not proven
-    reachable against a real provider offline, per the installed
-    `langchain-anthropic` source correctness read -- but the fix costs one
-    more length check, so it is applied regardless."""
+    """A turn with exactly one `record_final_assessment` call AND some
+    other tool name `respond()` never bound (`_final_assessment_tool_
+    definition()` is the only tool offered) must still be refused, not
+    silently narrowed to the one matching call. Not proven reachable
+    against a real provider offline, per the installed `langchain-
+    anthropic` source correctness read -- but the total-count check below
+    catches it regardless of whether it can happen."""
     matching = ToolCall(
         name=RECORD_FINAL_ASSESSMENT_TOOL_NAME,
         args={
@@ -1069,6 +1077,39 @@ def test_respond_refuses_a_matching_call_alongside_an_unbound_extra_call(
     response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
 
     assert response.content == {}
+    # Caught by the total-count check above, not the name check below --
+    # the len(message.tool_calls) != 1 branch runs first, so this never
+    # reaches `message.tool_calls[0]`'s name at all.
+    assert response.errors == (
+        "the model called 2 tools in one turn; exactly one is required"
+    )
+
+
+def test_respond_refuses_a_single_call_with_the_wrong_tool_name(
+    conn: sqlite3.Connection,
+) -> None:
+    """The one rejection branch none of the tests above exercises:
+    `len(message.tool_calls) == 1` (so the total-count check above passes)
+    but that lone call is not named `record_final_assessment` -- unreachable
+    through `respond()`'s only bound tool in practice, but
+    `message.tool_calls`'s installed client copies whatever name the
+    provider sends with no validation against the bound list (see the name
+    check's own comment in `live_model.py`), so this checks that branch on
+    its own, distinct from every count-based refusal already covered."""
+    lone_wrong_name = ToolCall(
+        name="some_other_tool",
+        args={"anything": "at all"},
+        id="extra-1",
+        type="tool_call",
+    )
+    model, _ = make_model(conn, [message([lone_wrong_name])])
+
+    response = model.respond(make_request(stage=Stage.FINAL_ASSESSMENT))
+
+    assert response.content == {}
+    assert response.errors == (
+        f"expected {RECORD_FINAL_ASSESSMENT_TOOL_NAME}, got some_other_tool"
+    )
 
 
 # --- the refusal path: as tested as the success path ---------------------

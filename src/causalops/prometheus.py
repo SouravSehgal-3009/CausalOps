@@ -35,7 +35,7 @@ DEFAULT_PROMETHEUS_URL = "http://127.0.0.1:9090"
 # the incident allowlist; this is the second lock on the same door.
 SAFE_SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 
-# `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_RATE`
+# `GATEWAY_ERROR_RATE`/`DOWNSTREAM_TIMEOUT_SHARE`
 # narrow their `rate(...)` lookback from `[1m]` to `[30s]` -- measured
 # directly that these two, and only these two, understate
 # a real fault's error rate roughly 6.5x: the fault band here is 4-15s, and a
@@ -50,6 +50,23 @@ SAFE_SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 # addresses on its own terms -- narrowing its lookback too was never part
 # of the measured finding that motivated this change, and is not a
 # decision made silently.
+#
+# `DOWNSTREAM_TIMEOUT_SHARE` (renamed from `DOWNSTREAM_TIMEOUT_RATE`) reports
+# a proportion, not an absolute rate: `RESOURCE_POOL_ATTEMPTS_PER_CAPACITY`
+# was already a clean, boundedly-interpretable ratio, and the model reads
+# both during the same investigations, so a sibling metric reporting a raw,
+# unbounded requests-per-second count was a real legibility asymmetry, hard
+# to eyeball against any threshold. The formula divides the timeout-outcome
+# rate by the all-outcome rate for the same service and incident, both over
+# the same `[30s]` window as before, so it reads on the same interpretable
+# `[0, 1]` scale. The naming deliberately differs from `RESOURCE_POOL_
+# ATTEMPTS_PER_CAPACITY`'s explicit `_PER_...` suffix -- a generic "share
+# of X" reads more naturally in English here than spelling out a
+# `_PER_ALL_OUTCOMES`-style suffix would. No zero-guard is needed:
+# Prometheus's own vector-division
+# semantics drop a series whose denominator is zero rather than raising, and
+# `parse_samples`/`run_metric_check` already render that as the
+# `NO_RETURNED_SERIES` status, not a division error.
 METRIC_QUERIES: dict[MetricTemplate, str] = {
     MetricTemplate.GATEWAY_ERROR_RATE: (
         'sum(rate(causalops_requests_total{{service="{service}",'
@@ -60,9 +77,11 @@ METRIC_QUERIES: dict[MetricTemplate, str] = {
         'causalops_request_latency_seconds_bucket{{service="{service}",'
         'incident="{incident}"}}[1m])))'
     ),
-    MetricTemplate.DOWNSTREAM_TIMEOUT_RATE: (
+    MetricTemplate.DOWNSTREAM_TIMEOUT_SHARE: (
         'sum(rate(causalops_requests_total{{service="{service}",'
-        'incident="{incident}",outcome="timeout"}}[30s]))'
+        'incident="{incident}",outcome="timeout"}}[30s])) / '
+        'sum(rate(causalops_requests_total{{service="{service}",'
+        'incident="{incident}"}}[30s]))'
     ),
     # Queries `causalops_pool_attempts_per_capacity`: total
     # slot acquisition attempts for the incident divided by configured

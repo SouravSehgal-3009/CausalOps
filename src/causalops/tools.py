@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-TOOL_REGISTRY_VERSION = "7"
+TOOL_REGISTRY_VERSION = "8"
 
 
 def to_utc(moment: datetime) -> datetime:
@@ -37,7 +37,7 @@ class ToolName(StrEnum):
 class MetricTemplate(StrEnum):
     GATEWAY_ERROR_RATE = "gateway_error_rate"
     GATEWAY_LATENCY_P95 = "gateway_latency_p95"
-    DOWNSTREAM_TIMEOUT_RATE = "downstream_timeout_rate"
+    DOWNSTREAM_TIMEOUT_SHARE = "downstream_timeout_share"
     RESOURCE_POOL_ATTEMPTS_PER_CAPACITY = "resource_pool_attempts_per_capacity"
 
 
@@ -87,7 +87,7 @@ class QueryMetricArguments(BaseModel):
     service: str = Field(
         description=(
             "Which service emitted this metric. resource_pool_attempts_per_capacity "
-            "is recorded only by orders. gateway_error_rate/downstream_timeout_rate "
+            "is recorded only by orders. gateway_error_rate/downstream_timeout_share "
             "are recorded only by gateway/orders -- inventory's requests never fail "
             "or time out. gateway_latency_p95 is recorded by every service."
         )
