@@ -35,11 +35,9 @@ CREATED
 The model never talks to a tool backend directly. Every read-only tool call
 goes through a policy wrapper that validates the incident scope, the
 registered template, and the remaining budget *before* anything runs, and a
-denied proposal never reaches a backend at all. This is tested three ways:
-an import scan proving the dispatch node imports no backend module directly,
-a wrapper-identity check proving every registered tool callable was actually
-built by a wrapper factory (a hand-built wrapper raises `TypeError`), and a
-spy-backend test proving a denied proposal never invokes one.
+denied proposal never reaches a backend at all — see "Tool-policy bypass"
+under "Safety and threat model, briefly" below for exactly how that's
+tested.
 
 The model can never submit raw PromQL, shell, SQL, a URL, a filesystem path,
 or code — only a registered template ID and strictly typed arguments.
@@ -154,8 +152,43 @@ exact refusal conditions.
 CausalOps is reviewed against a fixed set of threats, each backed by a real,
 currently-passing test rather than a design intention:
 
-- **Tool-policy bypass** — proven unreachable by the import-scan,
-  wrapper-identity, and spy-backend tests described above.
+- **Tool-policy bypass** — proven unreachable by three independent tests,
+  each closing a gap the other two leave open.
+
+  The import scan (`test_the_dispatch_boundary_modules_import_no_backend`)
+  checks that `tool_wrappers.py`, `tool_calls.py`, and `graph.py` import
+  none of `causalops.telemetry`, `causalops.prometheus`, or
+  `causalops.runbooks`. That's necessary, not sufficient: a scan checking
+  only those imports would still pass even if a backend were wired in
+  through the registry's `lambda` arguments in `live_setup.py`'s
+  `build_model_and_registry` — an indirection no import statement ever
+  names.
+
+  The wrapper-identity check proves a registry entry was actually built by
+  a wrapper factory, not just that it looks like one. `ToolWrapper` is a
+  frozen dataclass with a private `_factory_token` field that defaults to
+  `None`; only `_make_wrapper` (used by every real factory —
+  `query_metric_wrapper`, `query_logs_wrapper`, and the rest) ever supplies
+  the real sentinel, `_WRAPPER_FACTORY_TOKEN`. `ToolWrapper.__post_init__`
+  checks identity against that sentinel and raises `TypeError` on any
+  mismatch, so a hand-built `ToolWrapper(tool=..., dispatch=some_closure)`
+  fails at construction, before it can join a registry —
+  `test_a_hand_built_tool_wrapper_is_rejected` is exactly that
+  reproduction. `isinstance(x, ToolWrapper)` alone would not have caught
+  it, since a hand-built instance satisfies that check too.
+
+  The spy-backend test,
+  `test_every_registered_tool_denies_an_out_of_scope_proposal_untouched`,
+  proves a denial actually stops execution, not just that it gets labeled
+  `DENIED`. It wires five separate spy backends, one per tool, sends each
+  an out-of-scope proposal, and asserts both the denial and that its own
+  spy recorded zero calls, independently. A single shared spy watching one
+  tool position, with the other four wired to unwatched stand-ins, could
+  report green while three or four wrappers silently leaked straight
+  through — nothing would ever record it. Five independent spies mean a
+  regression in any one wrapper is caught by that tool's own assertion,
+  never masked by the other four passing.
+
 - **Ground-truth leakage** — the model and the retrieval corpus never see
   the evaluator's scenario key, expected root cause, or evidence predicates;
   enforced by import-graph and content assertions, not just file placement.
