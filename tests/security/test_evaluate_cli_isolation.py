@@ -1,13 +1,14 @@
 """`causalops-evaluate` must be a genuinely separate console script from
-`causalops` -- `CLAUDE.md`: "`causalops evaluate` as a separate console
-script never imported by `causalops.cli`." A lazy or deferred import would
-satisfy that sentence's letter while defeating its purpose (this project's
-own recorded history: a prior round only caught this by noticing a test
-that should have failed under a reverted mutation didn't), so this file
-proves it two ways: a static AST scan of the whole file (which finds an
-import at any nesting depth, not just module-level statements) and a plain
-substring check that also closes a dynamic `importlib.import_module(...)`
-loophole the AST scan alone cannot see.
+`causalops` -- never imported by `causalops.cli`, so a paid live-evaluation
+run can never be triggered accidentally through the ordinary investigation
+CLI. A lazy or deferred import would satisfy that requirement's letter
+while defeating its purpose (this project's own recorded history: a prior
+round only caught this by noticing a test that should have failed under a
+reverted mutation didn't), so this file proves it two ways: a static AST
+scan of the whole file (which finds an import at any nesting depth, not
+just module-level statements) and a plain substring check that also closes
+a dynamic `importlib.import_module(...)` loophole the AST scan alone
+cannot see.
 """
 
 from pathlib import Path
@@ -45,8 +46,8 @@ def test_cli_source_never_names_evaluate_cli_at_all() -> None:
 def test_evaluate_cli_never_imports_cli_at_any_nesting_depth() -> None:
     """The reverse direction: `causalops.evaluate_cli` importing
     `causalops.cli` would just as surely defeat the isolation both modules
-    are meant to keep, even though `CLAUDE.md` only states the one
-    direction explicitly."""
+    are meant to keep, even though the requirement above only names the
+    one direction explicitly."""
     evaluate_cli_source = REPOSITORY / "src" / PACKAGE / "evaluate_cli.py"
     names = imported_modules(evaluate_cli_source)
 

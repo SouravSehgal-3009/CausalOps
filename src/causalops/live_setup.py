@@ -3,11 +3,12 @@
 Extracted out of `cli.py` (`_build_model_and_registry`,
 `_live_evaluation_ceiling_usd`, `REPLAY_FIXTURE`/`REPLAY_FIXTURE_DIR`) so
 `causalops.evaluate_cli` could reuse the exact same wiring `causalops.cli`
-uses for a live `investigate`, instead of copy-pasting it. `CLAUDE.md`
-requires `causalops evaluate` never be imported by `causalops.cli`; the
-reverse also has to hold or the two would form a cycle. This module is the
-neutral ground both import from -- it imports neither `causalops.cli` nor
-`causalops.evaluate_cli`, and is not itself a command entry point.
+uses for a live `investigate`, instead of copy-pasting it.
+`tests/security/test_evaluate_cli_isolation.py` requires `causalops.cli`
+never import `causalops.evaluate_cli`; the reverse also has to hold or the
+two would form a cycle. This module is the neutral ground both import from
+-- it imports neither `causalops.cli` nor `causalops.evaluate_cli`, and is
+not itself a command entry point.
 """
 
 import math

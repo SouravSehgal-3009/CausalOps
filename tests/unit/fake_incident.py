@@ -1,6 +1,7 @@
 """One synthetic incident the unit tests share, plus doubles for the model and checks.
 
-The IDs here stand in for what the scenario controller will produce in Step 3.
+The IDs here stand in for what `scenario_control.py`'s scenario controller produces
+for a real incident.
 """
 
 import json
@@ -369,7 +370,8 @@ def check_runner(
     kind: EvidenceKind = EvidenceKind.METRIC,
     reason_code: ReasonCode | None = None,
 ) -> RunCheck:
-    """A stand-in for the registry-backed runner Step 3 supplies."""
+    """A stand-in for the registry-backed runner `tool_wrappers.dispatch_registry`
+    supplies in production."""
 
     def run(proposal: ToolProposal, scope: IncidentScope) -> CheckOutcome:
         payload: dict[str, JsonValue] = {

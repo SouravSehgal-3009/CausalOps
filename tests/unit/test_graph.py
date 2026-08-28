@@ -2048,8 +2048,8 @@ def test_search_runbooks_runs_end_to_end_through_the_real_backend(
 def test_a_denied_search_proposal_cannot_manufacture_an_escalation(
     tmp_path: Path,
 ) -> None:
-    """P2 finding from review: `_escalation_reason`'s `retrieval_attempted`
-    check narrows to `ALLOWED`/`SETTLED` receipts specifically so a *denied*
+    """`_escalation_reason`'s `retrieval_attempted` check narrows to
+    `ALLOWED`/`SETTLED` receipts specifically so a *denied*
     `search_runbooks` proposal can never read as "attempted, zero
     passages." `limit` is model-chosen (`SearchRunbooksArguments.limit`),
     so without that narrowing a model could manufacture an owner-facing

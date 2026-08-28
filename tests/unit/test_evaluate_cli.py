@@ -342,7 +342,7 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
 def test_records_already_scored_before_a_crash_survive_on_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The P1 this fix round exists for: `run_evaluation` must rewrite
+    """The bug this test exists for: `run_evaluation` must rewrite
     `records.jsonl` after every completed run, not batch everything to the
     end. Proves it by making the run that would build the SECOND family's
     model construction raise -- after the first family's baseline and
@@ -497,7 +497,7 @@ def test_model_quality_failure_does_not_abort_later_evaluation_runs(
 def test_the_original_run_failure_survives_cleanup_also_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The P2 this fix exists for: `run_evaluation`'s `finally:
+    """The bug this test exists for: `run_evaluation`'s `finally:
     reset_scenario(...)` used to be unconditional -- if the scored run
     inside `try` failed (a real, billed run failure) AND `reset_scenario` in
     `finally` ALSO raised, Python's ordinary exception chaining would
@@ -548,22 +548,22 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
 def test_a_cleanup_failure_after_a_successful_run_still_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Item 4: the round-2 fix for the test above queried `sys.exc_info()`
+    """An earlier implementation of the test above queried `sys.exc_info()`
     from INSIDE the nested `except Exception as reset_error:` handler --
     which always describes `reset_error` itself, never an outer exception,
     since `sys.exc_info()` reports whatever the *nearest enclosing* `except`
     is currently handling at the point it is called, and at that point the
-    nearest enclosing handler IS this one. So the round-2 code's `if sys.
+    nearest enclosing handler IS this one. So that code's `if sys.
     exc_info()[0] is None: raise` was always `False` -- the `raise` was dead
     code, and the cleanup failure was printed and silently swallowed
     UNCONDITIONALLY, even when the scored run underneath succeeded cleanly.
     This is the opposite of the intended behaviour and is the real bug this
-    fix corrects: a `reset_scenario` failure after a successful run must
-    raise, not be swallowed, since swallowing it lets `main()` return 0
-    while an active-scenario marker is left stranded. Run against the
-    ROUND-2 code (before this fix), this test fails: `run_evaluation`
-    returns its records normally instead of raising, because every family's
-    reset failure gets caught, printed, and discarded."""
+    test guards against: a `reset_scenario` failure after a successful run
+    must raise, not be swallowed, since swallowing it lets `main()` return 0
+    while an active-scenario marker is left stranded. Run against that
+    earlier code, this test fails: `run_evaluation` returns its records
+    normally instead of raising, because every family's reset failure gets
+    caught, printed, and discarded."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -609,13 +609,13 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
 
 
 def test_render_evaluation_summary_shows_counts_and_ranges_not_a_percentile() -> None:
-    """The P2 this fix exists for: `main()` used to print one line per
+    """The gap this test exists for: `main()` used to print one line per
     record and never a batch-level aggregate at all. `TECHNICAL_SPEC.md`
     §10 forbids p95 or any other broad performance claim from a small
     synthetic sample -- this asserts the rendered text carries the counts
     and ranges an `EvaluationSummary` holds, including the honest "how many
-    runs' cost is actually known" annotation from Item 2, Item 3's citation
-    and policy/control aggregates, and never mentions a percentile."""
+    runs' cost is actually known" annotation, citation counts, and
+    policy/control aggregates, and never mentions a percentile."""
     summary = EvaluationSummary(
         total_records=2,
         correct_and_grounded_count=1,
@@ -706,11 +706,10 @@ def test_render_evaluation_summary_shows_the_applicable_denominator_apart() -> N
 
 
 def test_render_evaluation_summary_shows_correct_and_grounded_first() -> None:
-    """The approved F6 design: `correct_and_grounded` renders above
-    `diagnosis_correct`, not merely present anywhere in the output -- a
-    precise ordering assertion, since the two metrics answer overlapping
-    questions and a reader scanning top-to-bottom should see the joint
-    metric first."""
+    """`correct_and_grounded` renders above `diagnosis_correct`, not merely
+    present anywhere in the output -- a precise ordering assertion, since
+    the two metrics answer overlapping questions and a reader scanning
+    top-to-bottom should see the joint metric first."""
     summary = EvaluationSummary(
         total_records=2,
         correct_and_grounded_count=1,
@@ -837,7 +836,7 @@ def test_main_writes_a_summary_alongside_records(
 def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Item 5: `summary_path.write_text(...)` used to run outside every
+    """`summary_path.write_text(...)` used to run outside every
     `try/except` in `main()` -- a write failure there (disk full, permission
     error) escaped as a raw traceback instead of the clean `FAIL ...`
     message every other refusal path in this script already gives, even
@@ -845,10 +844,10 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
     the summary's own write is made to fail here (matched by filename
     prefix, not by patching `Path.write_text` unconditionally), so `write_
     jsonl`'s own earlier writes -- which is how `records.jsonl` gets to
-    disk in the first place -- are unaffected. `_write_json_atomic` (Item
-    4) now writes to a sibling `summary.json.tmp-<hex>` before renaming it
-    onto `summary.json`, so the matched name is a prefix, not the exact
-    final filename."""
+    disk in the first place -- are unaffected. `_write_json_atomic` writes
+    to a sibling `summary.json.tmp-<hex>` before renaming it onto
+    `summary.json`, so the matched name is a prefix, not the exact final
+    filename."""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     for family in EVALUATION_FAMILIES:
         scenarios = tmp_path / "lab" / "scenarios"
@@ -926,7 +925,7 @@ class _TinyPayload(BaseModel):
 
 
 def test_write_json_atomic_writes_the_complete_content(tmp_path: Path) -> None:
-    """Item 4 regression coverage for the ordinary path: the full, valid
+    """`_write_json_atomic`'s ordinary path: the full, valid
     JSON content lands at the target path, and nothing else is left behind
     in the directory -- the sibling temp file is gone once the rename
     completes."""
@@ -941,8 +940,8 @@ def test_write_json_atomic_writes_the_complete_content(tmp_path: Path) -> None:
 def test_write_json_atomic_leaves_no_corrupted_file_on_an_interrupted_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The P3 this fix exists for: a plain `path.write_text` truncates its
-    target before writing a byte of the new content, so a hard process kill
+    """The gap this test exists for: a plain `path.write_text` truncates
+    its target before writing a byte of the new content, so a hard process kill
     mid-write -- not a catchable `OSError`, so no `except` clause anywhere
     ever runs to warn about it -- could leave `summary.json` itself as a
     truncated, corrupted file with no exception ever having fired.
@@ -1013,13 +1012,11 @@ def _paired_record(
     plausible filler.
 
     `has_predicate` controls whether `expected.predicates` is non-empty.
-    Defaults to `True` (a predicate-bearing outcome), matching every caller
-    that predates the F4 applicability fix. A caller building a
+    Defaults to `True` (a predicate-bearing outcome). A caller building a
     not-applicable `citations_sufficient=None` record must pass
-    `has_predicate=False` explicitly: after that fix, applicability is
-    derived from `expected.predicates` itself, and real `score_run` output
-    can never pair a non-empty `expected.predicates` with
-    `citations_sufficient=None`."""
+    `has_predicate=False` explicitly: applicability is derived from
+    `expected.predicates` itself, and real `score_run` output can never
+    pair a non-empty `expected.predicates` with `citations_sufficient=None`."""
     return EvaluationRecord(
         run_key=run_key,
         investigation_id="inv-1",
@@ -1117,7 +1114,7 @@ def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
     assert tool_enabled_group.summary.diagnosis_correct_count == 2
     # A plain batch-wide count is still reported too -- the per-arm split
     # does not remove the total record count a reader may also want -- but,
-    # unlike the round-4 `combined` field this replaces, it carries no
+    # unlike the removed `combined` field, it carries no
     # `diagnosis_correct_count` or other benchmark figure blending both
     # arms into one number.
     assert summary.total_records == 4
@@ -1139,7 +1136,7 @@ def test_summarize_paired_evaluation_distinguishes_the_two_arms() -> None:
 def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart() -> (
     None
 ):
-    """The exact P1 fix under test: the no-tool baseline is always
+    """The behaviour under test: the no-tool baseline is always
     `RetrievalMode.DISABLED` structurally, but within the TOOL-ENABLED arm,
     `retrieval_mode` depends on whether the model actually called
     `search_runbooks` on that particular run -- so two tool-enabled runs in
@@ -1152,12 +1149,13 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     `tool_enabled` bucket with no way to tell the two retrieval modes
     apart.
 
-    Also proves the round-5 fix directly: with three records spanning two
-    retrieval modes (2 correct, 1 incorrect), a blended figure across all of
-    them would read `diagnosis_correct: 2/3` -- this test confirms that
-    exact string never appears anywhere in the structured summary or its
-    rendered text, because no field left on `PairedEvaluationSummary`
-    computes a figure across more than one `(arm, retrieval_mode)` group."""
+    Also proves that no blended figure crosses retrieval modes: with three
+    records spanning two retrieval modes (2 correct, 1 incorrect), a
+    blended figure across all of them would read `diagnosis_correct: 2/3`
+    -- this test confirms that exact string never appears anywhere in the
+    structured summary or its rendered text, because no field left on
+    `PairedEvaluationSummary` computes a figure across more than one
+    `(arm, retrieval_mode)` group."""
     records = [
         _paired_record(
             run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
@@ -1192,7 +1190,7 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
     assert tool_enabled_no_retrieval.summary.diagnosis_correct_count == 1
     assert tool_enabled_retrieved.summary.total_records == 1
     assert tool_enabled_retrieved.summary.diagnosis_correct_count == 0
-    # The P1 fix itself: `PairedEvaluationSummary` no longer has any field
+    # The fix itself: `PairedEvaluationSummary` no longer has any field
     # computed across the whole batch except a bare count. There is no
     # `combined` attribute, and `total_records` (unlike the removed
     # `combined.diagnosis_correct_count`) carries no diagnosis figure at
@@ -1227,7 +1225,7 @@ def test_summarize_paired_evaluation_keeps_retrieval_modes_within_an_arm_apart()
 def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() -> None:
     """Proves `EvaluationGroupSummary.summary.citations_sufficient_count`/
     `citations_sufficient_applicable_count` are correct per group, not just
-    structurally present -- the fix's item 7 claim was that
+    structurally present -- the claim under test is that
     `summarize_paired_evaluation` needs no change because it delegates
     entirely to `summarize_evaluation` per `(arm, retrieval_mode)` group.
     This test proves that claim directly: each group's counts are compared
@@ -1237,10 +1235,10 @@ def test_summarize_paired_evaluation_reports_citations_sufficient_per_group() ->
     A real mix of applicable-true, applicable-false, and not-applicable
     records is required to exercise this meaningfully -- `has_predicate` is
     wired consistently with each record's own `citations_sufficient` value
-    so the F4 applicability fix (deriving "not applicable" from
-    `expected.predicates`, not from `citations_sufficient is None` alone)
-    cannot collapse every record in this batch to not-applicable and make
-    the counts below vacuously `0 == 0`."""
+    so applicability, derived from `expected.predicates` rather than from
+    `citations_sufficient is None` alone, cannot collapse every record in
+    this batch to not-applicable and make the counts below vacuously
+    `0 == 0`."""
     baseline_records = [
         _paired_record(
             run_key=f"incident-a/model/{MODE_NO_TOOL_BASELINE}",
@@ -1359,7 +1357,7 @@ def test_main_refuses_a_live_evaluation_without_a_credential(
 def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The P2 this fix exists for: `_new_evaluation_target` used to run
+    """The bug this test exists for: `_new_evaluation_target` used to run
     before `main`'s `try:` block, so a failure there (read-only filesystem,
     full disk, permission error) escaped as a raw, uncaught traceback
     instead of the clean `FAIL ...` every other refusal path in this script

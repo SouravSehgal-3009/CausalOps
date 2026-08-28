@@ -7,18 +7,20 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "psutil>=6",
     "pydantic>=2",
-    # Land in Unit 1a even though nothing imports them yet, so the lock/CI risk
-    # of adding them is isolated from Unit 1b's orchestration code.
+    # LangGraph's StateGraph drives investigation orchestration (graph.py);
+    # langchain-core supplies the shared message/tool-call types it and the
+    # live Claude adapter both build on.
     "langgraph>=0.2",
     "langchain-core>=0.3",
-    # Milestone 2's durable checkpoint backend. Pulls in `aiosqlite` and
-    # `sqlite-vec` transitively -- this package bundles an async saver and a
-    # vector-search extension neither of which CausalOps uses; only the
-    # synchronous `SqliteSaver` is called anywhere in this codebase.
+    # The durable checkpoint backend `cli.py` wires through `SqliteSaver`.
+    # Pulls in `aiosqlite` and `sqlite-vec` transitively -- this package
+    # bundles an async saver and a vector-search extension neither of which
+    # CausalOps uses; only the synchronous `SqliteSaver` is called anywhere
+    # in this codebase.
     "langgraph-checkpoint-sqlite>=3.1",
-    # Unit 3b-2's live Claude adapter. Pulls in `anthropic`, `httpx`,
-    # `docstring-parser`, and `jiter` transitively -- audited for network
-    # activity at import time. `tests/security/test_no_tracing.py`'s
+    # The live Claude adapter (`live_model.py`, behind `ChatAnthropic`). Pulls
+    # in `anthropic`, `httpx`, `docstring-parser`, and `jiter` transitively --
+    # audited for network activity at import time. `tests/security/test_no_tracing.py`'s
     # `test_importing_causalops_cli_never_sends_a_tracing_request` proves
     # this directly, in a fresh subprocess with the refusal monkeypatches
     # installed *before* `causalops.cli` is ever imported. That file's two
@@ -33,7 +35,7 @@ dependencies = [
 
 [project.scripts]
 causalops = "causalops.cli:main"
-# Unit 3c. A genuinely separate binary, not a `causalops` subcommand:
+# A genuinely separate binary, not a `causalops` subcommand:
 # `causalops.cli` never imports `causalops.evaluate_cli`, and this module
 # never imports `causalops.cli` -- `tests/security/test_evaluate_cli_isolation.py`
 # proves the first half directly. A hyphenated name because a

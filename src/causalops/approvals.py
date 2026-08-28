@@ -190,11 +190,11 @@ class DecisionRow(BaseModel):
 
 def ensure_decisions_table(conn: sqlite3.Connection) -> None:
     """`owner_decisions` coexists with `SqliteSaver`'s own `checkpoints`/
-    `writes` tables in the same `results/checkpoints.db` file -- no second
-    database (`CLAUDE.md`'s constraints forbid one, and the spec already
-    assigns approval records to SQLite). Idempotent, so every call site can
-    call it before every read or write without coordinating who ran it
-    first."""
+    `writes` tables in the same `results/checkpoints.db` file -- a second
+    SQLite file would let approval records and checkpoint state drift out
+    of sync with nothing to keep them consistent. Idempotent, so every call
+    site can call it before every read or write without coordinating who
+    ran it first."""
     try:
         conn.execute(
             """

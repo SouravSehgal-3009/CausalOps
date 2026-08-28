@@ -1,8 +1,8 @@
 """Reasoning models, meaning the model adapters themselves.
 
 The typed contracts live in `domain.py`; this module holds the thing that answers a
-stage request. Replay reads checked-in fixtures, and Phase 3 adds the Claude model
-behind the same protocol.
+stage request. Replay reads checked-in fixtures; `live_model.py` adds the Claude
+model behind the same protocol.
 """
 
 import json

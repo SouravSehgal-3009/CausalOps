@@ -410,14 +410,14 @@ def test_run_cost_totals_wraps_a_malformed_table_as_a_store_error(
 def test_settle_reservation_logs_when_the_real_bill_exceeds_the_reservation(
     conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The invariant-breach half of the P1 fix: a settlement is never
-    refused for coming in above its own reservation (the money is already
-    spent, and the row must record what was really billed), but it must not
-    be silent about it either -- a logged warning naming both figures is
-    the signal that the pessimistic estimate this reservation was computed
-    from needs recalibrating. Item 2 (P2) replaced `warnings.warn` with
-    `logging` here -- see `test_settle_reservation_survives_warnings_as_
-    errors_on_an_overrun` below for why."""
+    """The invariant-breach case: a settlement is never refused for coming
+    in above its own reservation (the money is already spent, and the row
+    must record what was really billed), but it must not be silent about
+    it either -- a logged warning naming both figures is the signal that
+    the pessimistic estimate this reservation was computed from needs
+    recalibrating. This uses `logging`, not `warnings.warn` -- see
+    `test_settle_reservation_survives_warnings_as_errors_on_an_overrun`
+    below for why."""
     _reserve(conn, reserved_usd=0.01)
 
     with caplog.at_level(logging.WARNING, logger="causalops.cost_ledger"):
@@ -467,9 +467,10 @@ def test_settle_reservation_does_not_log_when_the_bill_stays_under_the_reservati
 def test_settle_reservation_survives_warnings_as_errors_on_an_overrun(
     conn: sqlite3.Connection,
 ) -> None:
-    """Direct proof of the P2 fix -- not just a happy-path run under
-    default settings. `PYTHONWARNINGS=error` (or any caller/environment
-    that sets `warnings.simplefilter("error")`) turns
+    """Direct proof that a settlement warning survives `PYTHONWARNINGS=
+    error` -- not just a happy-path run under default settings. That
+    setting (or any caller/environment that sets
+    `warnings.simplefilter("error")`) turns
     `warnings.warn(..., RuntimeWarning)` into a raised exception: the exact
     configuration `settle_reservation` used to run this same overrun branch
     under, back when it called `warnings.warn` instead of today's module
@@ -579,8 +580,8 @@ def test_a_reservation_within_the_raw_ceiling_but_inside_the_buffer_is_refused(
 def test_run_cost_totals_reports_partial_settlement_as_not_fully_settled(
     conn: sqlite3.Connection,
 ) -> None:
-    """The P2 this fix exists for: a run with 3 of 4 model calls settled and
-    the 4th still `RESERVED` (a timeout or crash mid-call, short of a clean
+    """The bug this test exists for: a run with 3 of 4 model calls settled
+    and the 4th still `RESERVED` (a timeout or crash mid-call, short of a clean
     settle) has a non-zero, but PARTIAL, `actual_usd` -- `actual_usd == 0.0`
     is not a reliable signal that something is missing here, since the sum
     of the 3 settled rows is a real, non-zero number that nonetheless

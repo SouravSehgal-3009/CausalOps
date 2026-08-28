@@ -77,8 +77,8 @@ from causalops.scenario_control import (
 # these four families today, each already carrying a `seed_variants.
 # evaluation` block distinct from `seed_variants.development` --
 # `TECHNICAL_SPEC.md` §10 permits up to six held-out incidents; this project
-# chose four (`CLAUDE.md`'s own scoping note). Adding a fifth or sixth
-# family later is a one-line change here, not a redesign.
+# chose four. Adding a fifth or sixth family later is a one-line change
+# here, not a redesign.
 EVALUATION_FAMILIES: tuple[str, ...] = (
     "ambiguous_telemetry",
     "configuration_change",
@@ -500,10 +500,10 @@ class EvaluationGroupSummary(BaseModel):
     """One `(arm, retrieval_mode)` group's own batch summary.
 
     `TECHNICAL_SPEC.md` (line ~281): "Never silently fall back, mix modes in
-    one benchmark aggregate, or represent FTS5 as semantic retrieval." A
-    round-3 fix partitioned summaries by arm alone (`baseline`/
-    `tool_enabled`) -- not sufficient, because `retrieval_mode` is not
-    reliably coupled to arm. The no-tool baseline is always `RetrievalMode.
+    one benchmark aggregate, or represent FTS5 as semantic retrieval."
+    Partitioning summaries by arm alone (`baseline`/`tool_enabled`) is not
+    sufficient, because `retrieval_mode` is not reliably coupled to arm.
+    The no-tool baseline is always `RetrievalMode.
     DISABLED` structurally: `graph.py`'s baseline path never calls any tool,
     including `search_runbooks`. But within the TOOL-ENABLED arm,
     `retrieval_mode` depends on whether the model actually chose to call
@@ -525,8 +525,8 @@ class EvaluationGroupSummary(BaseModel):
 
 
 class PairedEvaluationSummary(BaseModel):
-    """Replaces the fixed three-field `baseline`/`tool_enabled`/`combined`
-    shape a round-3 fix introduced. `groups` holds one `EvaluationGroupSummary`
+    """Replaces a fixed three-field `baseline`/`tool_enabled`/`combined`
+    shape used previously. `groups` holds one `EvaluationGroupSummary`
     per distinct `(arm, retrieval_mode)` pair actually present in the batch --
     however many distinct pairs that turns out to be (one group for the
     baseline arm, since it is always `DISABLED`; one or two for the
@@ -534,7 +534,7 @@ class PairedEvaluationSummary(BaseModel):
     rather than assuming a fixed small set of buckets that a future third
     retrieval mode or a mixed-mode batch could silently overflow.
 
-    A round-4 fix reported a `combined` field alongside `groups` -- a full
+    A `combined` field alongside `groups` used to report a full
     `EvaluationSummary` (diagnosis/citation/control/latency/cost figures)
     computed across every record regardless of arm or retrieval mode, only
     labeled in the rendered output as spanning every mode. `TECHNICAL_SPEC.
@@ -719,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
             f"disposition_correct={record.scores.disposition_correct} "
             f"reserved_usd={record.reserved_usd:.4f} actual_usd={record.actual_usd}"
         )
-    # Item 2: partitioned by arm, not one blended total -- see
+    # Partitioned by arm, not one blended total -- see
     # `PairedEvaluationSummary`'s own docstring for why a single combined
     # figure cannot show the paired comparison this evaluation exists for.
     summary = summarize_paired_evaluation(records)
@@ -739,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         # existed before, never a corrupted one.
         _write_json_atomic(summary_path, summary)
     except OSError as error:
-        # Item 5: the same "no raw traceback reaches the owner" posture
+        # The same "no raw traceback reaches the owner" posture
         # `_new_evaluation_target`'s own `OSError` guard already keeps,
         # applied to this later write site (disk full, permission error)
         # instead of leaving it to escape uncaught. Every real, billed

@@ -754,8 +754,9 @@ class RunbookCheckOutcome(BaseModel):
     duration_ms: int = 0
 
 
-# Step 3 supplies the registry-backed runner. Until the lab exists there is nothing
-# for the loop to call, so the caller passes one in and tests pass doubles.
+# `RunCheck` is the callable shape a check backend implements. Production wires
+# typed per-tool backends through `tool_wrappers.dispatch_registry`; tests pass
+# simple doubles that match this alias directly.
 RunCheck = Callable[[ToolProposal, IncidentScope], CheckOutcome]
 Clock = Callable[[], datetime]
 

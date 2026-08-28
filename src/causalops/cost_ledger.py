@@ -15,7 +15,7 @@ Lives in `checkpoints.db` beside `owner_decisions`
 amendment ("SQLite stores checkpoints and approval/audit records... and the
 application-wide cost ledger") admits exactly this, for the same reason
 `approvals.py`'s docstring already gives for `owner_decisions`: one physical
-file, not a second database `CLAUDE.md` forbids.
+file, not a second database.
 
 `CheckpointStoreError`/`CheckpointStoreReasonCode` (`approvals.py`) are
 reused here for one failure only: the store itself could not be read or

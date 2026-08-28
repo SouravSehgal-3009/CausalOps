@@ -221,10 +221,8 @@ def test_stored_incident_refuses_an_evidence_incident_id_mismatch() -> None:
     normal `_build_report` path and the outer crash-containment path
     meant to catch exactly that failure -- escaping `main()`'s
     `(LabError, RunRecordError, CheckpointStoreError)` catch tuple
-    entirely (see `TECHNICAL_OVERVIEW.md`'s "Second dual review on
-    a44bf57" section for the full trace). `check_identity_agrees` refuses
-    this at load time instead, before either graph path ever sees the
-    artifact."""
+    entirely. `check_identity_agrees` refuses this at load time instead,
+    before either graph path ever sees the artifact."""
     scope = incident_scope()
     packet = alert_packet()
     one_evidence, other_evidence = packet_evidence()

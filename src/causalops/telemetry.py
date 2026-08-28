@@ -599,7 +599,7 @@ def run_topology_check(
 def _registered_check_runner(
     paths: RunPaths, prometheus_url: str, timeout_seconds: int
 ) -> RunCheck:
-    """The runner Step 2 left a seam for: it turns an approved proposal into a result.
+    """Fills the `RunCheck` seam: it turns an approved proposal into a result.
 
     Everything a backend needs beyond the proposal is configuration, so it is
     captured here and the returned callable matches the seam exactly.

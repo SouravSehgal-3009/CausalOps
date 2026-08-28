@@ -258,7 +258,7 @@ def test_write_jsonl_replaces_the_target_in_one_atomic_rename(tmp_path: Path) ->
 def test_write_jsonl_is_atomic_a_failed_write_leaves_the_original_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The P1 this fix exists for: `write_jsonl` used to be
+    """The bug this test exists for: `write_jsonl` used to be
     `path.write_text(...)`, which truncates `path` before writing a byte of
     new content. `evaluate_cli.py`'s `run_evaluation` calls this function on
     the SAME real `records.jsonl` after every completed run in a batch --

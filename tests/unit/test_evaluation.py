@@ -233,7 +233,7 @@ def test_a_citation_from_another_incident_is_invalid() -> None:
     scores = score_run(report, [stranger], [receipt()], expected_diagnosis())
 
     assert not scores.citations_valid
-    # The P2 this assertion exists for: `cited_evidence` used to match
+    # The bug this assertion exists for: `cited_evidence` used to match
     # purely on `evidence_id`, with no filter on `record.incident_id` --
     # unlike `citations_are_valid`'s own `known` set, which already
     # filtered this way. The stranger's payload does satisfy
@@ -245,7 +245,7 @@ def test_a_citation_from_another_incident_is_invalid() -> None:
 
 
 def test_a_predicate_matched_only_by_contrary_evidence_is_insufficient() -> None:
-    """The P1 this test exists for: `cited_evidence` used to combine
+    """The bug this test exists for: `cited_evidence` used to combine
     `supporting_evidence_ids` and `contrary_evidence_ids` into one set, so a
     diagnosis whose only predicate-matching evidence was filed as CONTRARY
     (evidence the model itself said argued against its own diagnosis, not
@@ -282,7 +282,7 @@ def test_no_predicate_family_is_not_applicable_on_a_correct_diagnosis() -> None:
     `citations_sufficient=True` unconditionally -- `None` is the honest
     value instead: there was no predicate to satisfy, so this is not a
     signal about the citations at all. Every family in this corpus declares
-    at least one predicate today (F5); this test uses a synthetic
+    at least one predicate today; this test uses a synthetic
     empty-predicates `ExpectedOutcome` to keep covering the no-predicate
     case regardless."""
     evidence = timeout_evidence()
@@ -625,8 +625,8 @@ def test_an_evaluation_record_rejects_an_unknown_field() -> None:
 
 
 def test_a_failed_safe_run_does_not_score_as_a_correct_diagnosis() -> None:
-    """The P1 this fix exists for: `FAILED_SAFE`'s own `root_cause` defaults
-    to `UNDETERMINED` (`InvestigationReport.check_terminal_invariants`
+    """The bug this test exists for: `FAILED_SAFE`'s own `root_cause`
+    defaults to `UNDETERMINED` (`InvestigationReport.check_terminal_invariants`
     forbids anything else), and `ambiguous_telemetry`'s own expected root
     cause is ALSO `UNDETERMINED` -- it is the one family in the corpus
     designed to be genuinely inconclusive. A bare `report.root_cause is
@@ -743,16 +743,15 @@ def _summary_record(
     `expected.predicates`, `reserved_usd`, and `actual_usd`, so this builds
     `MechanicalScores`/`Efficiency` directly rather than driving a full
     report through `score_run`. `citations_valid`/`citations_sufficient`/
-    `control` default to the same "nothing wrong" values every test before
-    Item 3 already assumed, so only the tests that actually vary them need
-    to pass something else. `expected` defaults to `expected_diagnosis()`
-    (a predicate-bearing outcome, matching every caller before the F4
-    applicability fix); a caller building a not-applicable record must pass
-    an `ExpectedOutcome` with empty `predicates` explicitly, since real
-    `score_run` output can never pair a non-empty `expected.predicates`
-    with `citations_sufficient=None` -- the F4 fix derives applicability
-    from `expected.predicates` itself, so a fixture that claims otherwise
-    would not exercise a shape any real record can have."""
+    `control` default to the same "nothing wrong" values every test already
+    assumes, so only the tests that actually vary them need to pass
+    something else. `expected` defaults to `expected_diagnosis()`
+    (a predicate-bearing outcome); a caller building a not-applicable
+    record must pass an `ExpectedOutcome` with empty `predicates`
+    explicitly, since real `score_run` output can never pair a non-empty
+    `expected.predicates` with `citations_sufficient=None` -- applicability
+    is derived from `expected.predicates` itself, so a fixture that claims
+    otherwise would not exercise a shape any real record can have."""
     kwargs = reproducibility_manifest_kwargs()
     kwargs["actual_usd"] = actual_usd
     kwargs["reserved_usd"] = reserved_usd
@@ -818,7 +817,8 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
             output_tokens=None,
             reserved_usd=0.02,
             # This run reserved but never fully settled -- `actual_usd`
-            # is `None`, the honest Item 2 case, not a real zero-dollar run.
+            # is `None`, the honest not-fully-settled case, not a real
+            # zero-dollar run.
             actual_usd=None,
         ),
     ]
@@ -848,9 +848,9 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
     assert summary.actual_usd_known_count == 2
     # Every record above used the `_summary_record` defaults --
     # `citations_valid=True`, `citations_sufficient=True`, `control=
-    # ControlCounts()` (all-zero) -- so the Item 3 aggregates should show
-    # a full 3/3 citation count and an all-zero control range, not just be
-    # present and unchecked.
+    # ControlCounts()` (all-zero) -- so the citation/control aggregates
+    # should show a full 3/3 citation count and an all-zero control range,
+    # not just be present and unchecked.
     assert summary.citations_valid_count == 3
     assert summary.citations_sufficient_count == 3
     assert summary.citations_sufficient_applicable_count == 3
@@ -862,7 +862,7 @@ def test_summarize_evaluation_reports_counts_and_ranges() -> None:
 
 
 def test_summarize_evaluation_reports_citation_and_control_aggregates() -> None:
-    """Item 3: `TECHNICAL_SPEC.md` §10 requires "citation validity and
+    """`TECHNICAL_SPEC.md` §10 requires "citation validity and
     citation sufficiency against required-evidence predicates" and
     "policy/control behavior" as mechanical scores alongside
     diagnosis/disposition -- `EvaluationSummary` had neither before this
@@ -925,10 +925,10 @@ def test_summarize_evaluation_counts_true_false_and_not_applicable_apart() -> No
     against a total of 4, not conflate "not applicable" with either
     boolean outcome. The not-applicable record's `expected` carries an
     empty `predicates` tuple, not just a `citations_sufficient=None` score
-    -- the F4 applicability fix derives "not applicable" from
-    `expected.predicates` itself, so an empty-predicate `expected` paired
-    with `citations_sufficient=None` is the only combination a real
-    `score_run` call could ever produce for the not-applicable case."""
+    -- "not applicable" is derived from `expected.predicates` itself, so an
+    empty-predicate `expected` paired with `citations_sufficient=None` is
+    the only combination a real `score_run` call could ever produce for the
+    not-applicable case."""
     not_applicable_expected = ExpectedOutcome(
         root_cause=RootCauseCode.UNDETERMINED,
         disposition=Disposition.INSUFFICIENT_EVIDENCE,
@@ -1014,9 +1014,9 @@ def test_summarize_evaluation_of_an_empty_batch_reports_no_data() -> None:
 
 
 def test_a_stale_v2_record_with_a_leftover_true_summarizes_as_not_applicable() -> None:
-    """The F4 follow-up fix this test exists for: a HISTORICAL record saved
-    under the pre-F4 scorer (`SCORER_VERSION == "2"`) can still carry a
-    stale `citations_sufficient: true` on an empty-predicate family --
+    """The scorer-migration fix this test exists for: a HISTORICAL record
+    saved under the older scorer (`SCORER_VERSION == "2"`) can still carry
+    a stale `citations_sufficient: true` on an empty-predicate family --
     `score_run` never produces that combination today, but a record saved
     to disk before this fix ran does. Two real saved artifacts in this
     repo have exactly this shape (`results/evaluations/2cc9dabb.../
