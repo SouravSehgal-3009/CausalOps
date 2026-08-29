@@ -38,8 +38,8 @@ every proposal passes through deterministic policy before anything runs; see
 An evidence-grounded incident investigator for a local, synthetic
 microservice lab. CausalOps forms competing hypotheses about the cause of a
 synthetic incident, runs a small number of safe read-only diagnostic checks
-against a local Docker Compose lab, and returns either a cited diagnosis or
-an explicit abstention — never a guess dressed up as confidence.
+against a local Docker Compose lab, and is designed to return a cited
+diagnosis or an explicit abstention.
 
 "Causal" describes the loop CausalOps runs — hypothesis, diagnostic check,
 evidence update — not formal causal inference. CausalOps is decision support
@@ -547,18 +547,26 @@ rejection reasons, require causal evidence") did two things: it gave
 `LiveClaudeModel.respond()` a real error channel — 5 distinct rejection
 reasons instead of one generic message reaching the repair prompt — and it
 partially corrected a real `ambiguous_telemetry` abstention regression,
-via two additive prompt-text changes asking the model to state
-disconfirming evidence for both candidate causes before collapsing them
-into one diagnosis, plus a `downstream_timeout_rate` ->
-`downstream_timeout_share` metric rename and reformulation. Two live
-batches validated it against the same 12-incident corpus, at
-`executed_tools`=3 and `executed_tools`=4.
+via two additive prompt-text changes that ask two different things:
+`SYSTEM_TEXT` now says that collapsing two evidenced causes into one root
+cause is itself a claim needing its own evidence, else the model must
+answer UNDETERMINED and cite both; the separate `HYPOTHESIS_UPDATE` stage
+instruction now asks the model to state evidence against its own
+top-ranked hypothesis before ranking, recorded in that hypothesis's
+`contrary_evidence_ids`. Alongside those two prompt changes, a
+`downstream_timeout_rate` -> `downstream_timeout_share` metric rename and
+reformulation also landed. Two live batches validated it against the same
+12-incident corpus, at `executed_tools`=3 and `executed_tools`=4.
 
 | Configuration | Diagnosis correct | Correct and grounded | Citation valid | `FAILED_SAFE` |
 |---|---:|---:|---:|---:|
 | No-tool baseline (et=3) | 3/12 | 0/12 | 12/12 | 0 |
 | Tool-enabled, et=3 | 11/12 | 5/12 | 12/12 | 0 |
 | Tool-enabled, et=4 | 7/12 | 6/12 | 7/12 | 5 |
+
+The raw per-run records behind this table are checked in at
+`evaluation-evidence/` — structured scores and metadata only, no model
+prose — so this scorecard can be independently verified against real data.
 
 The baseline's `12/12` citation-valid figure is real, not a placeholder:
 every baseline run validly cites the free `SYMPTOM`/`TOPOLOGY` evidence every
