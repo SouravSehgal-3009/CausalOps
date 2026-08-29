@@ -7,11 +7,13 @@
 > diagnostic checks, while holding citation validity at 12/12 and zero
 > failed-safe runs.
 
-That result is measured against the fixed, held-out 12-incident synthetic
-corpus described under "Paired live evaluation" below — a small sample from
-a local synthetic lab, not a production benchmark. See that section for the
-full scorecard, what the headline number leaves out, and what happens at a
-wider evidence budget.
+That result is measured against the fixed, evaluator-hidden 12-incident
+synthetic corpus described under "Paired live evaluation" below — a small
+sample from a local synthetic lab, not a production benchmark, and not an
+unseen validation set in the statistical sense: ground truth is hidden from
+the model, not from the people iterating on the prompt against these same
+incidents. See that section for the full scorecard, what the headline
+number leaves out, and what happens at a wider evidence budget.
 
 ```mermaid
 flowchart TD
@@ -414,23 +416,23 @@ uv run causalops-evaluate --executed-tools 4
 ```
 
 A genuinely separate console script, not a `causalops` subcommand — it runs
-a fixed, held-out 12-incident corpus (4 families x 3 seeds — `evaluation`,
-`evaluation_b`, `evaluation_c`) against the live model: one no-tool baseline
-and one tool-enabled run per incident, saving every record and a per-group
-summary under `results/evaluations/<id>/`. Each invocation runs exactly one
-point on an evidence-budget curve — `Budgets(executed_tools=N,
-model_calls=N + 2)` for `N` in `{2, 3, 4}` — never all three in one run, so
-real spend can be checked between phases rather than committed at once; the
-owner runs the command up to three times, once per `--executed-tools`
-value, to build the full curve. Before any scenario starts, a pre-flight
-check refuses cleanly if the configured ceiling could not possibly cover
-this invocation's own worst-case batch cost, on top of what the application
-has already spent or committed. It requires `ANTHROPIC_API_KEY`, persists
-each completed record as it finishes (not only at the end), and stops
-issuing further paid requests only after an infrastructure-level failure (a
-missing credential, a provider error, or the cost ceiling itself) — an
-ordinary model mistake is still scored as a result, not treated as a reason
-to abort the batch.
+a fixed, evaluator-hidden 12-incident corpus (4 families x 3 seeds —
+`evaluation`, `evaluation_b`, `evaluation_c`) against the live model: one
+no-tool baseline and one tool-enabled run per incident, saving every record
+and a per-group summary under `results/evaluations/<id>/`. Each invocation
+runs exactly one point on an evidence-budget curve —
+`Budgets(executed_tools=N, model_calls=N + 2)` for `N` in `{2, 3, 4}` —
+never all three in one run, so real spend can be checked between phases
+rather than committed at once; the owner runs the command up to three
+times, once per `--executed-tools` value, to build the full curve. Before
+any scenario starts, a pre-flight check refuses cleanly if the configured
+ceiling could not possibly cover this invocation's own worst-case batch
+cost, on top of what the application has already spent or committed. It
+requires `ANTHROPIC_API_KEY`, persists each completed record as it
+finishes (not only at the end), and stops issuing further paid requests
+only after an infrastructure-level failure (a missing credential, a
+provider error, or the cost ceiling itself) — an ordinary model mistake is
+still scored as a result, not treated as a reason to abort the batch.
 
 Reported scores are mechanical: diagnosis and disposition correctness
 against evaluator-only labels, citation validity and sufficiency against
@@ -544,12 +546,13 @@ Commit `6b27e228d08ab82a0b5d3437a54e9bc10ea0c63c` ("Surface respond()
 rejection reasons, require causal evidence") did two things: it gave
 `LiveClaudeModel.respond()` a real error channel — 5 distinct rejection
 reasons instead of one generic message reaching the repair prompt — and it
-fixed a real `ambiguous_telemetry` abstention regression, via two additive
-prompt-text changes asking the model to state disconfirming evidence for
-both candidate causes before collapsing them into one diagnosis, plus a
-`downstream_timeout_rate` -> `downstream_timeout_share` metric rename and
-reformulation. Two live batches validated it against the same 12-incident
-corpus, at `executed_tools`=3 and `executed_tools`=4.
+partially corrected a real `ambiguous_telemetry` abstention regression,
+via two additive prompt-text changes asking the model to state
+disconfirming evidence for both candidate causes before collapsing them
+into one diagnosis, plus a `downstream_timeout_rate` ->
+`downstream_timeout_share` metric rename and reformulation. Two live
+batches validated it against the same 12-incident corpus, at
+`executed_tools`=3 and `executed_tools`=4.
 
 | Configuration | Diagnosis correct | Correct and grounded | Citation valid | `FAILED_SAFE` |
 |---|---:|---:|---:|---:|
@@ -577,7 +580,7 @@ exactly why `correct_and_grounded` is `0/12` there.
 - **Of the 6 et=3 correct diagnoses that failed the grounding bar**: 5 never
   called `query_logs` at all — a correct diagnosis reached off metric/change
   evidence alone, missing the required log predicate entirely (4 non-
-  `ambiguous_telemetry` families plus 1 of the 2 `ambiguous_telemetry`
+  `ambiguous_telemetry` runs plus 1 of the 2 `ambiguous_telemetry`
   cases) — and 1 (`ambiguous_telemetry`) called `query_logs` and retrieved
   one of the two required predicates (`pool_exhausted`) but not the other
   (`upstream_timeout`). These are genuinely different situations, not one
@@ -596,14 +599,13 @@ exactly why `correct_and_grounded` is `0/12` there.
   same INVESTIGATE stage before any credit remains, and `FINAL_ASSESSMENT`
   still runs afterward and fails too, inheriting the same zero-credit state
   (an `uncertainty`-length-cap violation in 1, another visible-text
-  violation in 1). et=4's extra tool-call turn creates one more INVESTIGATE
-  round-trip where the slip can occur, silently spending the run's only
-  repair credit before `FINAL_ASSESSMENT` is ever reached —
-  `FINAL_ASSESSMENT` has no reserved repair credit of its own, a real,
-  traceable architecture property, not model randomness. None of the 5
-  reached a confident wrong diagnosis; every one is a contained, safe stop,
-  the safety design working exactly as intended. The mechanism itself is
-  still open in this codebase — a candidate for future work, not yet fixed.
+  violation in 1). The failures trace to an interaction between stochastic
+  structured-output violations and a single investigation-wide repair
+  credit; the extra turn at et=4 increased exposure to that interaction in
+  this batch. None of the 5 reached a confident wrong diagnosis; every one
+  is a contained, safe stop, the safety design working exactly as
+  intended. The mechanism itself is still open in this codebase — a
+  candidate for future work, not yet fixed.
 
 These two v8 batches cost **$2.80** in real spend ($1.26 at et=3, $1.54 at
 et=4).
@@ -630,10 +632,10 @@ et=4).
   this project has ever run** — 72 tool-enabled records before v8 (see
   "Paired live evaluation" above) plus both v8 batches above, confirmed
   directly: `retrieval_mode` is `disabled` in all 48 v8 records, and no
-  run's receipts include a `search_runbooks` call. That's why Pinecone, the
-  optional semantic-retrieval backend this project supports, was never
-  enabled — there's no live evidence it would help, so no basis to justify
-  onboarding a paid dependency.
+  run's receipts include a `search_runbooks` call. Pinecone was scoped as a
+  later, opt-in semantic-retrieval experiment but never implemented or
+  wired into the codebase — retrieval had no measured usage in any real
+  batch, so there was no basis to justify building it.
 
 ## Development
 
