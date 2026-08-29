@@ -13,10 +13,20 @@ a local synthetic lab, not a production benchmark. See that section for the
 full scorecard, what the headline number leaves out, and what happens at a
 wider evidence budget.
 
-```text
-Alert -> Model hypothesis -> Typed proposal -> Deterministic policy
-      -> Read-only check -> Normalized evidence -> Cited assessment
-      -> Deterministic escalation / final report
+```mermaid
+flowchart TD
+    A[Alert] --> B[Model: hypothesis]
+    B --> C[Typed proposal]
+    C --> D{Deterministic policy}
+    D -- denied --> B
+    D -- authorized --> E[Read-only check]
+    E --> F[Normalized evidence]
+    F --> B
+    F --> G[Cited assessment]
+    G --> H{Escalation trigger?}
+    H -- yes --> I[Escalation interrupt]
+    H -- no --> J[Final report]
+    I --> J
 ```
 
 The model never talks to a tool backend directly at any step in that loop —
