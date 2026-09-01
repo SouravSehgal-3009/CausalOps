@@ -1,6 +1,6 @@
 [project]
 name = "causalops"
-version = "1.0.2"
+version = "1.0.3"
 description = "Evidence-grounded incident investigator for a local synthetic lab"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
