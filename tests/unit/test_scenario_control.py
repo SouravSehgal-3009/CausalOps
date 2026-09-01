@@ -749,15 +749,72 @@ def test_write_json_never_exposes_a_torn_read_under_concurrent_reads(
     write_json(target, payload_a)
     # 4 reader threads, 500 write-pairs: enough concurrent readers and
     # iterations to reliably hit the race, not tuned precisely -- if this
-    # ever flakes, increase iterations first.
-    readers = [threading.Thread(target=reader) for _ in range(4)]
+    # ever flakes, increase iterations first. `daemon=True` plus the
+    # `finally` below: if the 500-write loop itself ever raises (a real
+    # regression, or the CI hang this test exists to catch), the readers
+    # are always signalled to stop and joined before the failure propagates
+    # -- a non-daemon thread left running past a failed assertion is exactly
+    # what turned a fast, legible failure into a 6-hour CI hang.
+    readers = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
     for thread in readers:
         thread.start()
-    for _ in range(500):
-        write_json(target, payload_a)
-        write_json(target, payload_b)
-    stop.set()
-    for thread in readers:
-        thread.join()
+    try:
+        for _ in range(500):
+            write_json(target, payload_a)
+            write_json(target, payload_b)
+    finally:
+        stop.set()
+        for thread in readers:
+            thread.join()
 
     assert errors == []
+
+
+def test_write_json_retries_a_transient_permission_error_on_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows can transiently refuse `Path.replace` with `PermissionError`
+    even when nothing is really wrong -- a virus scanner, a search indexer,
+    or one of this same module's own concurrent readers holding the
+    destination open a moment earlier. This is the concrete mechanism
+    behind the Windows CI hang this fix exists for. `write_json` must
+    retry a bounded number of times and still succeed once the lock
+    clears, not raise on the first transient failure."""
+    target = tmp_path / "config.json"
+    real_replace = Path.replace
+    failures_remaining = 2
+
+    def flaky_replace(self: Path, target_path: Path) -> Path:
+        nonlocal failures_remaining
+        if failures_remaining > 0:
+            failures_remaining -= 1
+            raise PermissionError("simulated transient lock")
+        return real_replace(self, target_path)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    write_json(target, {"a": 1})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+    assert failures_remaining == 0
+
+
+def test_write_json_raises_after_retries_are_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `PermissionError` that never clears (a real, persistent lock, not a
+    transient one) must still surface as a real failure once every retry is
+    exhausted -- not be silently swallowed -- and the temporary file must
+    not be left behind, matching `write_json`'s existing cleanup-on-any-
+    failure contract."""
+    target = tmp_path / "config.json"
+
+    def always_fails(self: Path, target_path: Path) -> Path:
+        raise PermissionError("simulated persistent lock")
+
+    monkeypatch.setattr(Path, "replace", always_fails)
+
+    with pytest.raises(PermissionError):
+        write_json(target, {"a": 1})
+
+    assert list(tmp_path.glob("config.json.tmp-*")) == []

@@ -186,6 +186,10 @@ def compose_file(root: Path) -> Path:
     return root / "lab" / "docker-compose.yml"
 
 
+_REPLACE_ATTEMPTS = 5
+_REPLACE_RETRY_DELAY_SECONDS = 0.05
+
+
 def write_json(path: Path, value: object) -> None:
     """Writes `value` to `path` in one atomic replace, never a
     truncate-then-write in place.
@@ -205,10 +209,32 @@ def write_json(path: Path, value: object) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
     try:
         tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(path)
+        _replace_with_retry(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _replace_with_retry(tmp_path: Path, path: Path) -> None:
+    """Retries `Path.replace` against a transient `PermissionError`.
+
+    Windows can hold a brief, non-owning lock on the destination file (a
+    virus scanner, a search indexer, or one of this same test suite's own
+    concurrent readers opening it a moment earlier) long enough that
+    `Path.replace` raises `PermissionError` even though nothing is actually
+    wrong -- the concrete failure mode behind Windows CI hanging on this
+    path. A handful of short retries clears the transient case; a real,
+    persistent lock still raises `PermissionError` after the last attempt,
+    exactly as before this fix.
+    """
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SECONDS)
 
 
 def compose(root: Path, arguments: list[str], timeout: int) -> None:
