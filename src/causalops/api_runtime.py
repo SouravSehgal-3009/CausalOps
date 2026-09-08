@@ -612,7 +612,15 @@ class SqliteReplayControlPlane(ReplayControlPlane):
         required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
         if any(not hasattr(os, flag) for flag in required_flags):
             raise ValueError("platform lacks safe no-follow artifact reads")
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        # typeshed omits O_DIRECTORY/O_NOFOLLOW on win32 (they're POSIX-only),
+        # so a static `os.O_DIRECTORY` attribute access fails mypy there even
+        # though the hasattr guard above already keeps this branch
+        # unreachable on that platform. getattr() sidesteps the platform
+        # stub instead of needing a `type: ignore` that would be "unused"
+        # on the POSIX runners where the attribute really does exist.
+        o_directory: int = getattr(os, "O_DIRECTORY")  # noqa: B009
+        o_nofollow: int = getattr(os, "O_NOFOLLOW")  # noqa: B009
+        flags = os.O_RDONLY | o_directory | o_nofollow
         root_fd: int | None = None
         directory_fd: int | None = None
         report_fd: int | None = None
@@ -620,7 +628,9 @@ class SqliteReplayControlPlane(ReplayControlPlane):
             root_fd = os.open(self._artifacts_root, flags)
             directory_fd = os.open(investigation_id, flags, dir_fd=root_fd)
             report_fd = os.open(
-                "report.md", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+                "report.md",
+                os.O_RDONLY | o_nofollow,
+                dir_fd=directory_fd,
             )
             report_stat = os.fstat(report_fd)
             if not stat.S_ISREG(report_stat.st_mode) or report_stat.st_nlink != 1:
