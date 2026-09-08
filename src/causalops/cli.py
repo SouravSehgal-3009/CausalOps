@@ -45,7 +45,7 @@ from causalops.graph import (
     run_graph_investigation,
 )
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_setup import build_model_and_registry
+from causalops.live_setup import ProviderDisabledError, build_model_and_registry
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
 from causalops.scenario_control import (
@@ -663,6 +663,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # flags: leaving the old implicit fall-through here would have made
         # `approve`/`reject` silently run `run_investigate_command` instead.
         raise AssertionError(f"unhandled command {arguments.command!r}")
+    except ProviderDisabledError as refusal:
+        print(f"FAIL CLAUDE_DISABLED {refusal}")
+        return 1
     except (LabError, RunRecordError, CheckpointStoreError) as refusal:
         print(f"FAIL {refusal.reason_code.value} {refusal}")
         return 1

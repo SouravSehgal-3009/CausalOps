@@ -1534,6 +1534,27 @@ def test_main_refuses_a_live_evaluation_without_a_credential(
     assert "FAIL MISSING_API_KEY" in capsys.readouterr().out
 
 
+def test_main_refuses_disabled_claude_before_credential_or_target_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_CLAUDE", "false")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def target_must_not_be_created(_: Path) -> Path:
+        raise AssertionError("disabled evaluation created a target")
+
+    monkeypatch.setattr(
+        "causalops.evaluate_cli._new_evaluation_target", target_must_not_be_created
+    )
+
+    assert main([]) == 1
+    output = capsys.readouterr().out
+    assert "FAIL CLAUDE_DISABLED" in output
+    assert "MISSING_API_KEY" not in output
+
+
 def test_main_fails_cleanly_when_the_evaluation_target_cannot_be_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

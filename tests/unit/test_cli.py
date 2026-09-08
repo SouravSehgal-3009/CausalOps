@@ -36,6 +36,7 @@ from causalops.domain import (
     utc_now,
 )
 from causalops.graph import run_graph_investigation
+from causalops.live_setup import ProviderDisabledError
 from causalops.models import ReplayToolCallingModel
 from causalops.run_records import RunRecorder
 from causalops.scenario_control import LabError, LabReasonCode
@@ -168,6 +169,23 @@ def test_a_lab_command_reports_a_refusal_with_its_code(
 
     assert cli.main(["lab", "up"]) == 1
     assert "FAIL DOCKER_UNAVAILABLE" in capsys.readouterr().out
+
+
+def test_primary_cli_reports_disabled_provider_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def disabled(_: Path, __: str, ___: str) -> int:
+        raise ProviderDisabledError("Claude is disabled by ENABLE_CLAUDE=false")
+
+    monkeypatch.setattr(cli, "run_investigate_command", disabled)
+
+    assert cli.main(["investigate", "incident", "--model", "claude"]) == 1
+    output = capsys.readouterr().out
+    assert "FAIL CLAUDE_DISABLED" in output
+    assert "Traceback" not in output
 
 
 def test_a_lab_command_that_works_says_so(

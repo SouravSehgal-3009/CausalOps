@@ -71,7 +71,9 @@ from causalops.evidence import new_opaque_id
 from causalops.graph import run_graph_investigation
 from causalops.live_setup import (
     MAXIMUM_POSSIBLE_RESERVATION_USD,
+    ProviderDisabledError,
     build_model_and_registry,
+    claude_enabled,
     live_evaluation_ceiling_usd,
 )
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
@@ -495,6 +497,11 @@ def run_evaluation(
     is a small fraction of a batch dominated by the tool-enabled arm's
     larger budget at higher curve points.
     """
+    # ``run_evaluation`` is callable independently of ``main`` in tests and
+    # automation. Preserve the disabled-provider preflight at that public
+    # boundary too, before git, cost, corpus, or scenario work begins.
+    if not claude_enabled(os.environ):
+        raise ProviderDisabledError("Claude is disabled by ENABLE_CLAUDE=false")
     git_sha, git_dirty = _git_provenance(root)
     configured_ceiling_usd = live_evaluation_ceiling_usd(os.environ)
     runbook_corpus_version = RunbookIndex().corpus_version
@@ -865,6 +872,12 @@ def main(argv: list[str] | None = None) -> int:
     if root is None:
         print(f"FAIL PROJECT_ROOT_NOT_FOUND No pyproject.toml at or above {start}.")
         return 1
+    # This gate must precede the API-key preflight and target creation. A
+    # disabled deployment must not inspect a credential or write an
+    # evaluation artifact merely because this legacy CLI was invoked.
+    if not claude_enabled(os.environ):
+        print("FAIL CLAUDE_DISABLED ENABLE_CLAUDE=false disables live evaluations.")
+        return 1
     if not os.environ.get(API_KEY_VARIABLE, "").strip():
         print("FAIL MISSING_API_KEY Set ANTHROPIC_API_KEY before a live evaluation.")
         return 1
@@ -881,6 +894,10 @@ def main(argv: list[str] | None = None) -> int:
         records = run_evaluation(root, target, budgets)
     except EvaluationAborted as aborted:
         print(f"FAIL EVALUATION_ABORTED {aborted.reason.value}")
+        print(f"records so far: {records_path}")
+        return 1
+    except ProviderDisabledError as refusal:
+        print(f"FAIL CLAUDE_DISABLED {refusal}")
         print(f"records so far: {records_path}")
         return 1
     except (LabError, RunRecordError, CheckpointStoreError) as refusal:
