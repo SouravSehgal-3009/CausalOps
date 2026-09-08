@@ -31,6 +31,9 @@ dependencies = [
     # the import itself stays safe only because `tests/conftest.py`'s
     # network guard is already active for the whole pytest session by then.
     "langchain-anthropic>=1.6.1",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "google-auth>=2.0",
 ]
 
 [project.scripts]

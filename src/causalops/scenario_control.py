@@ -549,11 +549,15 @@ def start_scenario(
     seed: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     *,
+    incident_id: str | None = None,
     sleeper: Callable[[float], None] = _real_sleep,
 ) -> str:
     """Create one incident: healthy baseline, then the fault, then the packet."""
     definition = apply_seed_variant(load_definition(root, family), seed)
-    incident_id = new_opaque_id()
+    if incident_id is None:
+        incident_id = new_opaque_id()
+    elif not incident_id.isalnum():
+        raise LabError(LabReasonCode.INCIDENT_NOT_FOUND, "that is not an incident ID")
     paths = run_paths(root, incident_id)
     try:
         with _scenario_lock(root):
@@ -634,3 +638,19 @@ def reset_scenario(root: Path, incident_id: str) -> None:
         ):
             marker.unlink()
         shutil.rmtree(target)
+
+
+def release_scenario(root: Path, incident_id: str) -> None:
+    """Release the single active-lab marker while retaining resume inputs.
+
+    A paused replay graph only needs its recorded incident and checkpoint; it
+    must not hold the global scenario marker while an owner reviews a decision.
+    Unlike ``reset_scenario`` this leaves ``runs/<incident_id>`` intact.
+    """
+    with _scenario_lock(root):
+        marker = active_incident_file(root)
+        if (
+            marker.is_file()
+            and marker.read_text(encoding="utf-8").strip() == incident_id
+        ):
+            marker.unlink()

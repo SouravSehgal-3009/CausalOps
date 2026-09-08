@@ -61,7 +61,11 @@ from causalops.domain import (
     ReceiptState,
     StoredIncident,
 )
-from causalops.graph import build_graph, run_graph_investigation
+from causalops.graph import (
+    build_graph,
+    recover_graph_investigation,
+    run_graph_investigation,
+)
 from causalops.models import ReplayReasoningModel, ReplayToolCallingModel
 from causalops.run_records import RunRecorder
 from causalops.telemetry import RunPaths
@@ -179,6 +183,44 @@ def test_a_second_connection_reads_back_the_finished_run(tmp_path: Path) -> None
 
     assert checkpoint is not None
     assert checkpoint.checkpoint["channel_values"]["report"] is not None
+
+
+def test_recovery_returns_a_completed_checkpoint_without_a_second_graph_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "checkpoints.db"
+    model = _model()
+    with closing(sqlite3.connect(str(db_path), check_same_thread=False)) as conn:
+        original = run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,
+            _registry(),
+            RunRecorder(StepClock()),
+            Budgets(),
+            StepClock(),
+            investigation_id="completed-recovery",
+            checkpointer=SqliteSaver(conn),
+        )
+    calls_before_recovery = len(model.requests)
+
+    with closing(sqlite3.connect(str(db_path), check_same_thread=False)) as conn:
+        recovered = recover_graph_investigation(
+            "completed-recovery",
+            SqliteSaver(conn),
+            incident_scope(),
+            alert_packet(),
+            model,
+            _registry(),
+            RunRecorder(StepClock()),
+            Budgets(),
+            StepClock(),
+        )
+
+    assert recovered is not None
+    assert recovered.report == original.report
+    assert len(model.requests) == calls_before_recovery
 
 
 def test_a_raising_backend_leaves_a_durable_reserved_receipt(tmp_path: Path) -> None:
@@ -306,6 +348,50 @@ def test_a_two_process_pause_and_resume_settles_over_a_real_sqlite_file(
     # model calls after reopening the checkpoint from a fresh connection,
     # not just within one process's live object graph.
     assert len(model.requests) == calls_before_resume
+
+
+def test_recovery_reconstructs_a_pending_interrupt_without_rerunning(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "cp.db"
+    script = {
+        "initial_plan": [plan_json(stop_reason="the alert is enough")],
+        "final_assessment": [assessment_json(contrary=(SYMPTOM_EVIDENCE_ID,))],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = logs_only_registry(RecordingLogsBackend())
+    clock = StepClock()
+    with cli._sqlite_checkpointer(db_path) as checkpointer:
+        paused = run_graph_investigation(
+            incident_scope(),
+            alert_packet(),
+            packet_evidence(),
+            model,
+            registry,
+            RunRecorder(StepClock()),
+            Budgets(),
+            clock,
+            investigation_id="pending-recovery",
+            checkpointer=checkpointer,
+        )
+    assert isinstance(paused, EscalatedInvestigation)
+    calls_before_recovery = len(model.requests)
+
+    with cli._sqlite_checkpointer(db_path) as checkpointer:
+        recovered = recover_graph_investigation(
+            "pending-recovery",
+            checkpointer,
+            incident_scope(),
+            alert_packet(),
+            model,
+            registry,
+            RunRecorder(StepClock()),
+            Budgets(),
+            clock,
+        )
+
+    assert recovered == paused
+    assert len(model.requests) == calls_before_recovery
 
 
 def test_an_explicit_investigation_id_becomes_the_report_id_and_the_thread_id(

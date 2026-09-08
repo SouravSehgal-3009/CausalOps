@@ -16,7 +16,7 @@ import os
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
@@ -73,6 +73,14 @@ CANDIDATE_EVALUATION_VARIABLE = "CAUSALOPS_CANDIDATE_EVALUATION"
 
 class ProviderDisabledError(RuntimeError):
     """A composition root attempted to construct a disabled provider."""
+
+
+class ReplayRuntimeWiring(Protocol):
+    """Replay-only graph dependencies selected by an application composition root."""
+
+    def build(
+        self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
+    ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]: ...
 
 
 def claude_enabled(environment: Mapping[str, str]) -> bool:
@@ -270,6 +278,51 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
     return value
 
 
+def _build_tool_registry(
+    paths: RunPaths, budgets: Budgets
+) -> Mapping[ToolName, ToolWrapper]:
+    """Build the incident-scoped tool registry shared by fixed providers."""
+    runbook_index = RunbookIndex()
+    return dispatch_registry(
+        run_metric=lambda arguments, scope: run_metric_check(
+            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
+        ),
+        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
+        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
+        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
+        run_search=lambda arguments, scope: run_runbook_search(
+            arguments, runbook_index
+        ),
+    )
+
+
+def build_replay_model_and_registry(
+    incident: StoredIncident, paths: RunPaths, budgets: Budgets
+) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
+    """Build only hosted replay dependencies; no other provider is reachable."""
+    replay_model = ReplayToolCallingModel(
+        ReplayReasoningModel(
+            REPLAY_FIXTURE,
+            substitutions={
+                "incident_id": incident.scope.incident_id,
+                "window_start": incident.scope.started_at.isoformat(),
+                "window_end": incident.scope.ended_at.isoformat(),
+                "symptom_evidence_id": incident.packet.symptom_evidence_id,
+            },
+        )
+    )
+    return replay_model, _build_tool_registry(paths, budgets), REPLAY_MODEL_NAME
+
+
+class HostedReplayRuntimeWiring:
+    """Composition-selected implementation of the replay-only runtime seam."""
+
+    def build(
+        self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
+    ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
+        return build_replay_model_and_registry(incident, paths, budgets)
+
+
 def build_model_and_registry(
     incident: StoredIncident,
     paths: RunPaths,
@@ -297,38 +350,14 @@ def build_model_and_registry(
     SQLite transactions from another's on the same file. Returned to the
     caller (`None` for replay) so its lifetime is the caller's to close.
     """
-    # A fresh in-memory index per call -- the corpus is small and read-only,
-    # so rebuilding it costs nothing measurable, and it keeps this function's
-    # "everything an incident needs, built fresh" contract intact rather
-    # than reaching for a module-level singleton `search_runbooks` alone
-    # would need.
-    runbook_index = RunbookIndex()
-    registry = dispatch_registry(
-        run_metric=lambda arguments, scope: run_metric_check(
-            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
-        ),
-        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
-        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
-        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
-        ),
-    )
     process_environment = environment if environment is not None else os.environ
     profile = profile_for_legacy_choice(model_choice)
     if profile == REPLAY_HOSTED:
-        replay_model = ReplayToolCallingModel(
-            ReplayReasoningModel(
-                REPLAY_FIXTURE,
-                substitutions={
-                    "incident_id": incident.scope.incident_id,
-                    "window_start": incident.scope.started_at.isoformat(),
-                    "window_end": incident.scope.ended_at.isoformat(),
-                    "symptom_evidence_id": incident.packet.symptom_evidence_id,
-                },
-            )
+        model, registry, model_name = build_replay_model_and_registry(
+            incident, paths, budgets
         )
-        return replay_model, registry, REPLAY_MODEL_NAME, None
+        return model, registry, model_name, None
+    registry = _build_tool_registry(paths, budgets)
     # This must precede credential inspection, SQLite setup, and
     # ``LiveClaudeModel`` construction.  In particular it gives disabled
     # deployments a no-credential, no-client, no-network failure path.
