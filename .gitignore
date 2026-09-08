@@ -1,4 +1,5 @@
 .env
+.env.vm
 .venv/
 
 __pycache__/
@@ -14,6 +15,10 @@ dist/
 
 runs/
 results/
+
+infra/phase2/*.tfvars
+infra/phase2/.terraform/
+infra/phase2/*.tfstate*
 
 # Contributor instructions stay local; the product specification is not ignored.
 AGENTS.md
