@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -30,6 +31,22 @@ from causalops.api_runtime import (
 from causalops.approvals import ensure_decisions_table, record_decision_before_resume
 from causalops.domain import utc_now
 from causalops.live_setup import HostedReplayRuntimeWiring
+
+# `_read_report_snapshot`'s descriptor-anchored, no-follow report read
+# requires O_DIRECTORY/O_NOFOLLOW, which do not exist in the real `os`
+# module on win32 (not just absent from typeshed's stubs there) -- every
+# report read genuinely raises on real Windows today. This is a real,
+# pre-existing gap in the hosted API, not a test-harness artifact: Windows
+# is unsupported for report finalization/delivery/retrieval until a
+# Windows-safe equivalent open path is built.
+requires_posix_no_follow_reads = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "hosted report finalization/delivery/retrieval needs "
+        "os.O_DIRECTORY/os.O_NOFOLLOW, which do not exist on win32; "
+        "unsupported on Windows today, not a test-only gap"
+    ),
+)
 
 
 class FakeRunner:
@@ -212,6 +229,7 @@ def test_worker_reconciles_a_ledger_write_interrupted_before_queueing(
     assert recovered.owner_decision == DecisionRequest(decision="accept")
 
 
+@requires_posix_no_follow_reads
 def test_finalization_queues_one_owner_only_delivery(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -244,6 +262,7 @@ def test_finalization_queues_one_owner_only_delivery(tmp_path: Path) -> None:
         )
 
 
+@requires_posix_no_follow_reads
 def test_finalization_and_report_refuse_another_investigations_artifact(
     tmp_path: Path,
 ) -> None:
@@ -278,6 +297,7 @@ def test_finalization_and_report_refuse_another_investigations_artifact(
         control_plane.report("first@example.com", first.investigation_id)
 
 
+@requires_posix_no_follow_reads
 def test_finalization_refuses_file_and_directory_symlinked_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -305,6 +325,7 @@ def test_finalization_refuses_file_and_directory_symlinked_artifacts(
         )
 
 
+@requires_posix_no_follow_reads
 def test_finalization_refuses_a_directory_symlinked_artifact(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -326,6 +347,7 @@ def test_finalization_refuses_a_directory_symlinked_artifact(tmp_path: Path) -> 
         )
 
 
+@requires_posix_no_follow_reads
 def test_finalization_refuses_a_cross_owner_hard_link(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -351,6 +373,7 @@ def test_finalization_refuses_a_cross_owner_hard_link(tmp_path: Path) -> None:
         )
 
 
+@requires_posix_no_follow_reads
 def test_report_snapshot_ignores_a_symlink_swapped_after_finalization(
     tmp_path: Path,
 ) -> None:
@@ -379,6 +402,7 @@ def test_report_snapshot_ignores_a_symlink_swapped_after_finalization(
     )
 
 
+@requires_posix_no_follow_reads
 def test_worker_uses_durable_checkpoint_and_finalizes_once(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -415,6 +439,7 @@ def test_worker_uses_durable_checkpoint_and_finalizes_once(tmp_path: Path) -> No
     assert not worker.run_once()
 
 
+@requires_posix_no_follow_reads
 def test_delivery_worker_releases_a_failure_and_retries(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     clock = FakeClock()
@@ -519,6 +544,7 @@ def test_only_one_job_can_claim_the_single_mutable_scenario(tmp_path: Path) -> N
     assert control_plane.claim_next() is None
 
 
+@requires_posix_no_follow_reads
 def test_runner_adopts_an_artifact_published_before_control_plane_finalization(
     tmp_path: Path,
 ) -> None:
@@ -546,6 +572,7 @@ def test_runner_adopts_an_artifact_published_before_control_plane_finalization(
     )
 
 
+@requires_posix_no_follow_reads
 def test_runner_releases_paused_and_finalized_scenario_markers(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "results" / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -589,6 +616,7 @@ def test_runner_releases_paused_and_finalized_scenario_markers(tmp_path: Path) -
     assert not run_directory.exists()
 
 
+@requires_posix_no_follow_reads
 def test_runner_reconciles_marker_cleanup_after_a_transition_crash(
     tmp_path: Path,
 ) -> None:
@@ -709,6 +737,7 @@ def test_deferred_scenario_retry_keeps_other_jobs_from_using_its_lab(
     assert retried_claim.investigation_id == first.investigation_id
 
 
+@requires_posix_no_follow_reads
 def test_delivery_retry_limit_does_not_block_later_deliveries(tmp_path: Path) -> None:
     clock = FakeClock()
     artifacts_root = tmp_path / "investigations"
@@ -753,6 +782,7 @@ def test_delivery_retry_limit_does_not_block_later_deliveries(tmp_path: Path) ->
     assert next_delivery.investigation_id == second.investigation_id
 
 
+@requires_posix_no_follow_reads
 def test_worker_requeues_when_finalization_fails_after_the_runner_returns(
     tmp_path: Path,
 ) -> None:
@@ -787,6 +817,7 @@ def test_worker_renews_a_running_lease_for_a_slow_runner(tmp_path: Path) -> None
     )
 
 
+@requires_posix_no_follow_reads
 def test_delivery_worker_renews_a_lease_for_a_slow_sender(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
     control_plane = SqliteReplayControlPlane(
@@ -813,6 +844,7 @@ def test_delivery_worker_renews_a_lease_for_a_slow_sender(tmp_path: Path) -> Non
     assert status == ("SENT",)
 
 
+@requires_posix_no_follow_reads
 def test_expired_delivery_claim_is_reclaimed_with_a_stable_idempotency_key(
     tmp_path: Path,
 ) -> None:
