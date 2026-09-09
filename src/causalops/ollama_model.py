@@ -141,6 +141,21 @@ class OllamaQwenToolCallingModel:
     def _request_content(
         self, request: ModelRequest, schema: type[BaseModel]
     ) -> dict[str, Any]:
+        # Qwen-only reminder, not added to the shared prompt in prompts.py:
+        # each tool-arguments schema has a `tool` field marked `const` with a
+        # `default`, but Pydantic's discriminated-union resolution needs that
+        # key physically present in the response to route to the right
+        # sub-schema -- it does not apply the default before discriminating.
+        # Observed live: Qwen repeatedly omits it, failing with "Unable to
+        # extract tag using discriminator 'tool'". Claude and replay were
+        # never observed to need this, so it stays local to this adapter
+        # rather than changing the shared system prompt every model sees.
+        system_text = (
+            f"{request.system_text}\n\nWhen you propose a tool call, the "
+            'arguments object must include a literal "tool" field set to '
+            "that exact tool's name as a string, even though it repeats the "
+            "tool name -- never omit it."
+        )
         user_content = request.context_text
         if request.repair_errors:
             user_content = (
@@ -159,7 +174,7 @@ class OllamaQwenToolCallingModel:
             "think": False,
             "format": schema.model_json_schema(),
             "messages": [
-                {"role": "system", "content": request.system_text},
+                {"role": "system", "content": system_text},
                 {"role": "user", "content": user_content},
             ],
         }

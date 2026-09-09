@@ -153,16 +153,22 @@ def test_ollama_adapter_uses_an_injected_vm_local_transport(
     assert calls[0][0] == "http://127.0.0.1:11434/api/chat"
     assert calls[0][1]["model"] == "qwen3.5:4b"
     assert calls[0][1]["format"] == FinalAssessment.model_json_schema()
-    assert calls[0][1]["messages"] == [
-        {"role": "system", "content": "system"},
-        {
-            "role": "user",
-            "content": (
-                "context\n\nPrevious output was rejected: bad enum\n"
-                "Return a corrected JSON object only."
-            ),
-        },
-    ]
+    messages = calls[0][1]["messages"]
+    assert isinstance(messages, list)
+    system_message = messages[0]
+    assert isinstance(system_message, dict)
+    assert system_message["role"] == "system"
+    # The adapter appends its own discriminator-field reminder after the
+    # caller's system_text; assert the original text is still there
+    # unmodified rather than duplicating that reminder's exact wording here.
+    assert system_message["content"].startswith("system\n\n")
+    assert messages[1] == {
+        "role": "user",
+        "content": (
+            "context\n\nPrevious output was rejected: bad enum\n"
+            "Return a corrected JSON object only."
+        ),
+    }
 
 
 def test_ollama_proposal_sends_its_stage_schema(
