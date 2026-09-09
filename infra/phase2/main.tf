@@ -14,6 +14,21 @@ provider "google" {
   region  = var.region
 }
 
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
+# Required for the VM's default service account to impersonate
+# `replay_control_plane` at all (`google_service_account_iam_member.
+# vm_impersonates_control_plane` below) -- without it, every impersonated
+# credential request is refused with SERVICE_DISABLED, discovered live
+# during Phase B validation.
+resource "google_project_service" "iam_credentials" {
+  project            = var.project_id
+  service            = "iamcredentials.googleapis.com"
+  disable_on_destroy = false
+}
+
 # This identity is for the replay control plane only. It has no owner role,
 # service-account-key, compute, network, or provider-management permissions.
 resource "google_service_account" "replay_control_plane" {
@@ -69,4 +84,18 @@ resource "google_storage_bucket_iam_member" "control_plane_artifact_reader" {
     description = "Read artifacts below the investigation prefix only."
     expression  = "resource.name.startsWith('${local.artifact_prefix}')"
   }
+}
+
+# The VM's own runtime identity is its default Compute Engine service
+# account, not `replay_control_plane` -- no `google_service_account_key`
+# exists (see the bucket resource's own comment: no key ever created), so
+# the application impersonates `replay_control_plane` for exactly as long
+# as one GCS request instead. This is the only grant the VM's default SA
+# receives; it still has no direct bucket role of its own.
+resource "google_service_account_iam_member" "vm_impersonates_control_plane" {
+  service_account_id = google_service_account.replay_control_plane.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+
+  depends_on = [google_project_service.iam_credentials]
 }

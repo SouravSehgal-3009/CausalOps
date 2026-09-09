@@ -34,6 +34,12 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn>=0.52.4",
     "google-auth>=2.0",
+    # `gcs_artifacts.py`'s durable final-artifact upload to the Phase 2
+    # provisioned bucket (spec §3.1). Only imported by `api_runtime.py`,
+    # never by `cli.py`/`evaluate_cli.py` -- `tests/security/test_no_tracing.py`
+    # already proves those two import paths send no network request; this
+    # dependency does not enter that chain at all.
+    "google-cloud-storage>=2.18",
 ]
 
 [project.scripts]
@@ -80,6 +86,13 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[[tool.mypy.overrides]]
+# google-cloud-storage ships no py.typed marker mypy recognizes -- scoped
+# to exactly the two submodules gcs_artifacts.py imports, not a blanket
+# google.* exemption.
+module = ["google.cloud", "google.cloud.storage", "google.api_core.exceptions"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,6 @@
 output "control_plane_service_account_email" {
   value       = google_service_account.replay_control_plane.email
-  description = "Attach this identity to the replay control-plane deployment."
+  description = "Attach this identity to the replay control-plane deployment, or (when attaching directly is not done) set it as CAUSALOPS_ARTIFACT_SERVICE_ACCOUNT so the app impersonates it for GCS access -- see vm_impersonates_control_plane."
 }
 
 output "artifact_bucket_name" {

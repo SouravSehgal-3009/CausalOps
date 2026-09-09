@@ -45,6 +45,7 @@ from causalops.approvals import (
 from causalops.cli import _load_verified_incident, _sqlite_checkpointer
 from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import Budgets, EscalatedInvestigation, utc_now
+from causalops.gcs_artifacts import ARTIFACT_NAMES, ArtifactStore, GcsArtifactStore
 from causalops.google_identity import GoogleIdentityVerifier
 from causalops.graph import (
     recover_graph_investigation,
@@ -1495,10 +1496,31 @@ class ReplayGraphJobRunner:
         root: Path,
         control_plane: SqliteReplayControlPlane,
         replay_wiring: ReplayRuntimeWiring,
+        artifact_store: ArtifactStore | None = None,
     ) -> None:
         self._root = root
         self._control_plane = control_plane
         self._replay_wiring = replay_wiring
+        self._artifact_store = artifact_store
+
+    def _upload_finalized_artifacts(self, investigation_id: str) -> None:
+        """Best-available durable copy: no-op when no bucket is configured
+        (`artifact_store is None`, the default -- unchanged behavior for
+        every existing deployment/test). When configured, reads the 5
+        artifacts back from the local directory `finalize_investigation`
+        already wrote (or a prior crashed attempt already wrote -- see
+        `_has_finalized_artifact`), so this is safe to call from either of
+        `run()`'s two `FinalizedWorkerOutcome` paths, and safe to retry:
+        `GcsArtifactStore` itself treats a repeat upload of an
+        already-durable artifact as success, not an error."""
+        if self._artifact_store is None:
+            return
+        directory = self._root / "results" / "investigations" / investigation_id
+        artifacts = {
+            name: (directory / name).read_text(encoding="utf-8")
+            for name in ARTIFACT_NAMES
+        }
+        self._artifact_store.write_investigation_artifacts(investigation_id, artifacts)
 
     def _has_finalized_artifact(self, investigation_id: str) -> bool:
         """Recognize only the exact regular report a crashed worker may adopt."""
@@ -1556,6 +1578,7 @@ class ReplayGraphJobRunner:
             # ``finalize_investigation`` atomically renamed the complete
             # directory before a prior process died. Let the control plane
             # snapshot and publish it instead of running the graph again.
+            self._upload_finalized_artifacts(claim.investigation_id)
             return FinalizedWorkerOutcome(
                 report_artifact=f"{claim.investigation_id}/report.md"
             )
@@ -1647,6 +1670,7 @@ class ReplayGraphJobRunner:
                     result.report, result.evidence, result.receipts, model_name
                 ),
             )
+            self._upload_finalized_artifacts(claim.investigation_id)
             return FinalizedWorkerOutcome(
                 report_artifact=f"{claim.investigation_id}/report.md"
             )
@@ -1783,7 +1807,25 @@ def app() -> FastAPI:
         if mcp_dispatch_requested
         else HostedReplayRuntimeWiring()
     )
-    runner = ReplayGraphJobRunner(root, control_plane, replay_wiring)
+    # Optional: no bucket configured means no GCS upload, unchanged behavior
+    # for every deployment that has not set this yet. `GcsArtifactStore`'s
+    # own constructor resolves ADC (or impersonated credentials, when
+    # `CAUSALOPS_ARTIFACT_SERVICE_ACCOUNT` is also set -- see
+    # `infra/phase2/main.tf`'s `vm_impersonates_control_plane` grant) at
+    # this point, not at import time.
+    artifact_bucket_name = os.environ.get("CAUSALOPS_ARTIFACT_BUCKET", "").strip()
+    artifact_service_account = os.environ.get(
+        "CAUSALOPS_ARTIFACT_SERVICE_ACCOUNT", ""
+    ).strip()
+    artifact_store = (
+        GcsArtifactStore(
+            artifact_bucket_name,
+            target_service_account=artifact_service_account or None,
+        )
+        if artifact_bucket_name
+        else None
+    )
+    runner = ReplayGraphJobRunner(root, control_plane, replay_wiring, artifact_store)
     workers = BackgroundControlPlaneWorkers(
         ReplayWorker(
             control_plane,

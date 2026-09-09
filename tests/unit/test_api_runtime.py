@@ -2,6 +2,7 @@ import os
 import sqlite3
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ from causalops.api_runtime import (
 )
 from causalops.approvals import ensure_decisions_table, record_decision_before_resume
 from causalops.domain import utc_now
+from causalops.gcs_artifacts import ARTIFACT_NAMES
 from causalops.live_setup import HostedReplayRuntimeWiring
 
 # `_read_report_snapshot`'s descriptor-anchored, no-follow report read
@@ -600,6 +602,78 @@ def test_runner_adopts_an_artifact_published_before_control_plane_finalization(
     )
     assert control_plane.report("owner@example.com", created.investigation_id) == (
         "# Recovered report"
+    )
+
+
+class RecordingArtifactStore:
+    """A fake `GcsArtifactStore` -- the same seam-testing approach this
+    file already uses for `IdentityVerifier`/scenario control functions."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def write_investigation_artifacts(
+        self, investigation_id: str, artifacts: Mapping[str, str]
+    ) -> None:
+        self.calls.append((investigation_id, dict(artifacts)))
+
+
+@requires_posix_no_follow_reads
+def test_runner_uploads_adopted_artifacts_when_a_store_is_configured(
+    tmp_path: Path,
+) -> None:
+    """The fast path (`_has_finalized_artifact`, a prior process already
+    wrote locally and died) must ALSO upload to GCS when a store is
+    configured -- not just the fresh-finalize path -- since a real crash
+    could happen after the local write but before the original upload."""
+    artifacts_root = tmp_path / "results" / "investigations"
+    control_plane = SqliteReplayControlPlane(
+        tmp_path / "control-plane.db", artifacts_root=artifacts_root
+    )
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
+    investigation_directory = artifacts_root / created.investigation_id
+    investigation_directory.mkdir(parents=True)
+    expected_content = {name: f"content-for-{name}" for name in ARTIFACT_NAMES}
+    for name, content in expected_content.items():
+        (investigation_directory / name).write_text(content, encoding="utf-8")
+    claim = control_plane.claim_next()
+    assert claim is not None
+    store = RecordingArtifactStore()
+
+    outcome = ReplayGraphJobRunner(
+        tmp_path, control_plane, HostedReplayRuntimeWiring(), store
+    ).run(claim)
+
+    assert outcome == FinalizedWorkerOutcome(
+        report_artifact=f"{created.investigation_id}/report.md"
+    )
+    assert store.calls == [(created.investigation_id, expected_content)]
+
+
+@requires_posix_no_follow_reads
+def test_runner_never_touches_the_artifact_store_when_none_is_configured(
+    tmp_path: Path,
+) -> None:
+    """The default (`artifact_store=None`) must stay a true no-op --
+    proven by NOT configuring a store and confirming the adopted-artifact
+    fast path still succeeds exactly as it did before this feature
+    existed, matching every other `ReplayGraphJobRunner(...)` call site in
+    this file that never passes one."""
+    artifacts_root = tmp_path / "results" / "investigations"
+    control_plane = SqliteReplayControlPlane(
+        tmp_path / "control-plane.db", artifacts_root=artifacts_root
+    )
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
+    write_report(artifacts_root, created.investigation_id, "# Recovered report")
+    claim = control_plane.claim_next()
+    assert claim is not None
+
+    outcome = ReplayGraphJobRunner(
+        tmp_path, control_plane, HostedReplayRuntimeWiring()
+    ).run(claim)
+
+    assert outcome == FinalizedWorkerOutcome(
+        report_artifact=f"{created.investigation_id}/report.md"
     )
 
 
