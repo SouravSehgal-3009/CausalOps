@@ -212,8 +212,10 @@ def test_server_exposes_only_the_pinned_catalog_and_refuses_unapproved_calls() -
     )
     listed = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert listed is not None
+    # search_runbooks is deliberately absent -- it stays a direct retrieval
+    # backend, never one of the tools MCP is approved to serve (mcp_manifest.py).
     assert {tool["name"] for tool in listed["result"]["tools"]} == {
-        tool.value for tool in ToolName
+        tool.value for tool in ToolName if tool is not ToolName.SEARCH_RUNBOOKS
     }
     refused = server.handle(
         {

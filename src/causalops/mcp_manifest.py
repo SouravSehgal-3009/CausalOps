@@ -18,7 +18,6 @@ from causalops.tools import (
     ListRecentChangesArguments,
     QueryLogsArguments,
     QueryMetricArguments,
-    SearchRunbooksArguments,
     ToolName,
 )
 
@@ -85,14 +84,17 @@ _TOOL_ARGUMENT_MODELS: tuple[tuple[ToolName, type[BaseModel]], ...] = (
     (ToolName.QUERY_LOGS, QueryLogsArguments),
     (ToolName.LIST_RECENT_CHANGES, ListRecentChangesArguments),
     (ToolName.GET_TOPOLOGY, GetTopologyArguments),
-    (ToolName.SEARCH_RUNBOOKS, SearchRunbooksArguments),
 )
 
-# A schema change must deliberately update this reviewed value and the
+# `search_runbooks` is deliberately absent: it returns advisory guidance, not
+# an incident observation, so it stays a direct retrieval backend on the
+# client side (see `mcp_client_registry.build_mcp_tool_registry`) and is
+# never one of the tools this MCP server can serve. A schema change to any
+# tool listed above must deliberately update this reviewed value and the
 # corresponding manifest regression test. It prevents an edit to a Pydantic
 # arguments model from silently expanding the MCP capability grant.
 PINNED_MANIFEST_SHA256 = (
-    "7886e3705cee64ca76e2a79cb72a44bfe0ac703a01465f8f483461c3b164074a"
+    "8e10d43c319ce1b6bdac81d5dc290ccbfc472c10e59c9345d12d04d49ee3b82d"
 )
 
 

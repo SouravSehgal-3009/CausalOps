@@ -18,8 +18,17 @@ under its own `[project.scripts]` entry (`causalops-evaluate`) in
 `pyproject.toml` -- not a subcommand of it. `causalops.cli` never imports
 this module, and this module never imports `causalops.cli`;
 `tests/security/test_evaluate_cli_isolation.py` proves the first half
-directly. Both scripts share their live-model/tool-registry construction
-through `causalops.live_setup`, the neutral module neither one owns.
+directly.
+
+Unlike `causalops investigate --model claude`, which still dispatches tool
+calls through `live_setup.build_model_and_registry`'s direct in-process
+registry, this script dispatches through the real MCP local-stdio
+transport (`mcp_client_registry.build_claude_model_and_mcp_registry`) --
+the "final transport" the reference evaluation is meant to exercise once
+Phase 3's transport passes its own approval gate
+(`mcp_policy_adapter._APPROVED_MCP_DISPATCH`). One `McpChildProcess` is
+spawned per scored run and closed in `_run_one`'s own `finally`, mirroring
+`live_setup.ReplayRuntimeWiring`'s teardown contract.
 
 This script drives real, billed Anthropic requests through the exact same
 `cost_ledger.py` reservation/settlement machinery every other live call in
@@ -72,10 +81,10 @@ from causalops.graph import run_graph_investigation
 from causalops.live_setup import (
     MAXIMUM_POSSIBLE_RESERVATION_USD,
     ProviderDisabledError,
-    build_model_and_registry,
     claude_enabled,
     live_evaluation_ceiling_usd,
 )
+from causalops.mcp_client_registry import build_claude_model_and_mcp_registry
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import (
@@ -312,10 +321,9 @@ def _run_one(
     checkpoints_db = ProjectPaths(root=root).checkpoints_db
     checkpoints_db.parent.mkdir(parents=True, exist_ok=True)
     paths = run_paths(root, incident.scope.incident_id)
-    model, registry, model_name, ledger_conn = build_model_and_registry(
-        incident, paths, budgets, "claude", checkpoints_db
+    model, registry, model_name, ledger_conn, release_child = (
+        build_claude_model_and_mcp_registry(incident, paths, budgets, checkpoints_db)
     )
-    assert ledger_conn is not None, "causalops-evaluate always uses the live model"
     try:
         recorder = RunRecorder(utc_now)
         result = run_graph_investigation(
@@ -397,6 +405,7 @@ def _run_one(
         )
     finally:
         ledger_conn.close()
+        release_child()
 
 
 def _preflight_worst_case_batch_usd(budgets: Budgets) -> float:

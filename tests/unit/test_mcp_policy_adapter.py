@@ -1,6 +1,7 @@
 """The candidate MCP executor must retain the established policy boundary."""
 
 import json
+from collections.abc import Callable
 
 import pytest
 from fake_incident import (
@@ -8,34 +9,74 @@ from fake_incident import (
     RecordingChangesBackend,
     RecordingLogsBackend,
     RecordingMetricBackend,
-    RecordingRunbooksBackend,
     RecordingTopologyBackend,
     StepClock,
     incident_scope,
 )
 
 import causalops.mcp_policy_adapter as mcp_policy_adapter
-from causalops.domain import Budgets, PolicyResult, ReasonCode
+from causalops.domain import (
+    Budgets,
+    CheckOutcome,
+    IncidentScope,
+    PolicyResult,
+    ReasonCode,
+)
 from causalops.mcp_policy_adapter import (
     McpDispatchApprovalError,
     PolicyWrappedMcpExecutor,
     policy_approved_mcp_server,
 )
 from causalops.mcp_stdio import McpObservabilityServer
-from causalops.tool_wrappers import ReservationLedger, dispatch_registry
-from causalops.tools import GetTopologyArguments
+from causalops.tool_wrappers import (
+    ReservationLedger,
+    ToolWrapper,
+    get_topology_wrapper,
+    list_recent_changes_wrapper,
+    query_logs_wrapper,
+    query_metric_wrapper,
+)
+from causalops.tools import (
+    GetTopologyArguments,
+    ListRecentChangesArguments,
+    QueryLogsArguments,
+    QueryMetricArguments,
+    ToolName,
+)
+
+
+def _mcp_registry(
+    *,
+    run_metric: Callable[[QueryMetricArguments, IncidentScope], CheckOutcome]
+    | None = None,
+    run_logs: Callable[[QueryLogsArguments, IncidentScope], CheckOutcome] | None = None,
+    run_changes: Callable[[ListRecentChangesArguments, IncidentScope], CheckOutcome]
+    | None = None,
+    run_topology: Callable[[GetTopologyArguments, IncidentScope], CheckOutcome]
+    | None = None,
+) -> dict[ToolName, ToolWrapper]:
+    """A direct 4-tool registry, matching what `mcp_server_main._build_
+    registry` actually builds -- `search_runbooks` is not one of the tools
+    MCP is approved to serve (see `mcp_manifest.py`), so `PolicyWrappedMcp
+    Executor`'s registry never carries it either."""
+    return {
+        ToolName.QUERY_METRIC: query_metric_wrapper(
+            run_metric or RecordingMetricBackend()
+        ),
+        ToolName.QUERY_LOGS: query_logs_wrapper(run_logs or RecordingLogsBackend()),
+        ToolName.LIST_RECENT_CHANGES: list_recent_changes_wrapper(
+            run_changes or RecordingChangesBackend()
+        ),
+        ToolName.GET_TOPOLOGY: get_topology_wrapper(
+            run_topology or RecordingTopologyBackend()
+        ),
+    }
 
 
 def test_policy_wrapped_executor_refuses_cross_incident_before_backend_call() -> None:
     topology = RecordingTopologyBackend()
     executor = PolicyWrappedMcpExecutor(
-        dispatch_registry(
-            run_metric=RecordingMetricBackend(),
-            run_logs=RecordingLogsBackend(),
-            run_changes=RecordingChangesBackend(),
-            run_topology=topology,
-            run_search=RecordingRunbooksBackend(),
-        ),
+        _mcp_registry(run_topology=topology),
         incident_scope(),
         set(),
         Budgets(),
@@ -54,13 +95,7 @@ def test_policy_wrapped_executor_refuses_cross_incident_before_backend_call() ->
 
 def _executor() -> PolicyWrappedMcpExecutor:
     return PolicyWrappedMcpExecutor(
-        dispatch_registry(
-            run_metric=RecordingMetricBackend(),
-            run_logs=RecordingLogsBackend(),
-            run_changes=RecordingChangesBackend(),
-            run_topology=RecordingTopologyBackend(),
-            run_search=RecordingRunbooksBackend(),
-        ),
+        _mcp_registry(),
         incident_scope(),
         set(),
         Budgets(),

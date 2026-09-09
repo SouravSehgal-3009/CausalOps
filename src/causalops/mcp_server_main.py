@@ -36,35 +36,50 @@ from causalops.mcp_stdio import (
     encode_jsonrpc_line,
 )
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
-from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
     RunPaths,
     run_changes_check,
     run_logs_check,
     run_topology_check,
 )
-from causalops.tool_wrappers import ReservationLedger, ToolWrapper, dispatch_registry
+from causalops.tool_wrappers import (
+    ReservationLedger,
+    ToolWrapper,
+    get_topology_wrapper,
+    list_recent_changes_wrapper,
+    query_logs_wrapper,
+    query_metric_wrapper,
+)
 from causalops.tools import ToolName
 
 
 def _build_registry(
     paths: RunPaths, budgets: Budgets
 ) -> Mapping[ToolName, ToolWrapper]:
-    """Mirrors `live_setup._build_tool_registry`'s real-backend wiring exactly
-    (same functions, same lambdas) -- the only difference is this registry
-    runs inside the MCP child, not the graph process."""
-    runbook_index = RunbookIndex()
-    return dispatch_registry(
-        run_metric=lambda arguments, scope: run_metric_check(
-            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
+    """Mirrors `live_setup._build_tool_registry`'s real-backend wiring for the
+    4 tools MCP is approved to serve (same functions, same lambdas) -- the
+    only difference is this registry runs inside the MCP child, not the
+    graph process. Built as a direct partial dict, not through
+    `dispatch_registry` (which requires all 5 tools by design): `search_
+    runbooks` is deliberately absent here -- see `mcp_manifest.py`'s own
+    comment -- so `approved_tool_names()` and this registry's key set stay
+    exactly equal, which `PolicyWrappedMcpExecutor.__init__` enforces."""
+    return {
+        ToolName.QUERY_METRIC: query_metric_wrapper(
+            lambda arguments, scope: run_metric_check(
+                arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
+            )
         ),
-        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
-        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
-        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
+        ToolName.QUERY_LOGS: query_logs_wrapper(
+            lambda arguments, scope: run_logs_check(arguments, paths)
         ),
-    )
+        ToolName.LIST_RECENT_CHANGES: list_recent_changes_wrapper(
+            lambda arguments, scope: run_changes_check(arguments, paths)
+        ),
+        ToolName.GET_TOPOLOGY: get_topology_wrapper(
+            lambda arguments, scope: run_topology_check(arguments, paths)
+        ),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

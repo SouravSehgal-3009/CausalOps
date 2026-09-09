@@ -23,12 +23,16 @@ def discovered_manifest() -> list[McpToolDiscovery]:
     ]
 
 
-def test_manifest_pins_the_complete_read_only_tool_set() -> None:
+def test_manifest_pins_the_four_observability_tools_not_search_runbooks() -> None:
+    """`search_runbooks` returns advisory guidance, not an incident
+    observation, so it is deliberately absent from the MCP-approved set --
+    the manifest covers only the 4 read-only observability tools."""
     manifest = pinned_observability_manifest()
+    expected = frozenset(ToolName) - {ToolName.SEARCH_RUNBOOKS}
 
     assert manifest.protocol_version == MCP_PROTOCOL_VERSION
-    assert approved_tool_names() == frozenset(ToolName)
-    assert {tool.name for tool in manifest.tools} == set(ToolName)
+    assert approved_tool_names() == expected
+    assert {tool.name for tool in manifest.tools} == expected
 
 
 def test_matching_discovery_returns_pinned_values_not_server_values() -> None:

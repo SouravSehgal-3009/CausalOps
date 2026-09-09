@@ -1717,17 +1717,28 @@ def app() -> FastAPI:
         artifacts_root=root / "results" / "investigations",
         checkpoint_database=ProjectPaths(root=root).checkpoints_db,
     )
-    # Belt-and-suspenders gate: even if CAUSALOPS_MCP_DISPATCH=true is set by
-    # mistake, mcp_policy_adapter._APPROVED_MCP_DISPATCH being None still
-    # makes every McpBackedReplayRuntimeWiring.build() call raise
-    # immediately (see policy_approved_mcp_server) -- ENABLE_CLAUDE=false /
+    # MCP is the default hosted-worker dispatch path on the VM, per Phase
+    # 3's exit criterion ("replay runs through worker/MCP") -- equivalence
+    # with direct dispatch is proven in `test_mcp_policy_equivalence.py` and,
+    # live, in a real `causalops-evaluate` run over the MCP transport.
+    # `CAUSALOPS_MCP_DISPATCH` is now only an explicit escape hatch BACK to
+    # direct dispatch (false/0/no), not an opt-in -- outside the VM
+    # (`CAUSALOPS_EXECUTION_ENV` unset, e.g. local/test/CI) direct dispatch
+    # stays the only choice, since MCP requires spawning a real subprocess.
+    # Belt-and-suspenders gate: even with MCP dispatch selected here,
+    # `mcp_policy_adapter._APPROVED_MCP_DISPATCH` being `None` still makes
+    # every `McpBackedReplayRuntimeWiring.build()` call raise immediately
+    # (see `policy_approved_mcp_server`) -- `ENABLE_CLAUDE=false` /
     # replay-only-by-default is never actually bypassed without the real,
     # reviewed approval record existing in source.
-    mcp_dispatch_requested = os.environ.get(
-        VM_EXECUTION_ENV_VARIABLE, ""
-    ).strip().lower() == VM_EXECUTION_ENV and os.environ.get(
+    mcp_dispatch_disabled = os.environ.get(
         "CAUSALOPS_MCP_DISPATCH", ""
-    ).strip().lower() in {"1", "true", "yes"}
+    ).strip().lower() in {"0", "false", "no"}
+    mcp_dispatch_requested = (
+        os.environ.get(VM_EXECUTION_ENV_VARIABLE, "").strip().lower()
+        == VM_EXECUTION_ENV
+        and not mcp_dispatch_disabled
+    )
     replay_wiring: ReplayRuntimeWiring = (
         McpBackedReplayRuntimeWiring()
         if mcp_dispatch_requested

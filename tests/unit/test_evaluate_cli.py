@@ -1,12 +1,13 @@
 """`causalops-evaluate`'s own pure helpers and orchestration.
 
-`run_evaluation`'s real path always builds a live `LiveClaudeModel`
-(`causalops.live_setup.build_model_and_registry` with `model_choice="claude"`
-hardcoded -- evaluate has no replay mode) and drives real scenario-controller
-traffic against a running Docker lab. Neither is available to this fast,
+`run_evaluation`'s real path always builds a live `LiveClaudeModel` dispatched
+over the real MCP local-stdio transport
+(`causalops.mcp_client_registry.build_claude_model_and_mcp_registry` --
+evaluate has no replay mode) and drives real scenario-controller traffic
+against a running Docker lab. Neither is available to this fast,
 network-free suite (`tests/conftest.py`'s network guard covers the whole
 session), so the orchestration test below monkeypatches
-`causalops.evaluate_cli.build_model_and_registry`,
+`causalops.evaluate_cli.build_claude_model_and_mcp_registry`,
 `causalops.evaluate_cli.start_scenario`, and
 `causalops.evaluate_cli.reset_scenario` -- the same seam-testing approach
 `test_live_model.py` already uses for `LiveClaudeModel` itself (a fake
@@ -345,10 +346,8 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
-        assert model_choice == "claude"
+    ) -> tuple[object, object, str, object, object]:
         model = ReplayToolCallingModel(
             ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
         )
@@ -356,12 +355,13 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn
+        return model, registry, "fake-claude-model", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -440,9 +440,8 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
+    ) -> tuple[object, object, str, object, object]:
         nonlocal call_count
         call_count += 1
         # Calls 1 and 2 are the first `(family, seed)` pair's baseline and
@@ -461,12 +460,13 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn
+        return model, registry, "fake-claude-model", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -598,15 +598,15 @@ def test_the_original_run_failure_survives_cleanup_also_failing(
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
+    ) -> tuple[object, object, str, object, object]:
         raise RuntimeError("simulated billed-run failure")
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -657,9 +657,8 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
+    ) -> tuple[object, object, str, object, object]:
         model = ReplayToolCallingModel(
             ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
         )
@@ -667,12 +666,13 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn
+        return model, registry, "fake-claude-model", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -845,9 +845,8 @@ def test_main_writes_a_summary_alongside_records(
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
+    ) -> tuple[object, object, str, object, object]:
         model = ReplayToolCallingModel(
             ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
         )
@@ -855,12 +854,13 @@ def test_main_writes_a_summary_alongside_records(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn
+        return model, registry, "fake-claude-model", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
@@ -955,9 +955,8 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
         incident: StoredIncident,
         paths: object,
         budgets: Budgets,
-        model_choice: str,
         db_path: Path,
-    ) -> tuple[object, object, str, object]:
+    ) -> tuple[object, object, str, object, object]:
         model = ReplayToolCallingModel(
             ReplayReasoningModel(FIXTURE_DIR / "valid_diagnosis.json")
         )
@@ -965,12 +964,13 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn
+        return model, registry, "fake-claude-model", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
     monkeypatch.setattr(
-        "causalops.evaluate_cli.build_model_and_registry", fake_build_model_and_registry
+        "causalops.evaluate_cli.build_claude_model_and_mcp_registry",
+        fake_build_model_and_registry,
     )
     monkeypatch.setattr(
         "causalops.evaluate_cli._git_provenance", lambda root: ("f" * 40, False)
