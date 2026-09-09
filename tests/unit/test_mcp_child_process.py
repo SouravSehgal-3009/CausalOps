@@ -64,19 +64,27 @@ def test_unapproved_dispatch_is_refused_safely_not_crashed(
 
 
 def test_killed_child_raises_died_mid_call_not_a_hang(tmp_path: Path) -> None:
+    """A request genuinely sent to a genuinely-alive child, killed before it
+    can respond -- exercised at the `_write`/`_read_one` level, not through
+    `call()`'s own `respawn_if_dead()`. `poll()` immediately after `kill()`
+    is a real, platform-dependent race (Windows' `TerminateProcess` is
+    measurably slower to take effect than POSIX SIGKILL) -- going through
+    `call()` here would nondeterministically hit the respawn path instead
+    of this one on some platforms."""
     child = McpChildProcess()
     child.start(tmp_path, incident_scope(), Budgets())
     try:
-        assert child._process is not None  # noqa: SLF001
-        child._process.kill()  # noqa: SLF001 - simulate a real crash
+        assert child._session is not None and child._process is not None  # noqa: SLF001
+        request = child._session.tool_call_request(  # noqa: SLF001
+            ToolName.GET_TOPOLOGY,
+            GetTopologyArguments(incident_id=incident_scope().incident_id).model_dump(
+                mode="json"
+            ),
+        )
+        child._write(request)  # noqa: SLF001 - sent while genuinely alive
+        child._process.kill()  # noqa: SLF001 - now kill, before any response
         with pytest.raises(McpChildDiedMidCallError):
-            child.call(
-                ToolName.GET_TOPOLOGY,
-                GetTopologyArguments(
-                    incident_id=incident_scope().incident_id
-                ).model_dump(mode="json"),
-                timeout_seconds=10.0,
-            )
+            child._read_one(timeout_seconds=10.0)  # noqa: SLF001
     finally:
         child.close()
 
