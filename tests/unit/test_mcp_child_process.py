@@ -1,15 +1,19 @@
 """Real-subprocess tests for the local-stdio MCP transport.
 
 Spawns the actual `causalops.mcp_server_main` entry point as a real OS
-process against `tmp_path` fixtures -- no Docker, no VM, laptop-safe.
-`mcp_policy_adapter._APPROVED_MCP_DISPATCH` is genuinely `None` today, so
-every `tools/call` here is correctly refused by the safe default
-(`PolicyApprovalRequiredExecutor`) -- these tests prove the transport
-itself (framing, handshake, manifest verification, crash/timeout/respawn),
-not real backend dispatch. Real dispatch becomes testable once a reviewed
-approval record exists -- see `mcp_policy_adapter.py`'s own comment.
+process against `tmp_path` fixtures -- no Docker, no VM, laptop-safe. A
+reviewed `mcp_policy_adapter._APPROVED_MCP_DISPATCH` record now exists (see
+`infra/phase3/VALIDATION.md`), so `tools/call` here actually executes
+against the real backend rather than being refused by the safe default.
+`tmp_path` starts with no telemetry/topology data written, so a call comes
+back as a clean `UNAVAILABLE` outcome rather than `EXECUTED` -- these tests
+prove the transport itself (framing, handshake, manifest verification,
+crash/timeout/respawn) survives real dispatch cleanly, not the outcome
+content; real EXECUTED-outcome equivalence lives in
+`test_mcp_policy_equivalence.py`.
 """
 
+import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,7 +21,7 @@ from pathlib import Path
 import pytest
 from fake_incident import incident_scope
 
-from causalops.domain import Budgets
+from causalops.domain import Budgets, PolicyResult, ToolOutcome
 from causalops.mcp_child_process import (
     McpChildDiedMidCallError,
     McpChildProcess,
@@ -41,24 +45,27 @@ def test_real_subprocess_completes_the_full_handshake(child: McpChildProcess) ->
     assert child._process.poll() is None  # noqa: SLF001 - still alive
 
 
-def test_unapproved_dispatch_is_refused_safely_not_crashed(
+def test_real_dispatch_with_no_backend_data_returns_clean_unavailable_not_a_crash(
     child: McpChildProcess,
 ) -> None:
-    """Today `_APPROVED_MCP_DISPATCH` is None, so every real call must come
-    back as a clean MCP protocol error (`is_error`), never a subprocess
-    crash or a raw exception leaking through."""
-    from causalops.mcp_stdio import McpProtocolError
+    """The reviewed approval record is real now, so this call actually
+    executes against `tmp_path`'s real backend. With no topology manifest
+    written there, the real backend correctly answers `UNAVAILABLE` -- a
+    normal MCP tool-call result, not a protocol error or a subprocess
+    crash."""
+    response = child.call(
+        ToolName.GET_TOPOLOGY,
+        GetTopologyArguments(incident_id=incident_scope().incident_id).model_dump(
+            mode="json"
+        ),
+        timeout_seconds=10.0,
+    )
+    payload = json.loads(response.content[0].text)
 
-    with pytest.raises(McpProtocolError, match="error result"):
-        child.call(
-            ToolName.GET_TOPOLOGY,
-            GetTopologyArguments(incident_id=incident_scope().incident_id).model_dump(
-                mode="json"
-            ),
-            timeout_seconds=10.0,
-        )
-    # The process is still alive and usable after a clean refusal -- a
-    # policy refusal is not a process-level failure.
+    assert payload["receipt"]["policy_result"] == PolicyResult.ALLOWED.value
+    assert payload["receipt"]["outcome"] == ToolOutcome.UNAVAILABLE.value
+    assert payload["evidence"] is None
+    # The process is still alive and usable after a clean result.
     assert child._process is not None  # noqa: SLF001
     assert child._process.poll() is None  # noqa: SLF001
 
@@ -106,18 +113,20 @@ def test_call_after_death_respawns_and_reverifies_the_handshake(
         first_pid = child._process.pid  # noqa: SLF001
         child._process.kill()  # noqa: SLF001
         child._process.wait(timeout=5.0)  # noqa: SLF001
-        from causalops.mcp_stdio import McpProtocolError
 
-        # respawn_if_dead() runs at the top of call(); the refusal below
-        # (not a crash) proves the respawn + re-handshake both succeeded.
-        with pytest.raises(McpProtocolError):
-            child.call(
-                ToolName.GET_TOPOLOGY,
-                GetTopologyArguments(
-                    incident_id=incident_scope().incident_id
-                ).model_dump(mode="json"),
-                timeout_seconds=10.0,
-            )
+        # respawn_if_dead() runs at the top of call(); a clean result
+        # below (not a crash) proves the respawn + re-handshake both
+        # succeeded.
+        response = child.call(
+            ToolName.GET_TOPOLOGY,
+            GetTopologyArguments(incident_id=incident_scope().incident_id).model_dump(
+                mode="json"
+            ),
+            timeout_seconds=10.0,
+        )
+        payload = json.loads(response.content[0].text)
+        assert payload["receipt"]["policy_result"] == PolicyResult.ALLOWED.value
+
         assert child._process is not None  # noqa: SLF001
         assert child._process.pid != first_pid  # noqa: SLF001 - a new process
         assert child._process.poll() is None  # noqa: SLF001

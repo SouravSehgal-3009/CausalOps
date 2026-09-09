@@ -7,13 +7,11 @@ cross-incident or duplicate proposal is denied identically by both
 registries by construction, not by anything MCP-specific. These tests
 prove that reuse holds for real, against a real spawned subprocess.
 
-Full outcome-content equivalence (condition 2's "same evidence, citations,
-outcome for an EXECUTED check") cannot be proven yet:
-`mcp_policy_adapter._APPROVED_MCP_DISPATCH` is genuinely `None` today, so
-every real MCP dispatch is correctly refused by the safe default before
-touching a backend at all (see `test_mcp_child_process.py`). The last test
-here pins that honest current behavior; re-point it at a real EXECUTED
-comparison once a reviewed approval record exists.
+A reviewed `mcp_policy_adapter._APPROVED_MCP_DISPATCH` record now exists
+(see `infra/phase3/VALIDATION.md`), so the last test here proves real
+EXECUTED-outcome equivalence -- condition 2's "same evidence, citations,
+outcome for an EXECUTED check" -- against a real spawned child process,
+not just the pre-approval refusal shape.
 """
 
 from pathlib import Path
@@ -27,6 +25,8 @@ from fake_incident import (
     RecordingTopologyBackend,
     StepClock,
     incident_scope,
+    topology_proposal,
+    write_topology,
 )
 
 from causalops.domain import (
@@ -38,6 +38,7 @@ from causalops.domain import (
 )
 from causalops.mcp_child_process import McpChildProcess
 from causalops.mcp_client_registry import build_mcp_tool_registry
+from causalops.telemetry import RunPaths, run_topology_check
 from causalops.tool_wrappers import ReservationLedger, ToolWrapper, dispatch_registry
 from causalops.tools import GetTopologyArguments, ToolName
 
@@ -126,30 +127,46 @@ def test_duplicate_proposal_is_denied_identically_by_both_registries(
         assert second.receipt.reason_code is ReasonCode.DUPLICATE_PROPOSAL
 
 
-def test_mcp_dispatch_today_is_a_clean_refusal_not_an_executed_result(
+def test_mcp_dispatch_executes_and_matches_the_direct_backend_result(
     tmp_path: Path,
 ) -> None:
-    """Pins the honest current state: with no reviewed approval record,
-    an otherwise-allowed MCP proposal is refused safely, not executed.
-    Replace this with a real EXECUTED-outcome equivalence assertion once
-    `mcp_policy_adapter._APPROVED_MCP_DISPATCH` is a real record."""
-    proposal = ToolProposal(
-        arguments=GetTopologyArguments(incident_id=INCIDENT_ID),
-        evidence_gap="confirm topology",
-        expected_observation="edges",
-    )
+    """With a reviewed approval record in place, an allowed MCP proposal
+    actually executes against the real backend -- not just a clean
+    refusal -- and its receipt/evidence match the direct-dispatch path
+    exactly, over a real spawned child process."""
+    paths = RunPaths(root=tmp_path)
+    write_topology(paths, ["gateway>orders"])
+    proposal = topology_proposal()
     budgets = Budgets()
+
+    direct_registry = dispatch_registry(
+        run_metric=RecordingMetricBackend(),
+        run_logs=RecordingLogsBackend(),
+        run_changes=RecordingChangesBackend(),
+        run_topology=lambda a, s: run_topology_check(a, paths),
+        run_search=RecordingRunbooksBackend(),
+    )
+    direct_result = direct_registry[proposal.arguments.tool].dispatch(
+        proposal, incident_scope(), set(), budgets, _ledger(budgets), StepClock()
+    )
 
     child = McpChildProcess()
     child.start(tmp_path, incident_scope(), budgets)
     try:
         mcp_registry = build_mcp_tool_registry(child, budgets)
-        result = mcp_registry[proposal.arguments.tool].dispatch(
+        mcp_result = mcp_registry[proposal.arguments.tool].dispatch(
             proposal, incident_scope(), set(), budgets, _ledger(budgets), StepClock()
         )
     finally:
         child.close()
 
-    assert result.receipt.policy_result is PolicyResult.ALLOWED
-    assert result.receipt.outcome is ToolOutcome.ERROR
-    assert result.evidence is None
+    assert direct_result.receipt.policy_result is PolicyResult.ALLOWED
+    assert direct_result.receipt.outcome is ToolOutcome.EXECUTED
+    assert direct_result.evidence is not None
+    assert direct_result.evidence.payload["edge_count"] == 1
+
+    assert mcp_result.receipt.policy_result is direct_result.receipt.policy_result
+    assert mcp_result.receipt.outcome is direct_result.receipt.outcome
+    assert mcp_result.evidence is not None
+    assert mcp_result.evidence.payload == direct_result.evidence.payload
+    assert mcp_result.evidence.summary == direct_result.evidence.summary
