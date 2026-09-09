@@ -212,7 +212,7 @@ def test_ollama_default_transport_disables_environment_proxies(
 
     class Opener:
         def open(self, _: object, *, timeout: int) -> Response:
-            assert timeout == 30
+            assert timeout == 200
             return Response()
 
     def build_proxy_free_opener(*handlers: object) -> Opener:

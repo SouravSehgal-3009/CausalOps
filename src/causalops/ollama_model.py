@@ -84,7 +84,13 @@ def _post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
     # default. An explicit empty handler keeps even a misconfigured VM from
     # forwarding candidate prompts or responses through an external proxy.
     opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
-    with opener.open(request, timeout=30) as response:  # noqa: S310 - loopback only
+    # 30s was tuned before "think": false was set above; a real production
+    # prompt (full system_text + tool schemas, not a trivial one) measured
+    # just over 30s even with thinking disabled, and a repair-turn prompt
+    # (original context plus the rejection reason appended) measured over
+    # 120s. 200s keeps real margin above both while still failing well
+    # inside the 360s investigation wall-clock budget if genuinely stuck.
+    with opener.open(request, timeout=200) as response:  # noqa: S310 - loopback only
         decoded: object = json.loads(response.read().decode("utf-8"))
     if not isinstance(decoded, dict):
         raise OllamaModelError("Ollama response must be a JSON object")
@@ -144,6 +150,13 @@ class OllamaQwenToolCallingModel:
         payload: dict[str, object] = {
             "model": OLLAMA_QWEN35_MODEL,
             "stream": False,
+            # qwen3.5's default extended "thinking" burns most of its token
+            # budget on hidden reasoning before the schema-constrained
+            # answer, which is what made every candidate call blow past the
+            # 360s investigation wall-clock budget (measured: 400-900+s per
+            # call). Disabling it dropped a real call to ~60s with a valid
+            # JSON response.
+            "think": False,
             "format": schema.model_json_schema(),
             "messages": [
                 {"role": "system", "content": request.system_text},
