@@ -146,7 +146,15 @@ def run_candidate_evaluation(
     """
     environment = dict(os.environ)
     image_digest, manifest_digest = _assert_candidate_environment(environment)
-    budgets = Budgets()
+    # The shared 360s default (domain.py's Budgets) is tight for this
+    # CPU-only local model: even with "think": false, a single repair-turn
+    # HTTP call can measure 120-200s, and one repair is often enough to
+    # legitimately exhaust 360s total before final_assessment ever runs
+    # (measured live: 362s for a run that self-corrected correctly and
+    # simply ran out of clock). Scoped to this candidate-evaluation CLI only
+    # -- the shared default (and Claude/replay's fast real-world latency)
+    # is untouched.
+    budgets = Budgets(wall_clock_seconds=900)
     git_sha, git_dirty = _git_provenance(root)
     runbook_corpus_version = RunbookIndex().corpus_version
     if runbook_corpus_version is None:
