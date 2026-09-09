@@ -85,13 +85,16 @@ the manual copy-paste redirect flow was used instead). Owner A signed in
 | Failed replay job → backoff → dead-letter | `cfc13588ba41418c9a48a24c1e82342a` — lab containers stopped, investigation created. `investigation_retry_scheduled` at attempt 1 (~5s) and attempt 2 (~11s), then `investigation_failed` at attempt 3 — owner-facing status **FAILED** (`status()`/`scenario_status()` both key off `failure_reason IS NOT NULL`, not the raw `QUEUED` row status). |
 | Failure does not block later work | Lab containers restarted; `8db21331a5c543e0aec109d710108e86` created immediately after — FINALIZED normally with the standard 5-event chain |
 
-### Known gap — not exercised live
+### Accepted Phase 2 exception — pause/decision path not exercised live
 
 `PAUSED` / owner accept-reject / idempotent resubmission / API-CLI conflict
 handling on a live checkpoint, and restart recovery at the
 pending-interrupt / decision-recorded boundaries specifically, were **not**
-reproduced live. Root cause (pre-existing, not introduced by this
-deployment): the hosted `configuration_change` replay fixture used by
+reproduced live against the deployed control plane. This is recorded here
+as a formal, accepted Phase 2 exception, not an open action item.
+
+**Root cause** (pre-existing, not introduced by this deployment): the
+hosted `configuration_change` replay fixture used by
 `HostedReplayRuntimeWiring`/`ReplayGraphJobRunner` is scripted to always
 conclude a clean `DIAGNOSED`/`CONFIG_CHANGE` result for all four available
 seeds — `graph.py`'s `_escalation_reason` never fires
@@ -100,11 +103,31 @@ seeds — `graph.py`'s `_escalation_reason` never fires
 all unreachable with today's fixture data). This matches the carried
 limitation already on record: `cli.py`'s replay path "always uses one
 hardcoded fixture scripted to conclude CONFIG_CHANGE regardless of
-family." `decide()`'s conflict/idempotency logic itself is covered by
-`tests/unit/test_api_runtime.py` (`FakeRunner`-driven, e.g.
-`test_worker_uses_durable_checkpoint_and_finalizes_once`), not by this
-live acceptance pass. Becomes provable live once a real escalating
-fixture/model exists (flagged for Phase 3 planning).
+family."
+
+**Two ways to close this were weighed:**
+
+1. Add a new replay fixture, scripted to deterministically hit one of the
+   four `EscalationReason` triggers, so the live pause/decision path
+   becomes reachable through the hosted API today.
+2. Record the gap as an accepted exception and rely on the existing
+   hermetic coverage instead.
+
+**Decision: (2), record as an accepted exception.** A deterministically
+escalating fixture is real feature work — a new scripted incident,
+threaded through `HostedReplayRuntimeWiring`, chosen and shaped to trip
+exactly one trigger without disturbing the four existing seeds' scored
+behavior — not a deployment-validation task, and it duplicates coverage
+this codebase already carries at the hermetic layer. `decide()`'s
+conflict/idempotency logic, and the paused-worker-outcome path, are
+already covered by `tests/unit/test_api_runtime.py` (`FakeRunner`-driven,
+e.g. `test_worker_uses_durable_checkpoint_and_finalizes_once`); what's
+missing is only the *live, real-fixture* reproduction, not the underlying
+logic. Building a real escalating fixture is better scoped alongside
+Phase 3, when a real model exists and escalation triggers stop being
+purely synthetic scripting exercises (see `causalops-carried-limitations`
+memory: "becomes provable once Phase 3 Step 1 wires in the real Claude
+model"). Revisit this exception at that point, not before.
 
 ## 5. Notes for reviewers
 
