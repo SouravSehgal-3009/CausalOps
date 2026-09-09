@@ -64,25 +64,32 @@ def test_unapproved_dispatch_is_refused_safely_not_crashed(
 
 
 def test_killed_child_raises_died_mid_call_not_a_hang(tmp_path: Path) -> None:
-    """A request genuinely sent to a genuinely-alive child, killed before it
-    can respond -- exercised at the `_write`/`_read_one` level, not through
-    `call()`'s own `respawn_if_dead()`. `poll()` immediately after `kill()`
-    is a real, platform-dependent race (Windows' `TerminateProcess` is
-    measurably slower to take effect than POSIX SIGKILL) -- going through
-    `call()` here would nondeterministically hit the respawn path instead
-    of this one on some platforms."""
+    """Confirmed live in CI: real OS process-kill timing is not a reliable
+    way to exercise this path on every platform -- `Popen.kill()` (POSIX
+    SIGKILL vs Windows `TerminateProcess`) does not reach the child at a
+    consistent point relative to its own read-handle-write round trip, so
+    a write-then-kill version still sometimes got a real answer back.
+    Closing the process's own stdout pipe from this thread was tried next
+    and does not reliably work either: closing a file object does not
+    interrupt a *different* thread already blocked inside a read on it
+    (a well-known POSIX/CPython gotcha, not platform-specific this time).
+
+    `_read_one`'s actual job here is simple and independent of how a dead
+    child gets discovered: given the `_EOF` sentinel `_drain_stdout`'s own
+    `finally` unconditionally queues once its read loop exits for any
+    reason, raise `McpChildDiedMidCallError`. Testing that directly, by
+    injecting the sentinel, is deterministic on every platform and tests
+    the actual unit of behavior that matters -- `_drain_stdout` producing
+    that sentinel on a real death is separately relied on by
+    `test_call_after_death_respawns_and_reverifies_the_handshake`, which
+    already needs a real dead process's threads to wind down cleanly for
+    `close()` to succeed."""
+    from causalops.mcp_child_process import _EOF
+
     child = McpChildProcess()
     child.start(tmp_path, incident_scope(), Budgets())
     try:
-        assert child._session is not None and child._process is not None  # noqa: SLF001
-        request = child._session.tool_call_request(  # noqa: SLF001
-            ToolName.GET_TOPOLOGY,
-            GetTopologyArguments(incident_id=incident_scope().incident_id).model_dump(
-                mode="json"
-            ),
-        )
-        child._write(request)  # noqa: SLF001 - sent while genuinely alive
-        child._process.kill()  # noqa: SLF001 - now kill, before any response
+        child._queue.put(_EOF)  # noqa: SLF001 - simulate the reader thread's own EOF
         with pytest.raises(McpChildDiedMidCallError):
             child._read_one(timeout_seconds=10.0)  # noqa: SLF001
     finally:
