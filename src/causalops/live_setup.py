@@ -45,6 +45,7 @@ from causalops.models import (
 from causalops.ollama_model import OllamaQwenToolCallingModel
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
+from causalops.retrieval_experiment import require_fts5_only
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
     RunPaths,
@@ -118,6 +119,21 @@ def build_ollama_candidate_model(
             f"{CANDIDATE_EVALUATION_VARIABLE}=true"
         )
     return OllamaQwenToolCallingModel(environment=environment)
+
+
+def build_ollama_candidate_model_and_registry(
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    environment: Mapping[str, str],
+) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
+    """The VM-only Qwen composition root for Phase 4 candidate evaluation."""
+    model = build_ollama_candidate_model(environment)
+    return (
+        model,
+        _build_tool_registry(paths, budgets, environment),
+        OLLAMA_QWEN35_EXPERIMENT.model_name,
+    )
 
 
 def profile_for_legacy_choice(
@@ -279,9 +295,10 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
 
 
 def _build_tool_registry(
-    paths: RunPaths, budgets: Budgets
+    paths: RunPaths, budgets: Budgets, environment: Mapping[str, str] | None = None
 ) -> Mapping[ToolName, ToolWrapper]:
     """Build the incident-scoped tool registry shared by fixed providers."""
+    require_fts5_only(environment if environment is not None else os.environ)
     runbook_index = RunbookIndex()
     return dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
@@ -297,7 +314,10 @@ def _build_tool_registry(
 
 
 def build_replay_model_and_registry(
-    incident: StoredIncident, paths: RunPaths, budgets: Budgets
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    environment: Mapping[str, str] | None = None,
 ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
     """Build only hosted replay dependencies; no other provider is reachable."""
     replay_model = ReplayToolCallingModel(
@@ -311,7 +331,11 @@ def build_replay_model_and_registry(
             },
         )
     )
-    return replay_model, _build_tool_registry(paths, budgets), REPLAY_MODEL_NAME
+    return (
+        replay_model,
+        _build_tool_registry(paths, budgets, environment),
+        REPLAY_MODEL_NAME,
+    )
 
 
 class HostedReplayRuntimeWiring:
@@ -354,18 +378,19 @@ def build_model_and_registry(
     profile = profile_for_legacy_choice(model_choice)
     if profile == REPLAY_HOSTED:
         model, registry, model_name = build_replay_model_and_registry(
-            incident, paths, budgets
+            incident, paths, budgets, process_environment
         )
         return model, registry, model_name, None
-    registry = _build_tool_registry(paths, budgets)
     # This must precede credential inspection, SQLite setup, and
-    # ``LiveClaudeModel`` construction.  In particular it gives disabled
-    # deployments a no-credential, no-client, no-network failure path.
+    # registry construction, and ``LiveClaudeModel`` construction. In
+    # particular it gives disabled deployments a no-configuration,
+    # no-credential, no-client, no-network failure path.
     if not claude_enabled(process_environment):
         raise ProviderDisabledError(
             f"{CLAUDE_LEGACY_DISABLED.kind.value} is disabled by "
             f"{ENABLE_CLAUDE_VARIABLE}=false"
         )
+    registry = _build_tool_registry(paths, budgets, process_environment)
     ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
     ensure_cost_ledger_table(ledger_conn)
     # Presence only, mirroring `doctor.check_api_key`'s own
