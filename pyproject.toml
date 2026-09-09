@@ -40,6 +40,10 @@ dependencies = [
     # already proves those two import paths send no network request; this
     # dependency does not enter that chain at all.
     "google-cloud-storage>=2.18",
+    # `firestore_checkpointer.py`'s LangGraph checkpoint saver (spec §3.1) --
+    # only imported by `api_runtime.py`, same isolation guarantee as
+    # `google-cloud-storage` above.
+    "google-cloud-firestore>=2.19",
 ]
 
 [project.scripts]

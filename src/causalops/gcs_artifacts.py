@@ -17,9 +17,9 @@ from collections.abc import Mapping
 from typing import Protocol
 
 import google.auth
+import google.cloud.storage as storage
 from google.api_core.exceptions import PreconditionFailed
 from google.auth.impersonated_credentials import Credentials as ImpersonatedCredentials
-from google.cloud import storage
 
 # GCS-only, not the broader `cloud-platform` scope -- this identity's only
 # real job is reading and writing objects in one bucket.
