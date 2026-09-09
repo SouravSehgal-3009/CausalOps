@@ -89,13 +89,13 @@ class FailingRunner:
 
 class SlowPausedRunner:
     def run(self, claim: WorkerClaim) -> PausedWorkerOutcome:
-        time.sleep(0.35)
+        time.sleep(1.5)
         return PausedWorkerOutcome(checkpoint_id="checkpoint-after-slow-run")
 
 
 class SlowSender:
     def send(self, claim: DeliveryClaim) -> None:
-        time.sleep(0.35)
+        time.sleep(1.5)
 
 
 def request() -> CreateInvestigationRequest:
@@ -805,8 +805,15 @@ def test_worker_requeues_when_finalization_fails_after_the_runner_returns(
 
 
 def test_worker_renews_a_running_lease_for_a_slow_runner(tmp_path: Path) -> None:
+    # A 1.2s lease keeps the heartbeat interval (max(lease/3, floor)) well
+    # above MINIMUM_HEARTBEAT_SECONDS (0.4s vs a 0.05s floor), so a single
+    # delayed thread wakeup under a loaded CI runner's scheduler jitter
+    # cannot burn through the lease window before the next renewal fires --
+    # the previous 0.15s lease put the interval exactly at that floor with
+    # no margin, which is what made this test flake on macOS/Windows
+    # runners (never on Linux) without ever having a real logic bug.
     control_plane = SqliteReplayControlPlane(
-        tmp_path / "control-plane.db", claim_lease_seconds=0.15
+        tmp_path / "control-plane.db", claim_lease_seconds=1.2
     )
     created = control_plane.create("owner@example.com", request())
 
@@ -820,10 +827,11 @@ def test_worker_renews_a_running_lease_for_a_slow_runner(tmp_path: Path) -> None
 @requires_posix_no_follow_reads
 def test_delivery_worker_renews_a_lease_for_a_slow_sender(tmp_path: Path) -> None:
     artifacts_root = tmp_path / "investigations"
+    # Same margin reasoning as test_worker_renews_a_running_lease_for_a_slow_runner.
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db",
         artifacts_root=artifacts_root,
-        claim_lease_seconds=0.15,
+        claim_lease_seconds=1.2,
     )
     created = control_plane.create("owner@example.com", request())
     write_report(artifacts_root, created.investigation_id, "# Final report")
