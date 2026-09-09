@@ -1,18 +1,15 @@
-# Phase 3 restricted-environment validation record — initial local slice
+# Phase 3 restricted-environment validation record
 
 Dedicated VM (`causalops-test`, asia-south1-c, project
 `project-7b68a103-d482-4418-a35`), same VM as `infra/phase2/VALIDATION.md`.
-Run 2026-09-09, on top of Phase 2's already-deployed control plane and lab.
+Two entries: the initial local slice (2026-09-09, on top of Phase 2's
+already-deployed control plane and lab), and the real MCP transport built
+and live-validated later the same day (below).
 
-This covers exactly `RESTRICTED_HANDOFF.md`'s "initial local slice" — it does
-**not** start the MCP stdio server, the application worker, or MCP-backed
-dispatch. Those stay deferred per that doc's own "Deferred Worker and MCP
-Composition" section: `mcp_stdio.py` is, by its own docstring, "no
-subprocess, socket, backend, or model composition" — a pure, unwired
-protocol state machine, not a launchable server, until a separately reviewed
-transport exists and `POLICY_APPROVAL.md` records a real approval.
-`_APPROVED_MCP_DISPATCH` remains `None` in `mcp_policy_adapter.py` (fail
-closed, verified by reading the source, not a live probe).
+`_APPROVED_MCP_DISPATCH` remains `None` in `mcp_policy_adapter.py` throughout
+both entries (fail closed) — confirmed by reading the source and, in the
+second entry, by a live run against the deployed server, not just a static
+check.
 
 ## VM Deployment (steps 1–5)
 
@@ -44,7 +41,7 @@ closed, verified by reading the source, not a live probe).
    - weights layer digest: `sha256:81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490`
    - license layer digest: `sha256:7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2`
 
-## MCP manifest identity (no live server — see scope note above)
+## MCP manifest identity
 
 Computed directly from `causalops.mcp_manifest.pinned_observability_manifest()`
 on the VM, matching `RESTRICTED_HANDOFF.md`'s "MCP Manifest Gate" pin:
@@ -54,14 +51,76 @@ on the VM, matching `RESTRICTED_HANDOFF.md`'s "MCP Manifest Gate" pin:
 - exactly 5 tools, all read-only observability: `query_metric`, `query_logs`,
   `list_recent_changes`, `get_topology`, `search_runbooks`.
 
-The stdio-server checks in `RESTRICTED_HANDOFF.md`'s "Validation and
-Evidence" section (stdout/stderr separation, cross-incident refusal,
-malformed-argument refusal) require an actual server subprocess, which does
-not exist in this codebase yet. The equivalent logic is exercised hermetically
-today by `tests/unit/test_mcp_stdio.py`, `tests/unit/test_mcp_manifest.py`,
-and `tests/unit/test_mcp_policy_adapter.py` (all passing — see PR #1 CI).
-Live reproduction against a real stdio child is a follow-up once that
-transport is built and reviewed, not part of this slice.
+## Real local-stdio MCP transport — built, tested, and live-validated
+
+A prior version of this record said the transport "does not exist yet" and
+deferred the stdio-server checks. That is superseded: `mcp_server_main.py`
+(the child entry point), `mcp_child_process.py` (the client-side subprocess
+supervisor — spawn, crash/timeout/respawn, all genuinely new territory in
+this codebase), and `mcp_client_registry.py` (client wiring, reusing the
+existing `dispatch_registry` factory so policy enforcement is inherited,
+not reinvented) now exist, are unit-tested against **real spawned OS
+subprocesses** (`tests/unit/test_mcp_child_process.py`,
+`tests/unit/test_mcp_policy_equivalence.py`, 8 tests, all real processes,
+no mocked transport), and were exercised live on this VM below.
+
+**Deployment shape, decided deliberately:** no new Dockerfile or Compose
+service. There has never been a Dockerfile for the `causalops` application
+itself anywhere in this repo (only `lab/services/Dockerfile`, for the
+synthetic lab) — every deployment this project has ever done, Phase 2
+through this entry, launches the hosted control plane as a direct host
+process (`uv run uvicorn causalops.api_runtime:app --factory ...`).
+Containerizing the app for the first time is separate, real scope,
+orthogonal to proving MCP dispatch works — deferred as its own future
+initiative if wanted, not bundled into this one. MCP-enabled launch is the
+same command already used throughout this project, plus one env var:
+
+```
+CAUSALOPS_EXECUTION_ENV=vm CAUSALOPS_MCP_DISPATCH=true \
+  uv run uvicorn causalops.api_runtime:app --factory --workers 1 \
+  --host 127.0.0.1 --port 8000
+```
+
+`CAUSALOPS_MCP_DISPATCH=true` selects `McpBackedReplayRuntimeWiring` in
+`api_runtime.py`'s `app()` factory instead of `HostedReplayRuntimeWiring`
+— belt-and-suspenders: `mcp_policy_adapter._APPROVED_MCP_DISPATCH` being
+`None` still makes every dispatch attempt refuse safely regardless of this
+flag, confirmed live below.
+
+**Live VM run:** started the server as above, inserted one real
+`configuration_change`/`development` investigation directly into the
+running server's own control-plane DB (bypassing the OAuth dashboard flow
+for this check only — the request/response HTTP path itself was already
+proven separately in `infra/phase2/VALIDATION.md`), and let the server's
+own background worker thread pick it up and run it for real:
+
+- Two real tool proposals from the replay fixture (`query_logs`,
+  `list_recent_changes`) each spawned/reused a real `mcp_server_main` child
+  process, completed the full stdio handshake, and came back
+  `policy_result=ALLOWED, outcome=ERROR` — exactly the honest "policy
+  agreed, dispatch safely refused" result the unit tests predict, now
+  reproduced against the actual deployed server, not a test double.
+- The investigation did not crash or hang on either refusal — it continued
+  normally and reached `DIAGNOSED` (per the scripted replay fixture),
+  total latency 48ms.
+- `ss -tlnp` before and after showed no new listening port at any point —
+  only the hosted API's own `127.0.0.1:8000`. The transport is stdio pipes
+  only, by construction, not by absence-of-testing.
+- `ps aux | grep mcp_server_main` after completion: no output — no leaked
+  child process.
+- Investigation artifacts and the inserted test scenario were reset/deleted
+  after the check; the server was stopped afterward (this was a one-off
+  validation run, not a standing deployment).
+
+**Still not done, and out of scope for an agent:** the actual reviewed
+`_APPROVED_MCP_DISPATCH` approval record. Confirmed still `None` in
+`mcp_policy_adapter.py` — a named human reviewer must independently verify
+all 5 `POLICY_APPROVAL.md` conditions against this evidence (condition 2,
+real EXECUTED-outcome equivalence against direct backends, specifically
+still needs that approval to exist before it can be proven — see
+`test_mcp_policy_equivalence.py`'s own last test, which pins today's
+honest refusal) and author that record as its own separate, reviewed
+commit.
 
 ## Sanitized command evidence
 
