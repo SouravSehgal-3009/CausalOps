@@ -50,7 +50,13 @@ from causalops.graph import (
     resume_graph_investigation,
     run_graph_investigation,
 )
-from causalops.live_setup import HostedReplayRuntimeWiring, ReplayRuntimeWiring
+from causalops.live_setup import (
+    VM_EXECUTION_ENV,
+    VM_EXECUTION_ENV_VARIABLE,
+    HostedReplayRuntimeWiring,
+    ReplayRuntimeWiring,
+)
+from causalops.mcp_client_registry import McpBackedReplayRuntimeWiring
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, finalize_investigation
 from causalops.scenario_control import (
@@ -1536,74 +1542,77 @@ class ReplayGraphJobRunner:
         budgets = Budgets()
         recorder = RunRecorder(utc_now)
         checkpoint_database = ProjectPaths(root=self._root).checkpoints_db
-        model, registry, model_name = self._replay_wiring.build(
+        model, registry, model_name, release = self._replay_wiring.build(
             incident, paths, budgets
         )
-        with _sqlite_checkpointer(checkpoint_database) as checkpointer:
-            if claim.checkpoint_id is None:
-                # A durable graph checkpoint can outlive the control-plane
-                # transition that was supposed to name it. Recover it before
-                # supplying a new initial state, otherwise a reclaimed pause
-                # (or a completed graph before artifact finalization) would
-                # be executed a second time.
-                result = recover_graph_investigation(
-                    claim.investigation_id,
-                    checkpointer,
-                    incident.scope,
-                    incident.packet,
-                    model,
-                    registry,
-                    recorder,
-                    budgets,
-                    utc_now,
-                )
-                if result is None:
-                    result = run_graph_investigation(
+        try:
+            with _sqlite_checkpointer(checkpoint_database) as checkpointer:
+                if claim.checkpoint_id is None:
+                    # A durable graph checkpoint can outlive the control-plane
+                    # transition that was supposed to name it. Recover it before
+                    # supplying a new initial state, otherwise a reclaimed pause
+                    # (or a completed graph before artifact finalization) would
+                    # be executed a second time.
+                    result = recover_graph_investigation(
+                        claim.investigation_id,
+                        checkpointer,
                         incident.scope,
                         incident.packet,
-                        incident.evidence,
                         model,
                         registry,
                         recorder,
                         budgets,
                         utc_now,
-                        investigation_id=claim.investigation_id,
-                        checkpointer=checkpointer,
-                        model_name=model_name,
                     )
-            else:
-                if claim.owner_decision is None:
-                    raise ControlPlaneIntegrityError(
-                        "resumed investigation has no owner decision"
+                    if result is None:
+                        result = run_graph_investigation(
+                            incident.scope,
+                            incident.packet,
+                            incident.evidence,
+                            model,
+                            registry,
+                            recorder,
+                            budgets,
+                            utc_now,
+                            investigation_id=claim.investigation_id,
+                            checkpointer=checkpointer,
+                            model_name=model_name,
+                        )
+                else:
+                    if claim.owner_decision is None:
+                        raise ControlPlaneIntegrityError(
+                            "resumed investigation has no owner decision"
+                        )
+                    result = resume_graph_investigation(
+                        claim.investigation_id,
+                        checkpointer,
+                        incident.scope,
+                        incident.packet,
+                        model,
+                        registry,
+                        recorder,
+                        claim.owner_decision.decision,
+                        claim.owner_decision.rejection_note,
+                        budgets,
+                        utc_now,
                     )
-                result = resume_graph_investigation(
-                    claim.investigation_id,
-                    checkpointer,
-                    incident.scope,
-                    incident.packet,
-                    model,
-                    registry,
-                    recorder,
-                    claim.owner_decision.decision,
-                    claim.owner_decision.rejection_note,
-                    budgets,
-                    utc_now,
-                )
-        if isinstance(result, EscalatedInvestigation):
-            return PausedWorkerOutcome(checkpoint_id=result.checkpoint_id)
-        finalize_investigation(
-            self._root / "results",
-            result.report,
-            recorder.events,
-            result.evidence,
-            result.receipts,
-            render_markdown_report(
-                result.report, result.evidence, result.receipts, model_name
-            ),
-        )
-        return FinalizedWorkerOutcome(
-            report_artifact=f"{claim.investigation_id}/report.md"
-        )
+            if isinstance(result, EscalatedInvestigation):
+                return PausedWorkerOutcome(checkpoint_id=result.checkpoint_id)
+            finalize_investigation(
+                self._root / "results",
+                result.report,
+                recorder.events,
+                result.evidence,
+                result.receipts,
+                render_markdown_report(
+                    result.report, result.evidence, result.receipts, model_name
+                ),
+            )
+            return FinalizedWorkerOutcome(
+                report_artifact=f"{claim.investigation_id}/report.md"
+            )
+        finally:
+            release()
 
 
 class FilesystemReportDeliverySender:
@@ -1708,7 +1717,22 @@ def app() -> FastAPI:
         artifacts_root=root / "results" / "investigations",
         checkpoint_database=ProjectPaths(root=root).checkpoints_db,
     )
-    replay_wiring = HostedReplayRuntimeWiring()
+    # Belt-and-suspenders gate: even if CAUSALOPS_MCP_DISPATCH=true is set by
+    # mistake, mcp_policy_adapter._APPROVED_MCP_DISPATCH being None still
+    # makes every McpBackedReplayRuntimeWiring.build() call raise
+    # immediately (see policy_approved_mcp_server) -- ENABLE_CLAUDE=false /
+    # replay-only-by-default is never actually bypassed without the real,
+    # reviewed approval record existing in source.
+    mcp_dispatch_requested = os.environ.get(
+        VM_EXECUTION_ENV_VARIABLE, ""
+    ).strip().lower() == VM_EXECUTION_ENV and os.environ.get(
+        "CAUSALOPS_MCP_DISPATCH", ""
+    ).strip().lower() in {"1", "true", "yes"}
+    replay_wiring: ReplayRuntimeWiring = (
+        McpBackedReplayRuntimeWiring()
+        if mcp_dispatch_requested
+        else HostedReplayRuntimeWiring()
+    )
     runner = ReplayGraphJobRunner(root, control_plane, replay_wiring)
     workers = BackgroundControlPlaneWorkers(
         ReplayWorker(

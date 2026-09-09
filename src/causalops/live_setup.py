@@ -14,7 +14,7 @@ not itself a command entry point.
 import math
 import os
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -77,11 +77,19 @@ class ProviderDisabledError(RuntimeError):
 
 
 class ReplayRuntimeWiring(Protocol):
-    """Replay-only graph dependencies selected by an application composition root."""
+    """Replay-only graph dependencies selected by an application composition root.
+
+    The fourth element is a teardown callback the caller must invoke on
+    every exit path (finalize, pause/escalate, or exception) -- most
+    implementations return a no-op; `mcp_client_registry
+    .McpBackedReplayRuntimeWiring` uses it to close a spawned MCP child
+    process."""
 
     def build(
         self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
-    ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]: ...
+    ) -> tuple[
+        ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
+    ]: ...
 
 
 def claude_enabled(environment: Mapping[str, str]) -> bool:
@@ -343,8 +351,13 @@ class HostedReplayRuntimeWiring:
 
     def build(
         self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
-    ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
-        return build_replay_model_and_registry(incident, paths, budgets)
+    ) -> tuple[
+        ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
+    ]:
+        model, registry, model_name = build_replay_model_and_registry(
+            incident, paths, budgets
+        )
+        return model, registry, model_name, lambda: None
 
 
 def build_model_and_registry(
