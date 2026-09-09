@@ -26,27 +26,31 @@ class ScenarioFamily(StrEnum):
 
 
 class ReplaySeed(StrEnum):
-    """Checked-in replay data sets, never user-controlled filesystem paths."""
+    """The one checked-in replay data set the hosted API is ever allowed to
+    select -- never user-controlled, never an evaluator seed (those exist
+    only for `causalops-evaluate`'s own frozen corpus, a wholly separate,
+    non-hosted code path)."""
 
     DEVELOPMENT = "development"
-    EVALUATION = "evaluation"
-    EVALUATION_B = "evaluation_b"
-    EVALUATION_C = "evaluation_c"
 
 
 class InvestigationStatus(StrEnum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
-    PAUSED = "PAUSED"
-    FINALIZED = "FINALIZED"
-    FAILED = "FAILED"
+    PAUSED_APPROVAL = "PAUSED_APPROVAL"
+    COMPLETED = "COMPLETED"
+    FAILED_SAFE = "FAILED_SAFE"
 
 
 class CreateInvestigationRequest(BaseModel):
+    """No incident ID, model, tool, query, or evaluator seed is accepted --
+    the server always uses `ReplaySeed.DEVELOPMENT` (see `api_runtime.py`'s
+    `SqliteReplayControlPlane.create`); a client cannot select an evaluator
+    seed through this endpoint."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scenario_family: ScenarioFamily
-    seed: ReplaySeed
 
 
 class DecisionRequest(OwnerDecision):
@@ -80,7 +84,10 @@ class ReplayControlPlane(Protocol):
     """Owner-scoped operations; implementations hold replay-only wiring."""
 
     def create(
-        self, owner_email: str, request: CreateInvestigationRequest
+        self,
+        owner_email: str,
+        request: CreateInvestigationRequest,
+        idempotency_key: str,
     ) -> InvestigationView: ...
 
     def status(self, owner_email: str, investigation_id: str) -> InvestigationView: ...
@@ -125,9 +132,6 @@ def _dashboard_html(google_client_id: str) -> str:
 <form id="create-form"><label>Scenario
 <select id="scenario-family">
 <option value="configuration_change">Configuration change</option>
-</select></label><label>Seed <select id="seed">
-<option value="development">Development</option><option value="evaluation">Evaluation</option>
-<option value="evaluation_b">Evaluation B</option><option value="evaluation_c">Evaluation C</option>
 </select></label><button>Create</button></form>
 <h2>Investigation</h2><label>ID <input id="investigation-id" required></label>
 <button id="refresh" type="button">Refresh</button><pre id="result"></pre>
@@ -150,12 +154,12 @@ function id() {{ return document.getElementById("investigation-id").value.trim()
 async function refresh() {{
   const investigationId = id();
   if (!investigationId) return;
-  const base = "/v1/investigations/" + encodeURIComponent(investigationId);
+  const base = "/api/v1/investigations/" + encodeURIComponent(investigationId);
   const [view, events] = await Promise.all([
     request(base, {{headers: headers()}}), request(base + "/events", {{headers: headers()}})
   ]);
   document.getElementById("result").textContent = JSON.stringify({{view, events}}, null, 2);
-  if (view.status === "FINALIZED") {{
+  if (view.status === "COMPLETED") {{
     document.getElementById("report").textContent = await request(base + "/report", {{headers: headers()}});
   }}
 }}
@@ -168,9 +172,10 @@ function onGoogleCredential(response) {{
 window.onGoogleCredential = onGoogleCredential;
 document.getElementById("create-form").addEventListener("submit", async (event) => {{
   event.preventDefault();
-  const view = await request("/v1/investigations", {{method: "POST", headers: headers(),
-    body: JSON.stringify({{scenario_family: document.getElementById("scenario-family").value,
-      seed: document.getElementById("seed").value}})}});
+  const createHeaders = headers();
+  createHeaders["Idempotency-Key"] = crypto.randomUUID();
+  const view = await request("/api/v1/investigations", {{method: "POST", headers: createHeaders,
+    body: JSON.stringify({{scenario_family: document.getElementById("scenario-family").value}})}});
   document.getElementById("investigation-id").value = view.investigation_id;
   await refresh();
 }});
@@ -180,7 +185,7 @@ document.getElementById("decision-form").addEventListener("submit", async (event
   const decision = document.getElementById("decision").value;
   const payload = {{decision: decision}};
   if (decision === "reject") payload.rejection_note = document.getElementById("rejection-note").value;
-  await request("/v1/investigations/" + encodeURIComponent(id()) + "/decision", {{
+  await request("/api/v1/investigations/" + encodeURIComponent(id()) + "/decision", {{
     method: "POST", headers: headers(), body: JSON.stringify(payload)}});
   await refresh();
 }});
@@ -231,14 +236,26 @@ def create_app(
     def dashboard() -> HTMLResponse:
         return HTMLResponse(_dashboard_html(google_client_id))
 
-    @app.post("/v1/investigations", response_model=InvestigationView)
+    def idempotency_key(raw: str | None) -> str:
+        if raw is None or not raw.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        return raw.strip()
+
+    @app.post("/api/v1/investigations", response_model=InvestigationView)
     def create(
         request: CreateInvestigationRequest,
         authorization: str | None = Header(default=None),
+        idempotency_key_header: str | None = Header(
+            default=None, alias="Idempotency-Key"
+        ),
     ) -> InvestigationView:
-        return control_plane.create(owner(authorization), request)
+        return control_plane.create(
+            owner(authorization), request, idempotency_key(idempotency_key_header)
+        )
 
-    @app.get("/v1/investigations/{investigation_id}", response_model=InvestigationView)
+    @app.get(
+        "/api/v1/investigations/{investigation_id}", response_model=InvestigationView
+    )
     def get_status(
         investigation_id: str, authorization: str | None = Header(default=None)
     ) -> InvestigationView:
@@ -248,7 +265,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
 
     @app.get(
-        "/v1/investigations/{investigation_id}/events",
+        "/api/v1/investigations/{investigation_id}/events",
         response_model=list[TimelineEvent],
     )
     def get_events(
@@ -260,7 +277,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
 
     @app.post(
-        "/v1/investigations/{investigation_id}/decision",
+        "/api/v1/investigations/{investigation_id}/decision",
         response_model=InvestigationView,
     )
     def decide(
@@ -275,7 +292,7 @@ def create_app(
         except ControlPlaneConflictError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT) from error
 
-    @app.get("/v1/investigations/{investigation_id}/report", response_model=str)
+    @app.get("/api/v1/investigations/{investigation_id}/report", response_model=str)
     def get_report(
         investigation_id: str, authorization: str | None = Header(default=None)
     ) -> str:

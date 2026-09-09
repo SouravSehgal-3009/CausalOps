@@ -31,6 +31,7 @@ from causalops.api import (
     InvestigationStatus,
     InvestigationView,
     ReplayControlPlane,
+    ReplaySeed,
     TimelineEvent,
     create_app,
 )
@@ -74,10 +75,15 @@ class ControlPlaneIntegrityError(RuntimeError):
 
 
 class WorkerClaim(CreateInvestigationRequest):
-    """The fixed replay inputs a worker receives after atomically claiming a job."""
+    """The fixed replay inputs a worker receives after atomically claiming a
+    job. `seed` is declared here, not on `CreateInvestigationRequest` --
+    the server always stores `ReplaySeed.DEVELOPMENT` (`create()`'s own
+    docstring), but the worker still needs the stored value back to start
+    the scenario."""
 
     model_config = ConfigDict(frozen=True)
 
+    seed: ReplaySeed
     investigation_id: str
     owner_email: str
     checkpoint_id: str | None
@@ -176,7 +182,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
                     id TEXT PRIMARY KEY,
                     owner TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN
-                        ('QUEUED', 'RUNNING', 'PAUSED', 'FINALIZED')),
+                        ('QUEUED', 'RUNNING', 'PAUSED_APPROVAL', 'COMPLETED')),
                     scenario_family TEXT NOT NULL,
                     seed TEXT NOT NULL,
                     checkpoint_id TEXT,
@@ -236,6 +242,18 @@ class SqliteReplayControlPlane(ReplayControlPlane):
             )
             self._add_column_if_missing(
                 connection, "replay_jobs", "failure_reason TEXT"
+            )
+            self._add_column_if_missing(
+                connection, "replay_jobs", "idempotency_key TEXT"
+            )
+            # Partial unique index: a repeated (owner, idempotency_key) pair
+            # is the create() route's own replay case, never a real
+            # collision to reject at the database layer -- see create()'s
+            # own docstring.
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS replay_jobs_owner_idempotency_key "
+                "ON replay_jobs(owner, idempotency_key) "
+                "WHERE idempotency_key IS NOT NULL"
             )
             self._add_column_if_missing(
                 connection, "report_deliveries", "claim_token TEXT"
@@ -385,7 +403,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
         """
         paused_rows = connection.execute(
             "SELECT id, checkpoint_id FROM replay_jobs WHERE status = ?",
-            (InvestigationStatus.PAUSED.value,),
+            (InvestigationStatus.PAUSED_APPROVAL.value,),
         ).fetchall()
         for row in paused_rows:
             checkpoint_id = row["checkpoint_id"]
@@ -445,7 +463,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
     def _view(row: sqlite3.Row) -> InvestigationView:
         if row["failure_reason"] is not None:
             return InvestigationView(
-                investigation_id=row["id"], status=InvestigationStatus.FAILED
+                investigation_id=row["id"], status=InvestigationStatus.FAILED_SAFE
             )
         try:
             job_status = InvestigationStatus(row["status"])
@@ -745,7 +763,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
         if row is None:
             return None
         if row["failure_reason"] is not None:
-            return InvestigationStatus.FAILED
+            return InvestigationStatus.FAILED_SAFE
         try:
             return InvestigationStatus(row["status"])
         except ValueError as error:
@@ -768,19 +786,36 @@ class SqliteReplayControlPlane(ReplayControlPlane):
         return incident_id
 
     def create(
-        self, owner_email: str, request: CreateInvestigationRequest
+        self,
+        owner_email: str,
+        request: CreateInvestigationRequest,
+        idempotency_key: str,
     ) -> InvestigationView:
-        investigation_id = uuid4().hex
+        """A repeated `(owner_email, idempotency_key)` pair replays the
+        prior `202` -- the existing investigation's CURRENT view, not a
+        second investigation -- rather than raising on the unique index
+        above. The seed is always `ReplaySeed.DEVELOPMENT`: the server
+        chooses it, `CreateInvestigationRequest` has no seed field a caller
+        could set."""
         with self._connection() as connection:
+            existing = connection.execute(
+                "SELECT * FROM replay_jobs WHERE owner = ? AND idempotency_key = ?",
+                (owner_email, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                return self._view(existing)
+            investigation_id = uuid4().hex
             connection.execute(
-                "INSERT INTO replay_jobs (id, owner, status, scenario_family, seed) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO replay_jobs "
+                "(id, owner, status, scenario_family, seed, idempotency_key) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     investigation_id,
                     owner_email,
                     InvestigationStatus.QUEUED.value,
                     request.scenario_family.value,
-                    request.seed.value,
+                    ReplaySeed.DEVELOPMENT.value,
+                    idempotency_key,
                 ),
             )
             self._event(
@@ -855,7 +890,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
                     investigation_id, checkpoint_id, mirrored_decision
                 )
                 return self._view(job)
-            if job["status"] != InvestigationStatus.PAUSED.value:
+            if job["status"] != InvestigationStatus.PAUSED_APPROVAL.value:
                 raise ControlPlaneConflictError(
                     "investigation is not waiting for a decision"
                 )
@@ -895,7 +930,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
     def report(self, owner_email: str, investigation_id: str) -> str:
         with self._connection() as connection:
             job = self._owned(connection, owner_email, investigation_id)
-        if job["status"] != InvestigationStatus.FINALIZED.value:
+        if job["status"] != InvestigationStatus.COMPLETED.value:
             raise ControlPlaneConflictError("report is not finalized")
         stored_artifact = job["report_artifact"]
         if not isinstance(stored_artifact, str) or not stored_artifact:
@@ -1035,7 +1070,11 @@ class SqliteReplayControlPlane(ReplayControlPlane):
             connection.execute(
                 "UPDATE replay_jobs SET status = ?, checkpoint_id = ?, "
                 "claim_token = NULL, claim_expires_at = NULL WHERE id = ?",
-                (InvestigationStatus.PAUSED.value, checkpoint_id, investigation_id),
+                (
+                    InvestigationStatus.PAUSED_APPROVAL.value,
+                    checkpoint_id,
+                    investigation_id,
+                ),
             )
             self._event(
                 connection,
@@ -1144,7 +1183,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
             ).fetchone()
             if row is None:
                 raise ControlPlaneNotFoundError("investigation not found")
-            if row["status"] == InvestigationStatus.FINALIZED.value:
+            if row["status"] == InvestigationStatus.COMPLETED.value:
                 raise ControlPlaneConflictError("investigation is already finalized")
             if (
                 row["status"] != InvestigationStatus.RUNNING.value
@@ -1164,7 +1203,7 @@ class SqliteReplayControlPlane(ReplayControlPlane):
                 "report_content = ?, report_sha256 = ?, claim_token = NULL, "
                 "claim_expires_at = NULL WHERE id = ?",
                 (
-                    InvestigationStatus.FINALIZED.value,
+                    InvestigationStatus.COMPLETED.value,
                     report_artifact,
                     report_content,
                     report_sha256,
@@ -1482,11 +1521,11 @@ class ReplayGraphJobRunner:
         if not incident_id.isalnum():
             raise ControlPlaneIntegrityError("active scenario marker is invalid")
         scenario_status = self._control_plane.scenario_status(incident_id)
-        if scenario_status is InvestigationStatus.PAUSED:
+        if scenario_status is InvestigationStatus.PAUSED_APPROVAL:
             release_scenario(self._root, incident_id)
         elif scenario_status in {
-            InvestigationStatus.FAILED,
-            InvestigationStatus.FINALIZED,
+            InvestigationStatus.FAILED_SAFE,
+            InvestigationStatus.COMPLETED,
         }:
             try:
                 reset_scenario(self._root, incident_id)

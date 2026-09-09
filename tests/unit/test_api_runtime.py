@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +15,6 @@ from causalops.api import (
     CreateInvestigationRequest,
     DecisionRequest,
     InvestigationStatus,
-    ReplaySeed,
     ScenarioFamily,
 )
 from causalops.api_runtime import (
@@ -101,7 +101,6 @@ class SlowSender:
 def request() -> CreateInvestigationRequest:
     return CreateInvestigationRequest(
         scenario_family=ScenarioFamily.CONFIGURATION_CHANGE,
-        seed=ReplaySeed.DEVELOPMENT,
     )
 
 
@@ -113,7 +112,7 @@ def write_report(artifacts_root: Path, investigation_id: str, content: str) -> N
 
 def test_durable_replay_job_has_owner_scope_and_ordered_events(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
 
     assert created.status is InvestigationStatus.QUEUED
     assert [
@@ -124,9 +123,39 @@ def test_durable_replay_job_has_owner_scope_and_ordered_events(tmp_path: Path) -
         control_plane.status("other@example.com", created.investigation_id)
 
 
+def test_repeated_idempotency_key_replays_the_same_investigation(
+    tmp_path: Path,
+) -> None:
+    """A repeated `(owner, idempotency_key)` pair must return the SAME
+    investigation, at its current status -- not create a second one. The
+    spec requires this exact replay behavior on `POST /investigations`."""
+    control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
+    key = str(uuid4())
+
+    first = control_plane.create("owner@example.com", request(), key)
+    second = control_plane.create("owner@example.com", request(), key)
+
+    assert first.investigation_id == second.investigation_id
+    assert second.status is InvestigationStatus.QUEUED
+    assert [
+        event.name
+        for event in control_plane.events("owner@example.com", first.investigation_id)
+    ] == ["investigation_queued"]
+
+    # A different owner with the SAME key string is a genuinely different
+    # investigation -- the unique constraint is scoped per-owner.
+    other_owner = control_plane.create("other@example.com", request(), key)
+    assert other_owner.investigation_id != first.investigation_id
+
+    # A different key for the SAME owner is also genuinely a new
+    # investigation, not a replay.
+    different_key = control_plane.create("owner@example.com", request(), str(uuid4()))
+    assert different_key.investigation_id != first.investigation_id
+
+
 def test_safe_resume_is_checkpointed_write_once_and_idempotent(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     claim = control_plane.claim_next()
     assert claim is not None
     assert claim.investigation_id == created.investigation_id
@@ -177,7 +206,7 @@ def test_api_decision_is_durable_in_the_shared_checkpoint_ledger(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", checkpoint_database=checkpoints
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     claim = control_plane.claim_next()
     assert claim is not None
     control_plane.mark_paused(
@@ -207,7 +236,7 @@ def test_worker_reconciles_a_ledger_write_interrupted_before_queueing(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", checkpoint_database=checkpoints
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     claim = control_plane.claim_next()
     assert claim is not None
     control_plane.mark_paused(
@@ -235,7 +264,7 @@ def test_finalization_queues_one_owner_only_delivery(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Cited replay report")
     claim = control_plane.claim_next()
     assert claim is not None
@@ -269,8 +298,8 @@ def test_finalization_and_report_refuse_another_investigations_artifact(
     artifacts_root = tmp_path / "investigations"
     database = tmp_path / "control-plane.db"
     control_plane = SqliteReplayControlPlane(database, artifacts_root=artifacts_root)
-    first = control_plane.create("first@example.com", request())
-    second = control_plane.create("second@example.com", request())
+    first = control_plane.create("first@example.com", request(), str(uuid4()))
+    second = control_plane.create("second@example.com", request(), str(uuid4()))
     write_report(artifacts_root, first.investigation_id, "# First report")
     write_report(artifacts_root, second.investigation_id, "# Second report")
     first_claim = control_plane.claim_next()
@@ -305,8 +334,8 @@ def test_finalization_refuses_file_and_directory_symlinked_artifacts(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    file_link_job = control_plane.create("first@example.com", request())
-    other_job = control_plane.create("other@example.com", request())
+    file_link_job = control_plane.create("first@example.com", request(), str(uuid4()))
+    other_job = control_plane.create("other@example.com", request(), str(uuid4()))
     write_report(artifacts_root, other_job.investigation_id, "# Other report")
 
     file_link_directory = artifacts_root / file_link_job.investigation_id
@@ -331,8 +360,10 @@ def test_finalization_refuses_a_directory_symlinked_artifact(tmp_path: Path) -> 
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    directory_link_job = control_plane.create("second@example.com", request())
-    other_job = control_plane.create("other@example.com", request())
+    directory_link_job = control_plane.create(
+        "second@example.com", request(), str(uuid4())
+    )
+    other_job = control_plane.create("other@example.com", request(), str(uuid4()))
     write_report(artifacts_root, other_job.investigation_id, "# Other report")
     (artifacts_root / directory_link_job.investigation_id).symlink_to(
         artifacts_root / other_job.investigation_id, target_is_directory=True
@@ -353,8 +384,8 @@ def test_finalization_refuses_a_cross_owner_hard_link(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    linked_job = control_plane.create("owner@example.com", request())
-    other_job = control_plane.create("other@example.com", request())
+    linked_job = control_plane.create("owner@example.com", request(), str(uuid4()))
+    other_job = control_plane.create("other@example.com", request(), str(uuid4()))
     write_report(artifacts_root, other_job.investigation_id, "# Other report")
     linked_directory = artifacts_root / linked_job.investigation_id
     linked_directory.mkdir()
@@ -381,8 +412,8 @@ def test_report_snapshot_ignores_a_symlink_swapped_after_finalization(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
-    other = control_plane.create("other@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
+    other = control_plane.create("other@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Owner report")
     write_report(artifacts_root, other.investigation_id, "# Other report")
     claim = control_plane.claim_next()
@@ -408,7 +439,7 @@ def test_worker_uses_durable_checkpoint_and_finalizes_once(tmp_path: Path) -> No
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Final report")
     runner = FakeRunner(
         [
@@ -423,7 +454,7 @@ def test_worker_uses_durable_checkpoint_and_finalizes_once(tmp_path: Path) -> No
     assert worker.run_once()
     assert (
         control_plane.status("owner@example.com", created.investigation_id).status
-        is InvestigationStatus.PAUSED
+        is InvestigationStatus.PAUSED_APPROVAL
     )
     control_plane.decide(
         "owner@example.com",
@@ -446,7 +477,7 @@ def test_delivery_worker_releases_a_failure_and_retries(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root, clock=clock
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Final report")
     claim = control_plane.claim_next()
     assert claim is not None
@@ -478,7 +509,7 @@ def test_expired_worker_claim_is_reclaimed_and_stale_worker_is_refused(
         claim_lease_seconds=10,
         retry_base_seconds=1,
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     first_claim = control_plane.claim_next()
     assert first_claim is not None
 
@@ -506,14 +537,14 @@ def test_expired_claim_uses_the_same_terminal_retry_limit(tmp_path: Path) -> Non
         claim_lease_seconds=1,
         max_replay_attempts=1,
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     assert control_plane.claim_next() is not None
 
     clock.now += 2
     assert control_plane.claim_next() is None
     assert (
         control_plane.status("owner@example.com", created.investigation_id).status
-        is InvestigationStatus.FAILED
+        is InvestigationStatus.FAILED_SAFE
     )
 
 
@@ -521,7 +552,7 @@ def test_scenario_identity_is_reserved_before_provisioning_and_survives_reclaim(
     tmp_path: Path,
 ) -> None:
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     first_claim = control_plane.claim_next()
     assert first_claim is not None
 
@@ -537,8 +568,8 @@ def test_scenario_identity_is_reserved_before_provisioning_and_survives_reclaim(
 
 def test_only_one_job_can_claim_the_single_mutable_scenario(tmp_path: Path) -> None:
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
-    control_plane.create("first@example.com", request())
-    control_plane.create("second@example.com", request())
+    control_plane.create("first@example.com", request(), str(uuid4()))
+    control_plane.create("second@example.com", request(), str(uuid4()))
 
     assert control_plane.claim_next() is not None
     assert control_plane.claim_next() is None
@@ -552,7 +583,7 @@ def test_runner_adopts_an_artifact_published_before_control_plane_finalization(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Recovered report")
     claim = control_plane.claim_next()
     assert claim is not None
@@ -578,7 +609,7 @@ def test_runner_releases_paused_and_finalized_scenario_markers(tmp_path: Path) -
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     claim = control_plane.claim_next()
     assert claim is not None
     incident_id = control_plane.reserve_incident(
@@ -624,7 +655,7 @@ def test_runner_reconciles_marker_cleanup_after_a_transition_crash(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", artifacts_root=artifacts_root
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     claim = control_plane.claim_next()
     assert claim is not None
     incident_id = control_plane.reserve_incident(
@@ -665,7 +696,7 @@ def test_runner_reconciles_marker_cleanup_after_a_transition_crash(
 def test_worker_runner_failure_requeues_its_own_claim(tmp_path: Path) -> None:
     clock = FakeClock()
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db", clock=clock)
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
 
     with pytest.raises(RuntimeError, match="runner transient failure"):
         ReplayWorker(control_plane, FailingRunner()).run_once()
@@ -686,7 +717,7 @@ def test_retry_limit_marks_a_job_failed_and_unblocks_later_work(tmp_path: Path) 
         retry_base_seconds=10,
         max_replay_attempts=2,
     )
-    first = control_plane.create("first@example.com", request())
+    first = control_plane.create("first@example.com", request(), str(uuid4()))
     failed_ids: list[str] = []
 
     with pytest.raises(RuntimeError):
@@ -705,10 +736,10 @@ def test_retry_limit_marks_a_job_failed_and_unblocks_later_work(tmp_path: Path) 
 
     assert (
         control_plane.status("first@example.com", first.investigation_id).status
-        is InvestigationStatus.FAILED
+        is InvestigationStatus.FAILED_SAFE
     )
     assert failed_ids == [first.investigation_id]
-    second = control_plane.create("second@example.com", request())
+    second = control_plane.create("second@example.com", request(), str(uuid4()))
     next_claim = control_plane.claim_next()
     assert next_claim is not None
     assert next_claim.investigation_id == second.investigation_id
@@ -721,14 +752,14 @@ def test_deferred_scenario_retry_keeps_other_jobs_from_using_its_lab(
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", clock=clock, retry_base_seconds=10
     )
-    first = control_plane.create("first@example.com", request())
+    first = control_plane.create("first@example.com", request(), str(uuid4()))
     first_claim = control_plane.claim_next()
     assert first_claim is not None
     control_plane.reserve_incident(first.investigation_id, first_claim.claim_token)
     control_plane.retry_running(
         first.investigation_id, first_claim.claim_token, RuntimeError("temporary")
     )
-    control_plane.create("second@example.com", request())
+    control_plane.create("second@example.com", request(), str(uuid4()))
 
     assert control_plane.claim_next() is None
     clock.now += 10
@@ -748,7 +779,7 @@ def test_delivery_retry_limit_does_not_block_later_deliveries(tmp_path: Path) ->
         retry_base_seconds=10,
         max_delivery_attempts=2,
     )
-    first = control_plane.create("first@example.com", request())
+    first = control_plane.create("first@example.com", request(), str(uuid4()))
     write_report(artifacts_root, first.investigation_id, "# First report")
     first_job_claim = control_plane.claim_next()
     assert first_job_claim is not None
@@ -768,7 +799,7 @@ def test_delivery_retry_limit_does_not_block_later_deliveries(tmp_path: Path) ->
             control_plane, FakeSender(RuntimeError("temporary"))
         ).run_once()
 
-    second = control_plane.create("second@example.com", request())
+    second = control_plane.create("second@example.com", request(), str(uuid4()))
     write_report(artifacts_root, second.investigation_id, "# Second report")
     second_job_claim = control_plane.claim_next()
     assert second_job_claim is not None
@@ -787,7 +818,7 @@ def test_worker_requeues_when_finalization_fails_after_the_runner_returns(
     tmp_path: Path,
 ) -> None:
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     runner = FakeRunner(
         [
             FinalizedWorkerOutcome(
@@ -815,12 +846,12 @@ def test_worker_renews_a_running_lease_for_a_slow_runner(tmp_path: Path) -> None
     control_plane = SqliteReplayControlPlane(
         tmp_path / "control-plane.db", claim_lease_seconds=1.2
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
 
     assert ReplayWorker(control_plane, SlowPausedRunner()).run_once()
     assert (
         control_plane.status("owner@example.com", created.investigation_id).status
-        is InvestigationStatus.PAUSED
+        is InvestigationStatus.PAUSED_APPROVAL
     )
 
 
@@ -833,7 +864,7 @@ def test_delivery_worker_renews_a_lease_for_a_slow_sender(tmp_path: Path) -> Non
         artifacts_root=artifacts_root,
         claim_lease_seconds=1.2,
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Final report")
     job_claim = control_plane.claim_next()
     assert job_claim is not None
@@ -865,7 +896,7 @@ def test_expired_delivery_claim_is_reclaimed_with_a_stable_idempotency_key(
         claim_lease_seconds=10,
         retry_base_seconds=1,
     )
-    created = control_plane.create("owner@example.com", request())
+    created = control_plane.create("owner@example.com", request(), str(uuid4()))
     write_report(artifacts_root, created.investigation_id, "# Final report")
     job_claim = control_plane.claim_next()
     assert job_claim is not None
@@ -911,7 +942,7 @@ def test_app_factory_installs_a_configured_google_verifier(
     http = TestClient(api_runtime.app())
     assert (
         http.get(
-            "/v1/investigations/missing", headers={"Authorization": "Bearer token"}
+            "/api/v1/investigations/missing", headers={"Authorization": "Bearer token"}
         ).status_code
         == 404
     )
