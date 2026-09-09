@@ -19,6 +19,7 @@ results/
 infra/phase2/*.tfvars
 infra/phase2/.terraform/
 infra/phase2/*.tfstate*
+infra/phase3/*.env
 
 # Contributor instructions stay local; the product specification is not ignored.
 AGENTS.md
