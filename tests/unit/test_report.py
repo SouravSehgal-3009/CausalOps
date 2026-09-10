@@ -145,9 +145,43 @@ def test_the_budget_section_reports_what_was_spent() -> None:
     text = render_report(diagnosed_report(("evidence-1",)), [], [], "replay")
 
     assert "- Model calls: 3 of 5" in text
-    assert "- Checks executed: 2 of 2" in text
+    assert "- Diagnostic checks executed: 2 of 2" in text
+    assert "- Runbook searches: 0 of 1" in text
     assert "- Token usage: not reported by this model" in text
     assert "- Runbook retrieval mode: `disabled`" in text
+
+
+def allowed_receipt(tool: str) -> ToolReceipt:
+    return ToolReceipt(
+        receipt_id=f"receipt-{tool}",
+        incident_id=INCIDENT_ID,
+        tool=tool,  # type: ignore[arg-type]
+        fingerprint="h" * 8,
+        policy_result=PolicyResult.ALLOWED,
+        outcome=ToolOutcome.EXECUTED,
+        requested_at=WINDOW_START,
+        duration_ms=5,
+    )
+
+
+def test_the_budget_section_never_counts_a_runbook_search_as_a_diagnostic_check() -> (
+    None
+):
+    """The real bug this fix closes: `search_runbooks` spends from its own
+    `budgets.runbook_searches` pool (see `Budgets.runbook_searches`'s own
+    docstring), separate from `budgets.executed_tools`. Before this fix,
+    a run that used its full diagnostic budget (2 of 2) and its full
+    runbook budget (1 of 1) rendered as "Checks executed: 3 of 2" --
+    reading as an over-budget run when neither pool was ever exceeded.
+    Found live, on a real hosted investigation."""
+    report = diagnosed_report(("evidence-1",))  # tools_executed=2, budgets=Budgets()
+    receipts = [allowed_receipt("query_metric"), allowed_receipt("search_runbooks")]
+
+    text = render_report(report, [], receipts, "replay")
+
+    assert "- Diagnostic checks executed: 1 of 2" in text
+    assert "- Runbook searches: 1 of 1" in text
+    assert "3 of 2" not in text
 
 
 def test_no_guidance_section_when_retrieval_never_ran() -> None:
