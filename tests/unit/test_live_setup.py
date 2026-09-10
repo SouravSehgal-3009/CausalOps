@@ -10,6 +10,7 @@ import sqlite3
 
 import pytest
 
+from causalops.api import ScenarioFamily
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
     RESERVATION_CEILING_BUFFER_USD,
@@ -22,6 +23,7 @@ from causalops.live_model import (
 )
 from causalops.live_setup import (
     DEFAULT_LIVE_EVALUATION_MAX_USD,
+    FAMILY_REPLAY_FIXTURES,
     LIVE_EVALUATION_MAX_USD_VARIABLE,
     MINIMUM_POSSIBLE_RESERVATION_USD,
     MINIMUM_USABLE_CEILING_USD,
@@ -210,3 +212,14 @@ def test_accepted_ceiling_actually_authorizes_a_minimal_reservation() -> None:
     assert row is not None
     assert row[0] == pytest.approx(MINIMUM_POSSIBLE_RESERVATION_USD)
     assert row[1] == "SETTLED"
+
+
+def test_every_scenario_family_has_a_hosted_replay_fixture() -> None:
+    """The hosted API never reaches a live model -- a family with no
+    matching fixture would silently run the wrong scripted narrative
+    against real injected evidence instead of failing loudly. Adding a
+    5th `ScenarioFamily` member without adding its fixture here must fail
+    this test, not surface live as a confusing wrong diagnosis."""
+    assert set(FAMILY_REPLAY_FIXTURES) == set(ScenarioFamily)
+    for fixture in FAMILY_REPLAY_FIXTURES.values():
+        assert fixture.is_file(), fixture

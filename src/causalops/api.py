@@ -20,9 +20,18 @@ from causalops.approvals import OwnerDecision
 
 
 class ScenarioFamily(StrEnum):
-    """Scenario families backed by verified hosted replay fixtures."""
+    """Scenario families backed by verified hosted replay fixtures.
+
+    Each member needs its own hand-scripted replay fixture matching that
+    family's real root cause (see `live_setup.FAMILY_REPLAY_FIXTURES`) --
+    the hosted API never reaches a live model, so a family with no matching
+    script would silently run the wrong diagnostic narrative against real
+    injected evidence."""
 
     CONFIGURATION_CHANGE = "configuration_change"
+    DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION = "downstream_timeout_retry_amplification"
+    RESOURCE_POOL_SATURATION = "resource_pool_saturation"
+    AMBIGUOUS_TELEMETRY = "ambiguous_telemetry"
 
 
 class ReplaySeed(StrEnum):
@@ -172,6 +181,9 @@ def _dashboard_html(google_client_id: str) -> str:
 <form id="create-form"><label>Scenario
 <select id="scenario-family">
 <option value="configuration_change">Configuration change</option>
+<option value="downstream_timeout_retry_amplification">Downstream timeout retry amplification</option>
+<option value="resource_pool_saturation">Resource pool saturation</option>
+<option value="ambiguous_telemetry">Ambiguous telemetry</option>
 </select></label><button>Create</button></form>
 <h2>Investigation</h2><label>ID <input id="investigation-id" required></label>
 <button id="refresh" type="button">Refresh</button><pre id="result"></pre>

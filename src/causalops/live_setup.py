@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol
 
+from causalops.api import ScenarioFamily
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
     RESERVATION_CEILING_BUFFER_USD,
@@ -63,6 +64,29 @@ REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # two was established and proven before the loop was retired.
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
 
+# Hosted-API-only: which scripted fixture correctly narrates each scenario
+# family's real root cause. `REPLAY_FIXTURE` above stays the CLI/evaluate
+# default (family-agnostic, unchanged) -- only `HostedReplayRuntimeWiring`/
+# `McpBackedReplayRuntimeWiring` consult this map, since the hosted API is
+# the one surface that lets an owner pick a family and never reaches a real
+# model to reason about it correctly on its own. `ambiguous_telemetry`'s
+# own real expected outcome (see `lab/scenarios/ambiguous_telemetry.json`)
+# is genuine abstention, not a demo trick -- both pool-exhaustion and
+# upstream-timeout error codes really do appear together in that family's
+# injected fault, so its fixture correctly declines to pick one.
+FAMILY_REPLAY_FIXTURES: Mapping[ScenarioFamily, Path] = {
+    ScenarioFamily.CONFIGURATION_CHANGE: REPLAY_FIXTURE,
+    ScenarioFamily.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION: (
+        REPLAY_FIXTURE_DIR / "downstream_timeout_demo.json"
+    ),
+    ScenarioFamily.RESOURCE_POOL_SATURATION: (
+        REPLAY_FIXTURE_DIR / "resource_pool_saturation_demo.json"
+    ),
+    ScenarioFamily.AMBIGUOUS_TELEMETRY: (
+        REPLAY_FIXTURE_DIR / "ambiguous_telemetry_demo.json"
+    ),
+}
+
 # A deliberately narrow opt-in: any value other than an affirmative spelling
 # disables the legacy hosted provider.  Deployments set this to ``false`` so
 # a disabled path returns before reading credentials or allocating a client.
@@ -86,7 +110,12 @@ class ReplayRuntimeWiring(Protocol):
     process."""
 
     def build(
-        self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
     ) -> tuple[
         ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
     ]: ...
@@ -356,18 +385,33 @@ def build_replay_model_and_registry(
 
 
 class HostedReplayRuntimeWiring:
-    """Composition-selected implementation of the replay-only runtime seam."""
+    """Composition-selected implementation of the replay-only runtime seam.
 
-    def __init__(self, fixture: Path = REPLAY_FIXTURE) -> None:
+    `fixture=None` (the default) selects per-family from
+    `FAMILY_REPLAY_FIXTURES` -- an explicit `fixture` overrides that lookup
+    for every family, the demo/ops-only escape hatch `CAUSALOPS_REPLAY_
+    FIXTURE` still uses (see `api_runtime.py`'s `app()`)."""
+
+    def __init__(self, fixture: Path | None = None) -> None:
         self._fixture = fixture
 
     def build(
-        self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
     ) -> tuple[
         ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
     ]:
+        fixture = (
+            self._fixture
+            if self._fixture is not None
+            else FAMILY_REPLAY_FIXTURES[family]
+        )
         model, registry, model_name = build_replay_model_and_registry(
-            incident, paths, budgets, fixture=self._fixture
+            incident, paths, budgets, fixture=fixture
         )
         return model, registry, model_name, lambda: None
 

@@ -109,17 +109,26 @@ def test_replay_api_is_owner_scoped_and_has_no_model_input() -> None:
     )
     assert invalid.status_code == 422
 
-    for unsupported_scenario in (
-        "ambiguous_telemetry",
-        "downstream_timeout_retry_amplification",
-        "resource_pool_saturation",
-    ):
-        unsupported = http.post(
-            "/api/v1/investigations",
-            headers=idempotency_headers,
-            json={"scenario_family": unsupported_scenario},
+    for index, supported_scenario in enumerate(
+        (
+            "ambiguous_telemetry",
+            "downstream_timeout_retry_amplification",
+            "resource_pool_saturation",
         )
-        assert unsupported.status_code == 422
+    ):
+        supported = http.post(
+            "/api/v1/investigations",
+            headers={**idempotency_headers, "Idempotency-Key": f"key-family-{index}"},
+            json={"scenario_family": supported_scenario},
+        )
+        assert supported.status_code == 200
+
+    unsupported = http.post(
+        "/api/v1/investigations",
+        headers={**idempotency_headers, "Idempotency-Key": "key-unsupported"},
+        json={"scenario_family": "not_a_real_family"},
+    )
+    assert unsupported.status_code == 422
 
     other_owner = TestClient(
         create_app(

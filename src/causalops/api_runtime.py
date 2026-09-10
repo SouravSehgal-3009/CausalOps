@@ -1578,7 +1578,7 @@ class ReplayGraphJobRunner:
         budgets = Budgets()
         recorder = RunRecorder(utc_now)
         model, registry, model_name, release = self._replay_wiring.build(
-            incident, paths, budgets
+            incident, paths, budgets, family=claim.scenario_family
         )
         try:
             with self._checkpointer_factory() as checkpointer:

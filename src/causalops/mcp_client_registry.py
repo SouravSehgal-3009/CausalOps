@@ -30,6 +30,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from causalops.api import ScenarioFamily
 from causalops.cost_ledger import ensure_cost_ledger_table
 from causalops.doctor import API_KEY_VARIABLE
 from causalops.domain import (
@@ -46,7 +47,7 @@ from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
 from causalops.live_model import LiveClaudeModel
 from causalops.live_setup import (
     ENABLE_CLAUDE_VARIABLE,
-    REPLAY_FIXTURE,
+    FAMILY_REPLAY_FIXTURES,
     ProviderDisabledError,
     claude_enabled,
     live_evaluation_ceiling_usd,
@@ -180,28 +181,39 @@ def build_mcp_tool_registry(
 class McpBackedReplayRuntimeWiring:
     """MCP-backed alternative to `live_setup.HostedReplayRuntimeWiring`.
 
-    Same replay reasoning model, same default fixture -- only the tool
-    registry's transport differs. `fixture` defaults to the shared
-    `REPLAY_FIXTURE`, overridable for the same reason
+    Same replay reasoning model, same per-family fixture selection -- only
+    the tool registry's transport differs. `fixture=None` (the default)
+    selects from `FAMILY_REPLAY_FIXTURES`; an explicit `fixture` overrides
+    that lookup for every family, for the same reason
     `HostedReplayRuntimeWiring` accepts it (see that class's own
     docstring). Spawns one child process per investigation; the returned
     teardown callback must be invoked on every exit path (see
     `live_setup.ReplayRuntimeWiring`'s widened 4-tuple contract)."""
 
-    def __init__(self, fixture: Path = REPLAY_FIXTURE) -> None:
+    def __init__(self, fixture: Path | None = None) -> None:
         self._fixture = fixture
 
     def build(
-        self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
     ) -> tuple[
         ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
     ]:
+        fixture = (
+            self._fixture
+            if self._fixture is not None
+            else FAMILY_REPLAY_FIXTURES[family]
+        )
         child = McpChildProcess()
         child.start(paths.root, incident.scope, budgets)
         registry = build_mcp_tool_registry(child, budgets)
         replay_model = ReplayToolCallingModel(
             ReplayReasoningModel(
-                self._fixture,
+                fixture,
                 substitutions={
                     "incident_id": incident.scope.incident_id,
                     "window_start": incident.scope.started_at.isoformat(),
