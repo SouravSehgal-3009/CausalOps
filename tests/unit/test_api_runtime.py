@@ -30,6 +30,7 @@ from causalops.api_runtime import (
     WorkerClaim,
 )
 from causalops.approvals import ensure_decisions_table, record_decision_before_resume
+from causalops.doctor import find_project_root
 from causalops.domain import utc_now
 from causalops.gcs_artifacts import ARTIFACT_NAMES
 from causalops.live_setup import HostedReplayRuntimeWiring
@@ -1020,3 +1021,61 @@ def test_app_factory_installs_a_configured_google_verifier(
         ).status_code
         == 404
     )
+
+
+def test_app_factory_rejects_an_unrecognised_control_plane_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CAUSALOPS_CONTROL_PLANE_BACKEND", "mongodb")
+
+    with pytest.raises(RuntimeError, match="CAUSALOPS_CONTROL_PLANE_BACKEND"):
+        api_runtime.app()
+
+
+def test_app_factory_selects_firestore_control_plane_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`app()`'s default stays sqlite -- this proves the opt-in wiring
+    reaches `FirestoreReplayControlPlane`/`FirestoreCheckpointSaver`
+    without constructing a real `firestore.Client()` (no ADC, no network),
+    the same fake-the-real-dependency approach
+    `test_app_factory_installs_a_configured_google_verifier` already takes
+    for `GoogleIdentityVerifier`."""
+    built: dict[str, object] = {}
+
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    class FakeFirestoreReplayControlPlane:
+        def __init__(self, artifacts_root: Path) -> None:
+            built["artifacts_root"] = artifacts_root
+            self.claim_lease_seconds = 300.0
+
+    class FakeFirestoreCheckpointSaver:
+        def __init__(self) -> None:
+            built["checkpointer"] = self
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CAUSALOPS_CONTROL_PLANE_BACKEND", "firestore")
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(
+        api_runtime, "FirestoreReplayControlPlane", FakeFirestoreReplayControlPlane
+    )
+    monkeypatch.setattr(
+        api_runtime, "FirestoreCheckpointSaver", FakeFirestoreCheckpointSaver
+    )
+
+    api_runtime.app()
+
+    root = find_project_root(Path.cwd())
+    assert built["artifacts_root"] == root / "results" / "investigations"
+    assert "checkpointer" not in built  # only built lazily, inside a run()

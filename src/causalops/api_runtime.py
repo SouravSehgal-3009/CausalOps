@@ -6,7 +6,6 @@ checkpoint and finalization methods below to make API resume and delivery safe
 across process restarts. It has no provider-selection input.
 """
 
-import errno
 import hashlib
 import json
 import os
@@ -14,13 +13,14 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from threading import Event, Thread
 from typing import Protocol, cast
 from uuid import uuid4
 
 from fastapi import FastAPI
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict
 
 from causalops.api import (
@@ -28,11 +28,13 @@ from causalops.api import (
     ControlPlaneNotFoundError,
     CreateInvestigationRequest,
     DecisionRequest,
+    DeliveryClaim,
     InvestigationStatus,
     InvestigationView,
     ReplayControlPlane,
     ReplaySeed,
     TimelineEvent,
+    WorkerClaim,
     create_app,
 )
 from causalops.approvals import (
@@ -45,6 +47,8 @@ from causalops.approvals import (
 from causalops.cli import _load_verified_incident, _sqlite_checkpointer
 from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import Budgets, EscalatedInvestigation, utc_now
+from causalops.firestore_checkpointer import FirestoreCheckpointSaver
+from causalops.firestore_control_plane import FirestoreReplayControlPlane
 from causalops.gcs_artifacts import ARTIFACT_NAMES, ArtifactStore, GcsArtifactStore
 from causalops.google_identity import GoogleIdentityVerifier
 from causalops.graph import (
@@ -60,6 +64,11 @@ from causalops.live_setup import (
 )
 from causalops.mcp_client_registry import McpBackedReplayRuntimeWiring
 from causalops.report import render_report as render_markdown_report
+from causalops.report_snapshot import (
+    artifact_path,
+    read_report_snapshot,
+    validate_report_reference,
+)
 from causalops.run_records import RunRecorder, finalize_investigation
 from causalops.scenario_control import (
     LabError,
@@ -73,37 +82,6 @@ from causalops.scenario_control import (
 
 class ControlPlaneIntegrityError(RuntimeError):
     """A durable control-plane record cannot be safely interpreted."""
-
-
-class WorkerClaim(CreateInvestigationRequest):
-    """The fixed replay inputs a worker receives after atomically claiming a
-    job. `seed` is declared here, not on `CreateInvestigationRequest` --
-    the server always stores `ReplaySeed.DEVELOPMENT` (`create()`'s own
-    docstring), but the worker still needs the stored value back to start
-    the scenario."""
-
-    model_config = ConfigDict(frozen=True)
-
-    seed: ReplaySeed
-    investigation_id: str
-    owner_email: str
-    checkpoint_id: str | None
-    incident_id: str | None = None
-    owner_decision: DecisionRequest | None = None
-    claim_token: str
-
-
-class DeliveryClaim(InvestigationView):
-    """A report delivery work item addressed only to the investigation owner."""
-
-    model_config = ConfigDict(frozen=True)
-
-    report_artifact: str
-    report_content: str
-    report_sha256: str
-    destination_email: str
-    delivery_id: str
-    claim_token: str
 
 
 class PausedWorkerOutcome(BaseModel):
@@ -131,10 +109,67 @@ class ReplayJobRunner(Protocol):
     def run(self, claim: WorkerClaim) -> WorkerOutcome: ...
 
 
+# `_sqlite_checkpointer` and a Firestore equivalent both open a
+# `BaseCheckpointSaver[str]` for the caller's own `with` block -- a
+# zero-argument factory returning that context manager lets
+# `ReplayGraphJobRunner` pick either backend without knowing which one it
+# got, the same swap `WorkerControlPlane` makes for the control plane.
+CheckpointerFactory = Callable[[], AbstractContextManager[BaseCheckpointSaver[str]]]
+
+
 class ReportDeliverySender(Protocol):
     """Injected sender for a finalized report delivery claim."""
 
     def send(self, claim: DeliveryClaim) -> None: ...
+
+
+class WorkerControlPlane(Protocol):
+    """The worker-facing surface `ReplayWorker`/`ReportDeliveryWorker`/
+    `ReplayGraphJobRunner` actually call -- narrower than the full
+    `SqliteReplayControlPlane`/`FirestoreReplayControlPlane` classes, and
+    disjoint from `causalops.api.ReplayControlPlane` (that one is the
+    owner-facing HTTP surface only: create/status/events/decide/report).
+    Both concrete control planes satisfy this structurally without
+    declaring it, the same seam-typing approach this project already uses
+    for `ReplayJobRunner`/`ReportDeliverySender` above -- it lets `app()`
+    choose either backend without either worker class importing the other
+    backend's module.
+    """
+
+    @property
+    def claim_lease_seconds(self) -> float: ...
+
+    def claim_next(self) -> WorkerClaim | None: ...
+
+    def reserve_incident(self, investigation_id: str, claim_token: str) -> str: ...
+
+    def incident_id_for(self, investigation_id: str) -> str | None: ...
+
+    def scenario_status(self, incident_id: str) -> InvestigationStatus | None: ...
+
+    def renew_running(self, investigation_id: str, claim_token: str) -> None: ...
+
+    def mark_paused(
+        self, investigation_id: str, checkpoint_id: str, claim_token: str
+    ) -> None: ...
+
+    def retry_running(
+        self, investigation_id: str, claim_token: str, error: Exception
+    ) -> bool: ...
+
+    def finalize(
+        self, investigation_id: str, report_artifact: str, claim_token: str
+    ) -> None: ...
+
+    def claim_delivery(self) -> DeliveryClaim | None: ...
+
+    def renew_delivery(self, investigation_id: str, claim_token: str) -> None: ...
+
+    def mark_delivered(self, investigation_id: str, claim_token: str) -> None: ...
+
+    def retry_delivery(
+        self, investigation_id: str, claim_token: str, error: Exception
+    ) -> bool: ...
 
 
 DEFAULT_CLAIM_LEASE_SECONDS = 300.0
@@ -596,91 +631,15 @@ class SqliteReplayControlPlane(ReplayControlPlane):
 
     @staticmethod
     def _validate_report_reference(investigation_id: str, report_artifact: str) -> Path:
-        relative_path = Path(report_artifact)
-        expected_path = Path(investigation_id) / "report.md"
-        if relative_path != expected_path:
-            raise ValueError(
-                "report_artifact must be the investigation's own report.md"
-            )
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise ValueError("report_artifact must stay beneath the artifact root")
-        return relative_path
+        return validate_report_reference(investigation_id, report_artifact)
 
     def _artifact_path(self, investigation_id: str, report_artifact: str) -> Path:
-        self._validate_report_reference(investigation_id, report_artifact)
-        if self._artifacts_root.is_symlink():
-            raise ValueError("artifact root must not be a symbolic link")
-        root = self._artifacts_root.resolve()
-        investigation_directory = root / investigation_id
-        candidate = investigation_directory / "report.md"
-        try:
-            root_mode = root.lstat().st_mode
-            directory_mode = investigation_directory.lstat().st_mode
-            report_mode = candidate.lstat().st_mode
-        except OSError as error:
-            raise ValueError(
-                "report_artifact must name an existing regular file"
-            ) from error
-        if not stat.S_ISDIR(root_mode):
-            raise ValueError("artifact root must be a directory")
-        if stat.S_ISLNK(directory_mode) or stat.S_ISLNK(report_mode):
-            raise ValueError(
-                "report_artifact and its directory must not be symbolic links"
-            )
-        if not stat.S_ISDIR(directory_mode) or not stat.S_ISREG(report_mode):
-            raise ValueError("report_artifact must name an existing regular file")
-        return candidate
+        return artifact_path(self._artifacts_root, investigation_id, report_artifact)
 
     def _read_report_snapshot(self, investigation_id: str, report_artifact: str) -> str:
-        """Read the report through descriptor-anchored, no-follow opens."""
-        self._validate_report_reference(investigation_id, report_artifact)
-        required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
-        if any(not hasattr(os, flag) for flag in required_flags):
-            raise ValueError("platform lacks safe no-follow artifact reads")
-        # typeshed omits O_DIRECTORY/O_NOFOLLOW on win32 (they're POSIX-only),
-        # so a static `os.O_DIRECTORY` attribute access fails mypy there even
-        # though the hasattr guard above already keeps this branch
-        # unreachable on that platform. getattr() sidesteps the platform
-        # stub instead of needing a `type: ignore` that would be "unused"
-        # on the POSIX runners where the attribute really does exist.
-        o_directory: int = getattr(os, "O_DIRECTORY")  # noqa: B009
-        o_nofollow: int = getattr(os, "O_NOFOLLOW")  # noqa: B009
-        flags = os.O_RDONLY | o_directory | o_nofollow
-        root_fd: int | None = None
-        directory_fd: int | None = None
-        report_fd: int | None = None
-        try:
-            root_fd = os.open(self._artifacts_root, flags)
-            directory_fd = os.open(investigation_id, flags, dir_fd=root_fd)
-            report_fd = os.open(
-                "report.md",
-                os.O_RDONLY | o_nofollow,
-                dir_fd=directory_fd,
-            )
-            report_stat = os.fstat(report_fd)
-            if not stat.S_ISREG(report_stat.st_mode) or report_stat.st_nlink != 1:
-                raise ValueError("report_artifact must name an existing regular file")
-            with os.fdopen(report_fd, "rb", closefd=True) as report_file:
-                report_fd = None
-                return report_file.read().decode("utf-8")
-        except OSError as error:
-            # Darwin reports O_DIRECTORY|O_NOFOLLOW on a directory symlink
-            # as ENOTDIR; Linux reports ELOOP. Both mean the anchored walk
-            # refused a link rather than following it.
-            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
-                raise ValueError(
-                    "report_artifact and its directory must not be symbolic links"
-                ) from error
-            raise ValueError("report_artifact is not readable UTF-8") from error
-        except UnicodeDecodeError as error:
-            raise ValueError("report_artifact is not readable UTF-8") from error
-        finally:
-            if report_fd is not None:
-                os.close(report_fd)
-            if directory_fd is not None:
-                os.close(directory_fd)
-            if root_fd is not None:
-                os.close(root_fd)
+        return read_report_snapshot(
+            self._artifacts_root, investigation_id, report_artifact
+        )
 
     @property
     def claim_lease_seconds(self) -> float:
@@ -1351,7 +1310,7 @@ class ReplayWorker:
 
     def __init__(
         self,
-        control_plane: SqliteReplayControlPlane,
+        control_plane: WorkerControlPlane,
         runner: ReplayJobRunner,
         *,
         reconcile: Callable[[], None] | None = None,
@@ -1430,7 +1389,7 @@ class ReportDeliveryWorker:
     """Delivers one owner-only report and releases failures for a safe retry."""
 
     def __init__(
-        self, control_plane: SqliteReplayControlPlane, sender: ReportDeliverySender
+        self, control_plane: WorkerControlPlane, sender: ReportDeliverySender
     ) -> None:
         self._control_plane = control_plane
         self._sender = sender
@@ -1494,14 +1453,18 @@ class ReplayGraphJobRunner:
     def __init__(
         self,
         root: Path,
-        control_plane: SqliteReplayControlPlane,
+        control_plane: WorkerControlPlane,
         replay_wiring: ReplayRuntimeWiring,
         artifact_store: ArtifactStore | None = None,
+        checkpointer_factory: CheckpointerFactory | None = None,
     ) -> None:
         self._root = root
         self._control_plane = control_plane
         self._replay_wiring = replay_wiring
         self._artifact_store = artifact_store
+        self._checkpointer_factory: CheckpointerFactory = checkpointer_factory or (
+            lambda: _sqlite_checkpointer(ProjectPaths(root=root).checkpoints_db)
+        )
 
     def _upload_finalized_artifacts(self, investigation_id: str) -> None:
         """Best-available durable copy: no-op when no bucket is configured
@@ -1603,12 +1566,11 @@ class ReplayGraphJobRunner:
         paths, incident = _load_verified_incident(self._root, incident_id)
         budgets = Budgets()
         recorder = RunRecorder(utc_now)
-        checkpoint_database = ProjectPaths(root=self._root).checkpoints_db
         model, registry, model_name, release = self._replay_wiring.build(
             incident, paths, budgets
         )
         try:
-            with _sqlite_checkpointer(checkpoint_database) as checkpointer:
+            with self._checkpointer_factory() as checkpointer:
                 if claim.checkpoint_id is None:
                     # A durable graph checkpoint can outlive the control-plane
                     # transition that was supposed to name it. Recover it before
@@ -1770,16 +1732,37 @@ def app() -> FastAPI:
     root = Path(os.environ.get("CAUSALOPS_PROJECT_ROOT", Path.cwd())).resolve()
     if find_project_root(root) != root:
         raise RuntimeError("CAUSALOPS_PROJECT_ROOT must name the project root")
-    database = Path(
-        os.environ.get("CAUSALOPS_CONTROL_PLANE_DB", "results/control-plane.db")
+    # Phase C (Firestore migration): "sqlite" (the default) keeps every
+    # existing deployment's behavior unchanged. "firestore" opts into the
+    # provisioned `google_firestore_database.default`
+    # (`infra/phase2/main.tf`) instead -- an explicit opt-in, not yet the
+    # default, until a live VM run against it is validated the same way
+    # Phase A's MCP-default flip needed both an equivalence test and a
+    # live comparison run before becoming the default.
+    control_plane_backend = (
+        os.environ.get("CAUSALOPS_CONTROL_PLANE_BACKEND", "sqlite").strip().lower()
     )
-    if not database.is_absolute():
-        database = root / database
-    control_plane = SqliteReplayControlPlane(
-        database,
-        artifacts_root=root / "results" / "investigations",
-        checkpoint_database=ProjectPaths(root=root).checkpoints_db,
-    )
+    if control_plane_backend not in {"sqlite", "firestore"}:
+        raise RuntimeError(
+            "CAUSALOPS_CONTROL_PLANE_BACKEND must be 'sqlite' or 'firestore'"
+        )
+    control_plane: WorkerControlPlane
+    checkpointer_factory: CheckpointerFactory | None
+    if control_plane_backend == "firestore":
+        control_plane = FirestoreReplayControlPlane(root / "results" / "investigations")
+        checkpointer_factory = lambda: nullcontext(FirestoreCheckpointSaver())  # noqa: E731
+    else:
+        database = Path(
+            os.environ.get("CAUSALOPS_CONTROL_PLANE_DB", "results/control-plane.db")
+        )
+        if not database.is_absolute():
+            database = root / database
+        control_plane = SqliteReplayControlPlane(
+            database,
+            artifacts_root=root / "results" / "investigations",
+            checkpoint_database=ProjectPaths(root=root).checkpoints_db,
+        )
+        checkpointer_factory = None
     # MCP is the default hosted-worker dispatch path on the VM, per Phase
     # 3's exit criterion ("replay runs through worker/MCP") -- equivalence
     # with direct dispatch is proven in `test_mcp_policy_equivalence.py` and,
@@ -1825,7 +1808,9 @@ def app() -> FastAPI:
         if artifact_bucket_name
         else None
     )
-    runner = ReplayGraphJobRunner(root, control_plane, replay_wiring, artifact_store)
+    runner = ReplayGraphJobRunner(
+        root, control_plane, replay_wiring, artifact_store, checkpointer_factory
+    )
     workers = BackgroundControlPlaneWorkers(
         ReplayWorker(
             control_plane,

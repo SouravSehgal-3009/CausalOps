@@ -72,6 +72,46 @@ class TimelineEvent(BaseModel):
     fields: Mapping[str, JsonValue]
 
 
+class WorkerClaim(CreateInvestigationRequest):
+    """The fixed replay inputs a worker receives after atomically claiming a
+    job. `seed` is declared here, not on `CreateInvestigationRequest` --
+    the server always stores `ReplaySeed.DEVELOPMENT` (`create()`'s own
+    docstring), but the worker still needs the stored value back to start
+    the scenario.
+
+    Lives here, not in `api_runtime.py`/`firestore_control_plane.py`, so
+    both control-plane backends' worker-facing methods return the exact
+    same type -- `WorkerControlPlane`'s structural typing only works if
+    `FirestoreReplayControlPlane.claim_next()` and
+    `SqliteReplayControlPlane.claim_next()` agree on one nominal class, not
+    two independently-defined lookalikes.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    seed: ReplaySeed
+    investigation_id: str
+    owner_email: str
+    checkpoint_id: str | None
+    incident_id: str | None = None
+    owner_decision: DecisionRequest | None = None
+    claim_token: str
+
+
+class DeliveryClaim(InvestigationView):
+    """A report delivery work item addressed only to the investigation
+    owner. See `WorkerClaim`'s own docstring for why this lives here."""
+
+    model_config = ConfigDict(frozen=True)
+
+    report_artifact: str
+    report_content: str
+    report_sha256: str
+    destination_email: str
+    delivery_id: str
+    claim_token: str
+
+
 class ControlPlaneNotFoundError(LookupError):
     """The caller does not own a requested investigation."""
 
