@@ -1,6 +1,7 @@
 .env
 .env.vm
 DEMO.md
+VIDEO_SCRIPT.md
 .venv/
 
 __pycache__/
