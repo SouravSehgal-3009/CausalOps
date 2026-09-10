@@ -677,6 +677,48 @@ The comparison above applies the same selection rule directly to the two
 real `EvaluationRecord` batches instead of forcing them through a schema
 built for a different model identity.
 
+### Two more angles on the same question, both negative
+
+`search_runbooks` sitting at 0 real uses out of every batch this project
+has ever run (168 records, FTS5 and Pinecone alike) raises an obvious
+question: is the model simply never *incentivized* to reach for it? Two
+follow-up experiments, both real, both live, both negative:
+
+**Does pricing a lookup the same as a scarce diagnostic check explain it?**
+`Budgets.runbook_searches` gives `search_runbooks` its own dedicated pool
+(default 1), separate from the scarce `executed_tools` pool every other
+check draws from — a call to it no longer competes with `query_logs`/
+`query_metric`/etc. for the same slot, and `SYSTEM_TEXT` now says so
+explicitly ("Checking it does not spend any of your diagnostic check
+budget"). Run for real (`causalops-evaluate --executed-tools 3`, FTS5,
+12 incidents): **0/12 uses**, identical to every batch before this change.
+Making the lookup free and saying so explicitly did not move the number at
+all.
+
+**Does a weaker, less confident model reach for guidance more, the way a
+junior engineer leans on a runbook while a senior one skips it?**
+`CAUSALOPS_LIVE_MODEL=haiku` (Claude Haiku 4.5, ~5x cheaper than Sonnet 5)
+against the same 12 incidents, same free runbook budget: **0/12 uses**
+again — and diagnosis_correct fell to 0/12 (from Sonnet's 7-11/12 across
+earlier batches), with 27 `invalid_responses` across the 12 tool-enabled
+runs against Sonnet's near-zero rate. Haiku did not struggle *confidently*
+in a way that made it reach for more guidance; it struggled to produce
+valid structured tool calls at all, repeatedly burning repair budget
+before ever reaching a state where consulting a runbook would even be a
+live option. Confidence was the wrong axis to test this way — a model
+this far below the task's basic schema-compliance bar never gets far
+enough into the investigation loop for a "would extra guidance help"
+choice to arise.
+
+Neither experiment identified what *does* explain the 0/168 pattern; both
+ruled out one real, specific, well-motivated candidate explanation. FTS5
+with Claude Sonnet 5 remains the production configuration; `runbook_searches`
+stays a separate budget going forward regardless (it is the more correct
+design either way — general guidance should not compete with incident-scoped
+evidence for the same scarce slot), and `CAUSALOPS_LIVE_MODEL` stays
+available for future experiments, not as a production alternative to
+Sonnet 5.
+
 ## Measured lessons
 
 - **Tool schema descriptions materially affect agent behavior.** The
@@ -697,15 +739,18 @@ built for a different model identity.
   other 6 were missing.
 - **Retrieval (`search_runbooks`) remained unused across every real batch
   this project has ever run, including with a real, working Pinecone
-  backend genuinely available to call.** 72 tool-enabled records before v8
-  (see "Paired live evaluation" above), both v8 batches, and both arms of
-  the preregistered Pinecone comparison (see "The Pinecone
-  semantic-retrieval experiment" above) — 168 tool-enabled records total,
-  `retrieval_mode` `disabled` in every one. This was tested twice, not
-  assumed once: first with FTS5 as the only backend, then again with a
-  real Pinecone index live-verified to return good results per topic —
-  same outcome both times, so the finding is about model behavior, not
-  backend quality or backend absence.
+  backend, a free dedicated budget, and a much weaker model, each tried in
+  turn.** 72 tool-enabled records before v8 (see "Paired live evaluation"
+  above), both v8 batches, both arms of the preregistered Pinecone
+  comparison, and both single-arm follow-ups under "Two more angles on the
+  same question" (all above) — 192 tool-enabled records total,
+  `retrieval_mode` `disabled` in every one. Four real, independent
+  candidate explanations were tried, not assumed away: FTS5-only, a real
+  Pinecone backend live-verified to return good results per topic, a free
+  dedicated budget with an explicit prompt sentence, and a 5x-cheaper
+  model likelier to want outside guidance — same outcome every time, so
+  the finding is about model behavior at this task's current prompt/tool
+  design, not backend quality, budget pricing, or model capability alone.
 
 ## Development
 
