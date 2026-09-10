@@ -145,9 +145,11 @@ uv run uvicorn causalops.api_runtime:app --factory --workers 1 --host 127.0.0.1 
 ```
 
 Open `http://localhost:8000` in a browser, sign in, create a
-`configuration_change` investigation, confirm it reaches `COMPLETED`. Once
-confirmed, Ctrl-C it and run it for real via systemd so it survives crashes
-and reboots:
+`configuration_change` investigation, confirm it reaches `COMPLETED` — see
+[`../docs/CLOUD_RUN_DEMO.md`](../docs/CLOUD_RUN_DEMO.md) for the full
+owner-facing walkthrough (all four families, the pause/approve/reject
+flow, talking points). Once confirmed, Ctrl-C it and run it for real via
+systemd so it survives crashes and reboots:
 
 ```bash
 cp infra/docker/causalops-api.service.example /tmp/causalops-api.service

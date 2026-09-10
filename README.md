@@ -7,13 +7,11 @@
 > diagnostic checks, while holding citation validity at 12/12 and zero
 > failed-safe runs.
 
-That result is measured against the fixed, evaluator-hidden 12-incident
-synthetic corpus described under "Paired live evaluation" below — a small
-sample from a local synthetic lab, not a production benchmark, and not an
-unseen validation set in the statistical sense: ground truth is hidden from
-the model, not from the people iterating on the prompt against these same
-incidents. See that section for the full scorecard, what the headline
-number leaves out, and what happens at a wider evidence budget.
+That result is measured against a fixed, evaluator-hidden 12-incident
+synthetic corpus — a small sample from a local synthetic lab, not a
+production benchmark. See [`docs/RESULTS.md`](docs/RESULTS.md) for the
+full scorecard, every real live-model run this project has made, and what
+each number does and doesn't establish.
 
 ```mermaid
 flowchart TD
@@ -31,10 +29,6 @@ flowchart TD
     I --> J
 ```
 
-The model never talks to a tool backend directly at any step in that loop —
-every proposal passes through deterministic policy before anything runs; see
-"How it works" below for the full StateGraph this diagram summarizes.
-
 An evidence-grounded incident investigator for a local, synthetic
 microservice lab. CausalOps forms competing hypotheses about the cause of a
 synthetic incident, runs a small number of safe read-only diagnostic checks
@@ -51,6 +45,22 @@ The central trust boundary, unchanged everywhere in this project:
 
 > The model proposes and interprets. Deterministic code validates,
 > authorizes, executes read-only checks, stops, scores, and records.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph`, `langchain-core` |
+| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 available for experiments), via `langchain-anthropic` |
+| Retrieval | SQLite FTS5 (production) or [Pinecone](https://www.pinecone.io/) serverless with hosted embeddings (evaluated, not selected — see results) |
+| Validation | [Pydantic v2](https://docs.pydantic.dev/) — every tool argument, policy decision, and evaluation record is a typed, schema-validated model |
+| Hosted API | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn, Google OAuth (`google-auth`) with a server-verified per-owner allowlist |
+| Durable state | SQLite (local checkpoints/cost ledger) or GCP Firestore (hosted, shared between the Cloud Run API and the worker) |
+| Storage | GCP Cloud Storage (finalized-artifact upload, hosted deployment only) |
+| Synthetic lab | Docker Compose — three project-authored Python services + Prometheus |
+| Infra as code | Terraform (GCP: Firestore, Cloud Storage, Artifact Registry, Cloud Run, IAM) |
+| CI | GitHub Actions — `ruff format`/`ruff check`/`mypy`/`pytest` on Linux, macOS, and Windows |
+| Language/tooling | Python 3.12, [`uv`](https://docs.astral.sh/uv/), `ruff`, `mypy --strict` |
 
 ## How it works
 
@@ -70,9 +80,7 @@ CREATED
 The model never talks to a tool backend directly. Every read-only tool call
 goes through a policy wrapper that validates the incident scope, the
 registered template, and the remaining budget *before* anything runs, and a
-denied proposal never reaches a backend at all — see "Tool-policy bypass"
-under "Safety and threat model, briefly" below for exactly how that's
-tested.
+denied proposal never reaches a backend at all.
 
 The model can never submit raw PromQL, shell, SQL, a URL, a filesystem path,
 or code — only a registered template ID and strictly typed arguments.
@@ -121,48 +129,33 @@ alone is never enough to diagnose correctly.
 | `query_logs` | Registered filter, service, bounded window, row limit | Active-run JSONL logs |
 | `list_recent_changes` | Service, bounded window | Change manifest |
 | `get_topology` | Active incident ID | Topology manifest |
-| `search_runbooks` | Registered topic, passage limit | Local SQLite FTS5 index over a small curated runbook corpus |
+| `search_runbooks` | Registered topic, passage limit | SQLite FTS5 (production) or Pinecone semantic (evaluated) |
 
-`search_runbooks` is lexical retrieval (FTS5) by default; every report and
-evaluation record labels the retrieval mode it actually used
-(`disabled`, `fts5_lexical`, or `pinecone_semantic`) rather than leaving it
-implicit. Retrieved runbook text is untrusted data — it is quoted and
-delimited in the model's context and cannot alter policy, extend scope, or
-authorize a tool call on its own.
+Every report and evaluation record labels the retrieval mode it actually
+used (`disabled`, `fts5_lexical`, or `pinecone_semantic`) rather than
+leaving it implicit. Retrieved runbook text is untrusted data — it is
+quoted and delimited in the model's context and cannot alter policy,
+extend scope, or authorize a tool call on its own.
 
 ### A real defect this project found and fixed
 
 Paired evaluation runs are how this project catches problems code review
 alone misses. One showed up in the tool arguments themselves, not in the
-policy or the graph.
-
-`QueryMetricArguments.service` and `QueryLogsArguments.service` started as
-bare, undescribed `str` fields — nothing told the model which service
-actually emits which metric or log category. Across two real paid
-evaluation batches (8 tool-enabled runs total), the model guessed
-`service="inventory"` for `resource_pool_attempts_per_capacity`, a metric
-only `orders` ever records, in 3 of the 8 runs. Each wrong guess returned
-zero samples and burned half of that run's 2-check evidence budget on a
-query that could never have returned anything.
+policy or the graph: `QueryMetricArguments.service` and
+`QueryLogsArguments.service` started as bare, undescribed `str` fields —
+nothing told the model which service actually emits which metric or log
+category. Across two real paid evaluation batches, the model guessed the
+wrong service in 3 of 8 runs, each wrong guess burning half that run's
+evidence budget on a query that could never return anything.
 
 The fix was a `Field(description=...)` on both arguments, naming the exact
 per-service restrictions in prose (`src/causalops/tools.py`) — no policy or
 graph code changed, only what the model was told about a tool it already
-had. Re-run after the fix: zero wrong-service guesses, and `query_logs`
-executed successfully in a real batch for the first time in this project's
-history — it had been proposed once before and denied for an unrelated
-reason (a `row_limit` mismatch between the tool's schema, which allows up
-to 200, and the policy-enforced budget of 40). That gap between schema and
-budget is deliberate and permanent, not a bug: a schema bound is a hard
-shape limit, a budget is what policy actually allows through, and the two
-are meant to stay independently editable. What changed here was only the
-denial message — the field's own schema description still said nothing
-about the real number. The same guess kept recurring at scale; see "Paired
-live evaluation" below for how that was found and fixed.
-
-This is this project's clearest example of a defect invisible to code
+had. This is this project's clearest example of a defect invisible to code
 review — visible only by running real evaluations and reading what the
-model actually did, not by reading the tool's code.
+model actually did. Full trace, including the policy-denial cascade this
+same class of bug caused later, in
+[`docs/RESULTS.md`](docs/RESULTS.md#paired-live-evaluation).
 
 ### Budgets
 
@@ -189,43 +182,12 @@ exact refusal conditions.
 CausalOps is reviewed against a fixed set of threats, each backed by a real,
 currently-passing test rather than a design intention:
 
-- **Tool-policy bypass** — proven unreachable by three independent tests,
-  each closing a gap the other two leave open.
-
-  The import scan (`test_the_dispatch_boundary_modules_import_no_backend`)
-  checks that `tool_wrappers.py`, `tool_calls.py`, and `graph.py` import
-  none of `causalops.telemetry`, `causalops.prometheus`, or
-  `causalops.runbooks`. That's necessary, not sufficient: a scan checking
-  only those imports would still pass even if a backend were wired in
-  through the registry's `lambda` arguments in `live_setup.py`'s
-  `build_model_and_registry` — an indirection no import statement ever
-  names.
-
-  The wrapper-identity check proves a registry entry was actually built by
-  a wrapper factory, not just that it looks like one. `ToolWrapper` is a
-  frozen dataclass with a private `_factory_token` field that defaults to
-  `None`; only `_make_wrapper` (used by every real factory —
-  `query_metric_wrapper`, `query_logs_wrapper`, and the rest) ever supplies
-  the real sentinel, `_WRAPPER_FACTORY_TOKEN`. `ToolWrapper.__post_init__`
-  checks identity against that sentinel and raises `TypeError` on any
-  mismatch, so a hand-built `ToolWrapper(tool=..., dispatch=some_closure)`
-  fails at construction, before it can join a registry —
-  `test_a_hand_built_tool_wrapper_is_rejected` is exactly that
-  reproduction. `isinstance(x, ToolWrapper)` alone would not have caught
-  it, since a hand-built instance satisfies that check too.
-
-  The spy-backend test,
-  `test_every_registered_tool_denies_an_out_of_scope_proposal_untouched`,
-  proves a denial actually stops execution, not just that it gets labeled
-  `DENIED`. It wires five separate spy backends, one per tool, sends each
-  an out-of-scope proposal, and asserts both the denial and that its own
-  spy recorded zero calls, independently. A single shared spy watching one
-  tool position, with the other four wired to unwatched stand-ins, could
-  report green while three or four wrappers silently leaked straight
-  through — nothing would ever record it. Five independent spies mean a
-  regression in any one wrapper is caught by that tool's own assertion,
-  never masked by the other four passing.
-
+- **Tool-policy bypass** — proven unreachable by three independent tests
+  (`tests/security/test_tool_boundary.py`): an import scan proving the
+  dispatch boundary imports no backend, a wrapper-identity check proving a
+  registry entry was actually built by the real factory (a hand-built
+  wrapper fails construction outright), and a five-spy-backend test proving
+  a denial actually stops execution, not just gets labeled `DENIED`.
 - **Ground-truth leakage** — the model and the retrieval corpus never see
   the evaluator's scenario key, expected root cause, or evidence predicates;
   enforced by import-graph and content assertions, not just file placement.
@@ -240,9 +202,7 @@ currently-passing test rather than a design intention:
 - **Resource exhaustion** — call, time, row, sample, and byte caps are
   enforced at multiple layers, independent of what the model asks for.
 - **Provider and secret leakage** — the live model adapter reads its API key
-  only from the process environment and never names or logs it; it sends
-  only the same bounded, synthetic context that ground-truth isolation and
-  prompt-injection tests already constrain.
+  only from the process environment and never names or logs it.
 - **Unbounded provider spend** — every live request is reserved against the
   application-wide ceiling *before* it is sent, using a durably persisted,
   conservative estimate; the reservation is exactly-once settled from the
@@ -250,35 +210,21 @@ currently-passing test rather than a design intention:
   remaining ceiling is refused before it is sent, never after.
 
 These boundaries have been tested by real defects during development, and
-they held. Most were unrelated to any boundary at all: a mismeasured lab
-metric, the wrong-service-argument defect described above, the row-limit
-guess and repair-starvation defect described under "Paired live evaluation"
-below, a scoring bug that vacuously passed a citation check with nothing
-cited. One was boundary-adjacent and more serious: an early cost-ledger
-implementation settled a request's real cost without checking it against
-the reservation that authorized it, so an overrun on one request could
-become permanently invisible to the spend ceiling — reproduced concretely
-(a $0.01 reservation settling at $0.03 under a $0.02 cap, after which a
-further $0.01 request was still wrongly accepted, for $0.04 of real spend
-against a $0.02 authorized limit) and fixed before merge.
-
-Every one of these was caught before it became a trust-boundary violation —
-most by review before a live run, the wrong-service-argument and
-row-limit/repair-starvation defects only by running real paid evaluations
-and reading what the model actually did, not by review beforehand. That is
-the honest claim: not "no boundary-adjacent bug ever happened," but "none of
-them ever crossed a boundary above, whether review or evaluation is what
-caught it."
+they held — most caught by review, two only by running real paid
+evaluations and reading what the model actually did (see
+[`docs/RESULTS.md`](docs/RESULTS.md)). One was boundary-adjacent and more
+serious: an early cost-ledger implementation settled a request's real cost
+without checking it against the reservation that authorized it, so an
+overrun on one request could become permanently invisible to the spend
+ceiling — reproduced concretely and fixed before merge. None of them ever
+crossed a boundary above, whether review or live evaluation is what caught
+it.
 
 ## Setup
 
 Requirements: Python 3.12, [`uv`](https://docs.astral.sh/uv/), and Docker
 Compose. CausalOps runs on any machine `causalops doctor` can read a
-platform, RAM, and disk reading from — there is no allowlist of specific
-operating systems, Windows builds, or CPU architectures; every capability
-CausalOps actually needs (Docker responding, enough memory and disk, a
-writable checkpoint database and run directories) has its own explicit
-check instead.
+platform, RAM, and disk reading from.
 
 ```bash
 uv sync --locked
@@ -290,8 +236,7 @@ disk, required writable directories, the checkpoint database, Docker, and
 whether `ANTHROPIC_API_KEY` is set. The operating system, RAM (total),
 disk, directory, database, and Docker checks are hard failures; low
 available RAM and a missing API key only warn, since `--model replay` (see
-below) needs neither. `doctor` exits 0 unless a hard check fails, and
-prints a stable reason code for each problem it finds.
+below) needs neither.
 
 A live model call needs `ANTHROPIC_API_KEY` in the process environment —
 there is no `.env` loader, so export it directly:
@@ -300,18 +245,16 @@ there is no `.env` loader, so export it directly:
 export ANTHROPIC_API_KEY="<your key>"
 ```
 
-```powershell
-$env:ANTHROPIC_API_KEY = "<your key>"
-```
-
 See `.env.example` for every environment variable CausalOps reads, including
-`LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling described
-above; defaults to 5.00 if unset).
+`LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling; defaults
+to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`, defaults to
+Sonnet 5).
 
 Everything above is local and free. For the separate **hosted API**
 deployment (a real browser-facing sign-in flow, backed by GCP Firestore,
 optionally Cloud Run) on your own GCP account, see
-[`infra/DEPLOYMENT.md`](infra/DEPLOYMENT.md).
+[`infra/DEPLOYMENT.md`](infra/DEPLOYMENT.md) to deploy it and
+[`docs/CLOUD_RUN_DEMO.md`](docs/CLOUD_RUN_DEMO.md) to use it once deployed.
 
 ## Command reference
 
@@ -363,14 +306,9 @@ evidence couldn't distinguish a cause, not that anything went wrong.
 `FAILED_SAFE` and an unavailable dependency exit nonzero with a stable
 reason code.
 
-When you're done with an incident:
-
-```bash
-uv run causalops scenario reset <incident-id>
-```
-
-`reset` only removes that incident's active lab and transient state; it
-never touches a finalized report or record under `results/`.
+When you're done with an incident: `uv run causalops scenario reset
+<incident-id>` — removes only that incident's active lab/transient state,
+never a finalized report under `results/`.
 
 ### Escalation: owner approval and rejection
 
@@ -392,410 +330,43 @@ to a finished report. `reject` records the owner's disposition and reason
 without changing the underlying assessment, then also finishes the report.
 Both routes are checkpointed through SQLite (`checkpoints.db`), so a resume
 survives a process restart, and an identical retry returns the same
-recorded decision rather than resuming twice.
+recorded decision rather than resuming twice. Verified end to end against
+the real Docker lab, both the approve and reject paths, not only through
+directly-constructed test fixtures.
 
-**This mechanism has been verified end to end against the real Docker lab,
-not only through directly-constructed test fixtures.** Two real runs, both
-under `--model replay` (zero API cost): starting a `configuration_change`
-incident and deleting its `orders` log file before `investigate` makes the
-first scripted log check come back `TOOL_UNAVAILABLE`, which is enough to
-trigger escalation on its own.
+## Demo video
 
-- **Approve path** — `causalops approve <thread-id>` resumed the paused
-  investigation to a finished `DIAGNOSED CONFIG_CHANGE` report with
-  `"decision": "accept"` recorded alongside it.
-- **Reject path** — `causalops reject <thread-id> "<reason>"` resumed a
-  second, separately paused investigation to the same underlying
-  `DIAGNOSED CONFIG_CHANGE` assessment, this time with `"decision":
-  "reject"` and the given reason recorded — rejecting records the owner's
-  disposition of the assessment, it does not change or re-run it.
+<!-- Add the recorded walkthrough link here once available. -->
 
-Both runs were confirmed clean before and after (no stray source, test, or
-lab-state changes left behind).
+A recorded walkthrough of the hosted (Cloud Run) deployment — sign-in,
+creating an investigation across all four incident families, the
+pause/approve/reject flow — following
+[`docs/CLOUD_RUN_DEMO.md`](docs/CLOUD_RUN_DEMO.md). The hosted demo
+infrastructure is torn down between sessions to avoid ongoing cost, so this
+video is the durable record of it running.
 
-### Paired live evaluation
+## Results and evaluation
 
-```bash
-uv run causalops-evaluate                      # executed_tools=2 (default)
-uv run causalops-evaluate --executed-tools 3
-uv run causalops-evaluate --executed-tools 4
-```
+Every number in the Executive summary above, and every experiment this
+project has run against the real live model, is documented in full —
+methodology, raw run IDs, and honest negative results included — in
+[`docs/RESULTS.md`](docs/RESULTS.md). Highlights:
 
-A genuinely separate console script, not a `causalops` subcommand — it runs
-a fixed, evaluator-hidden 12-incident corpus (4 families x 3 seeds —
-`evaluation`, `evaluation_b`, `evaluation_c`) against the live model: one
-no-tool baseline and one tool-enabled run per incident, saving every record
-and a per-group summary under `results/evaluations/<id>/`. Each invocation
-runs exactly one point on an evidence-budget curve —
-`Budgets(executed_tools=N, model_calls=N + 2)` for `N` in `{2, 3, 4}` —
-never all three in one run, so real spend can be checked between phases
-rather than committed at once; the owner runs the command up to three
-times, once per `--executed-tools` value, to build the full curve. Before
-any scenario starts, a pre-flight check refuses cleanly if the configured
-ceiling could not possibly cover this invocation's own worst-case batch
-cost, on top of what the application has already spent or committed. It
-requires `ANTHROPIC_API_KEY`, persists each completed record as it
-finishes (not only at the end), and stops issuing further paid requests
-only after an infrastructure-level failure (a missing credential, a
-provider error, or the cost ceiling itself) — an ordinary model mistake is
-still scored as a result, not treated as a reason to abort the batch.
-
-Reported scores are mechanical: diagnosis and disposition correctness
-against evaluator-only labels, citation validity and sufficiency against
-required-evidence predicates, and a joint correct-and-grounded figure
-combining the two. Every record also carries the git SHA, clean/dirty
-status, fixture and prompt versions, retrieval mode, seed name, evidence
-budget, exact model, tokens, latency, and cost — reproducibility is part of
-the record, not an afterthought. Results are partitioned by `(arm,
-retrieval_mode, executed_tools)` and reported as counts and ranges, never
-blended across a retrieval mode or evidence-budget setting and never as a
-p95 or a broad performance claim.
-
-**The first full run of this curve found two mechanical bugs, not a model
-problem.** `executed_tools`=2/3/4 against the same 12 incidents produced a
-non-monotonic tool-enabled diagnosis-correct count — 6/12, then 9/12, then
-5/12 — that traced back to `query_logs`'s `row_limit` argument: the model's
-near-universal guess was 50, above the real 40-row policy budget, and that
-guess drew a policy denial in 21 of the 36 tool-enabled runs, spread across
-all three budget levels. Each denial still cost a model call. `model_calls =
-executed_tools + 2` reserves exactly one spare call for a structured-output
-repair, and a denial silently spent that spare before any repair was ever
-needed — so when a later validation failure needed it (several runs'
-`uncertainty`/`stop_reason` fields exceeded the 300-character cap then in
-force, and that field's length genuinely grows with the evidence gathered),
-nothing was left, and the run ended `REPAIR_EXHAUSTED` or
-`MODEL_CALL_BUDGET_EXHAUSTED` instead of a diagnosis.
-
-Three fixes landed together: the real 40-row limit is now named
-directly in `QueryLogsArguments.row_limit`'s own schema description, not
-only the denial message — see "A real defect this project found and fixed"
-above — and likewise for `SearchRunbooksArguments.limit`; structured-output
-repairs now draw from their own independent budget (`Budgets.repairs`), so
-a denial earlier in a run can no longer starve a repair a later turn needs;
-and the fields that hit the 300-character cap in real runs were raised to
-600.
-
-Re-run against the fix, same 12 incidents, same model config:
-
-| `executed_tools` | baseline diagnosis-correct | tool-enabled diagnosis-correct | correct-and-grounded | `FAILED_SAFE` |
-|---|---:|---:|---:|---:|
-| 2 | 3/12 | 6/12 | 3/12 | 0 |
-| 3 | 3/12 | 9/12 | 8/12 | 0 |
-| 4 | 3/12 | 8/12 | 8/12 | 1 |
-
-The one `FAILED_SAFE` at `executed_tools`=4 is unrelated to the row_limit
-and repair-budget bug this section is about: that run hit
-`MODEL_OUTPUT_INVALID` — the model returned a structurally empty assessment
-object, missing required fields, on both its original attempt and its one
-guaranteed repair — a separate, still-open failure mode.
-
-The cleanest result: 21 policy denials across the three pre-fix batches'
-36 tool-enabled runs became 0 across the three post-fix batches' 36
-tool-enabled runs, and every one of the 24 paired incidents at
-`executed_tools`=2 and =3 scored identically before and after — nothing
-shuffled except the denial/repair mechanics. Tool-enabled also beat the
-no-tool baseline at every budget level tested (6, 9, 8 against a flat
-3/12), consistent across all six batches.
-
-At `executed_tools`=4, three incidents flipped from incorrect to correct
-and none regressed:
-
-- **Flip 1 (attributable):** a `row_limit=50` denial, then an `uncertainty`
-  cap failure with zero repairs attempted — `REPAIR_EXHAUSTED`. Post-fix:
-  no denial, a clean diagnosis.
-- **Flip 2 (attributable):** the same denial, then a `stop_reason` cap
-  failure whose repair itself succeeded — but the denial's wasted call left
-  no budget for the final-assessment call that came after, so the run still
-  ended `MODEL_CALL_BUDGET_EXHAUSTED` at 6 of 6 calls used. Post-fix: no
-  denial, a clean diagnosis.
-- **Flip 3 (not attributable):** zero denials both before and after.
-  Pre-fix, the run had already reached a correct, safe
-  `INSUFFICIENT_EVIDENCE`/`UNDETERMINED` abstention after one successful
-  repair — not a failure. Post-fix it diagnosed correctly instead, because
-  the model chose to call `list_recent_changes` this time, which it hadn't
-  pre-fix — a difference traceable to the model's own first-turn hypothesis
-  ranking, before either run ever touched a tool call, denial, or repair.
-  Read as ordinary run-to-run variance, not the fix working a third time.
-
-The 12 incidents are 4 fault families × 3 seeds each, near-replicates
-rather than independent draws — every seed within a family scored
-identically at `executed_tools`=2 and =3, and 11 of 12 did at =4, so the
-effective sample size behind this curve is closer to 4 than 12. That isn't
-enough to establish an optimal evidence budget or a real accuracy trend;
-the denial-elimination result above is the defensible claim, and the
-per-point accuracy numbers are reported honestly and explained by the
-traced mechanism, not asserted as a statistically established curve.
-
-One family, `ambiguous_telemetry`, is correctly answered only by
-abstaining. The no-tool baseline abstained correctly in all 18 runs across
-all six batches; the tool-enabled arm never abstained once, diagnosing
-something — almost always `RESOURCE_POOL_SATURATION` — every time. Tools
-didn't help, and by these numbers hurt, on this one family.
-
-`search_runbooks` was never called in any of the 72 tool-enabled records
-across all six batches, at any budget level, though it's always available
-in the tool-enabled arm — the model consistently preferred direct
-telemetry tools when the evidence-check budget was scarce, so the
-`SearchRunbooksArguments` fix above has not yet been exercised by a live
-call.
-
-The three post-fix batches cost $3.02 in real spend; all six batches in
-this investigation, pre- and post-fix combined, cost $6.40.
-
-All six batches above ran under `PROMPT_VERSION`/`TOOL_REGISTRY_VERSION`
-`"7"`/`"7"`; a run made after these moved to `"8"`/`"8"` is not directly
-comparable to the numbers in this section.
-
-### The v8 validation run
-
-Commit `6b27e228d08ab82a0b5d3437a54e9bc10ea0c63c` ("Surface respond()
-rejection reasons, require causal evidence") did two things: it gave
-`LiveClaudeModel.respond()` a real error channel — 5 distinct rejection
-reasons instead of one generic message reaching the repair prompt — and it
-partially corrected a real `ambiguous_telemetry` abstention regression,
-via two additive prompt-text changes that ask two different things:
-`SYSTEM_TEXT` now says that collapsing two evidenced causes into one root
-cause is itself a claim needing its own evidence, else the model must
-answer UNDETERMINED and cite both; the separate `HYPOTHESIS_UPDATE` stage
-instruction now asks the model to state evidence against its own
-top-ranked hypothesis before ranking, recorded in that hypothesis's
-`contrary_evidence_ids`. Alongside those two prompt changes, a
-`downstream_timeout_rate` -> `downstream_timeout_share` metric rename and
-reformulation also landed. Two live batches validated it against the same
-12-incident corpus, at `executed_tools`=3 and `executed_tools`=4.
-
-| Configuration | Diagnosis correct | Correct and grounded | Citation valid | `FAILED_SAFE` |
-|---|---:|---:|---:|---:|
-| No-tool baseline (et=3) | 3/12 | 0/12 | 12/12 | 0 |
-| Tool-enabled, et=3 | 11/12 | 5/12 | 12/12 | 0 |
-| Tool-enabled, et=4 | 7/12 | 6/12 | 7/12 | 5 |
-
-The raw per-run records behind this table are checked in at
-`evaluation-evidence/` — structured scores and metadata only, no model
-prose — so this scorecard can be independently verified against real data.
-
-The baseline's `12/12` citation-valid figure is real, not a placeholder:
-every baseline run validly cites the free `SYMPTOM`/`TOPOLOGY` evidence every
-investigation gets regardless of tool access — it just never has enough
-evidence for a required predicate to satisfy `citations_sufficient`, which is
-exactly why `correct_and_grounded` is `0/12` there.
-
-- **`executed_tools`=3 is the recommended operating point**: near-perfect
-  diagnosis (11/12), zero `FAILED_SAFE` runs, the best result of any budget
-  tested under v8.
-- **Ambiguous-case abstention improved from a historical 0/18 to 2/3 in this
-  run** — the tool-enabled arm's prior 0/18 record on `ambiguous_telemetry`
-  is the same one stated above under "Paired live evaluation" ("the
-  tool-enabled arm never abstained once").
-- **The strict grounding score requires predeclared log evidence.**
-  `citations_sufficient`/`correct_and_grounded` require citing the specific
-  required-evidence predicate for that incident — usually a `query_logs`
-  result — not just any correct-looking evidence.
-- **Of the 6 et=3 correct diagnoses that failed the grounding bar**: 5 never
-  called `query_logs` at all — a correct diagnosis reached off metric/change
-  evidence alone, missing the required log predicate entirely (4 non-
-  `ambiguous_telemetry` runs plus 1 of the 2 `ambiguous_telemetry`
-  cases) — and 1 (`ambiguous_telemetry`) called `query_logs` and retrieved
-  one of the two required predicates (`pool_exhausted`) but not the other
-  (`upstream_timeout`). These are genuinely different situations, not one
-  blanket "didn't retrieve logs" failure.
-- **`executed_tools`=4 showed that more evidence-gathering budget can reduce
-  structured-output reliability, not just improve grounding.** All 5
-  `REPAIR_EXHAUSTED` failures at et=4 trace to the same mechanism, not 5
-  independent ones: `Budgets.repairs=1` is one repair credit for the whole
-  investigation, not one per stage. In every one of the 5, an
-  INVESTIGATE-stage turn hits `"tool-call response must not include visible
-  text"` and spends that one credit. In 3 of the 5, that repair succeeds and
-  it's a later `FINAL_ASSESSMENT` rejection that then finds zero credit left
-  (an `uncertainty`-length-cap violation in 1, a missing-both-`uncertainty`-
-  and-`next_step` violation in 1, a missing-`next_step`-only violation in
-  1). In the other 2, a second visible-text violation follows within the
-  same INVESTIGATE stage before any credit remains, and `FINAL_ASSESSMENT`
-  still runs afterward and fails too, inheriting the same zero-credit state
-  (an `uncertainty`-length-cap violation in 1, another visible-text
-  violation in 1). The failures trace to an interaction between stochastic
-  structured-output violations and a single investigation-wide repair
-  credit; the extra turn at et=4 increased exposure to that interaction in
-  this batch. None of the 5 reached a confident wrong diagnosis; every one
-  is a contained, safe stop, the safety design working exactly as
-  intended. The mechanism itself is still open in this codebase — a
-  candidate for future work, not yet fixed.
-
-These two v8 batches cost **$2.80** in real spend ($1.26 at et=3, $1.54 at
-et=4).
-
-### The Pinecone semantic-retrieval experiment
-
-`infra/phase4/PREREGISTRATION.md`'s "Fixed retrieval comparison" set the bar
-before any Pinecone code existed: select Pinecone over FTS5 only with
-**at least 3/12 actual retrieval uses, no safety regression, and
-non-inferior correct-and-grounded results** against a matched FTS5 arm over
-the same corpus, budgets, and model identity. `search_runbooks` had never
-been called once across 120 real records with FTS5 as the only wired
-backend (see "Measured lessons" below) — a real, stated risk going in: if
-that held with Pinecone wired too, the experiment would fail on usage
-alone, independent of retrieval quality.
-
-The engineering was built for real: a Pinecone serverless index
-(`multilingual-e5-large` hosted embedding inference, no second API key),
-`pinecone_runbooks.py` mirroring `runbooks.py`'s exact interface, gated
-behind `RAG_EXPERIMENT_ENABLED` in both tool-registry composition roots
-(`live_setup._build_tool_registry` and
-`mcp_client_registry.build_mcp_tool_registry` — the real MCP transport
-`causalops-evaluate` runs on), proven to fail closed without
-`PINECONE_API_KEY` before any network call, and live-verified against the
-real provisioned index for every `RunbookTopic` before any evaluation run.
-
-**The preregistered comparison then ran for real** — two `causalops-evaluate
---executed-tools 3` invocations over the same 12-incident corpus, one per
-arm, real billed Claude requests:
-
-| Arm | Run ID | `search_runbooks` used | `correct_and_grounded` |
-| --- | --- | --- | --- |
-| FTS5 (`RAG_EXPERIMENT_ENABLED=false`) | `48225f19a9ea452abb8bb6a51c5fa3a2` | 0/12 | 5/12 |
-| Pinecone (`RAG_EXPERIMENT_ENABLED=true`) | `fabad365a29c48b7ab77a22d7731f4ca` | 0/12 | 4/12 |
-
-Zero policy denials and zero `REPAIR_EXHAUSTED`-or-worse failures in the
-Pinecone arm; `control.denied`/`control.out_of_scope` were 0/12 in both
-arms. **Pinecone is not selected: `pinecone_used_count` is 0/12, short of
-the preregistered 3/12 floor.** The model never called `search_runbooks`
-in either arm — the same behavior FTS5 alone already showed, now confirmed
-with a real, working semantic backend genuinely available to call. This is
-an honest negative result against the exact bar set in advance, not a
-build defect: the retrieval backend works (see the topic-by-topic live
-verification above); the model simply never reaches for it, in either
-retrieval mode, at this evidence-budget point. FTS5 remains the only
-retrieval path in production use.
-
-One scoring-path note for a reader comparing this to the Qwen candidate
-track above: `candidate_evaluation.py`'s `RetrievalComparisonRecord` and
-`causalops-candidate-assess --retrieval-comparison` implement this same
-preregistered rule, but against `CandidateEvaluationRecord`'s Qwen-specific
-shape (`model_name: Literal["qwen3.5:4b"]`, Ollama image/manifest digests)
-— built for the private-VM Qwen track the preregistration document also
-covers, not for `causalops-evaluate`'s Claude-shaped `EvaluationRecord`.
-The comparison above applies the same selection rule directly to the two
-real `EvaluationRecord` batches instead of forcing them through a schema
-built for a different model identity.
-
-**Rerun after the imperative first-proposal instruction (see "Three more
-angles" below) fixed the usage floor** — the original 0/12-vs-0/12 result
-above left the question of retrieval *quality* untested, since neither arm
-ever actually retrieved anything to judge. With the model reliably calling
-`search_runbooks` on every run, the same matched comparison was repeated
-for real, same corpus, same budgets:
-
-| Arm | Run ID | `search_runbooks` used | `correct_and_grounded` |
-| --- | --- | --- | --- |
-| FTS5 (`RAG_EXPERIMENT_ENABLED=false`) | `4e2f8ec48a354e088c675c9b46ed8acb` | 12/12 | 5/12 |
-| Pinecone (`RAG_EXPERIMENT_ENABLED=true`) | `f493cc19efc04f04a37c029f8d51c85d` | 12/12 | 4/12 |
-
-**Still not selected — but for a different, more informative reason this
-time.** The usage floor (≥3/12) is now trivially cleared on both arms;
-zero policy denials or safety regressions in either. The blocker is now
-squarely `correct_and_grounded`: Pinecone's 4/12 is not non-inferior to
-FTS5's 5/12, missing by exactly one incident. This is the first time the
-preregistered rule has actually been tested against real retrieval
-quality rather than real retrieval absence — a genuine, if narrow,
-quality gap, not another usage no-op. FTS5 remains the only retrieval
-path in production use.
-
-### Three more angles on the same question — two negative, one that worked
-
-`search_runbooks` sitting at 0 real uses out of every batch this project
-has ever run (168 records, FTS5 and Pinecone alike) raises an obvious
-question: is the model simply never *incentivized* to reach for it? Three
-follow-up experiments, all real, all live — two negative, one that
-reversed the pattern completely:
-
-**Does pricing a lookup the same as a scarce diagnostic check explain it?**
-`Budgets.runbook_searches` gives `search_runbooks` its own dedicated pool
-(default 1), separate from the scarce `executed_tools` pool every other
-check draws from — a call to it no longer competes with `query_logs`/
-`query_metric`/etc. for the same slot, and `SYSTEM_TEXT` now says so
-explicitly ("Checking it does not spend any of your diagnostic check
-budget"). Run for real (`causalops-evaluate --executed-tools 3`, FTS5,
-12 incidents): **0/12 uses**, identical to every batch before this change.
-Making the lookup free and saying so explicitly did not move the number at
-all.
-
-**Does a weaker, less confident model reach for guidance more, the way a
-junior engineer leans on a runbook while a senior one skips it?**
-`CAUSALOPS_LIVE_MODEL=haiku` (Claude Haiku 4.5, ~5x cheaper than Sonnet 5)
-against the same 12 incidents, same free runbook budget: **0/12 uses**
-again — and diagnosis_correct fell to 0/12 (from Sonnet's 7-11/12 across
-earlier batches), with 27 `invalid_responses` across the 12 tool-enabled
-runs against Sonnet's near-zero rate. Haiku did not struggle *confidently*
-in a way that made it reach for more guidance; it struggled to produce
-valid structured tool calls at all, repeatedly burning repair budget
-before ever reaching a state where consulting a runbook would even be a
-live option. Confidence was the wrong axis to test this way — a model
-this far below the task's basic schema-compliance bar never gets far
-enough into the investigation loop for a "would extra guidance help"
-choice to arise.
-
-**Does a direct imperative instruction, not just an informational one,
-work?** The dedicated-budget sentence above only *informed* the model the
-lookup was free; it never *told it to use it*. `SYSTEM_TEXT` gained a
-third, separate instruction: its first proposal in every investigation
-must be one `search_runbooks` call, before any incident-scoped check,
-with an explicit stop condition (`"runbook searches left"` already zero,
-or a runbook line already in evidence) so it does not repeat this on
-later turns. Run for real (`causalops-evaluate --executed-tools 3`, FTS5,
-Claude Sonnet 5, the same 12 incidents): **12/12 uses — every single run**,
-each one on the first proposal, none repeated. Zero policy denials.
-`diagnosis_correct` 8/12 and `correct_and_grounded` 5/12, matching or
-slightly exceeding the pre-instruction FTS5 baseline (7/12, 5/12) — the
-added check did not cost correctness or grounding to get. Cost $3.76 for
-the batch.
-
-So the three experiments together answer the original question precisely:
-the model was capable of using the tool all along (backend quality,
-budget pricing, and model strength all ruled out as blockers), it simply
-never chose to on its own, at this evidence-budget point, under an
-*informational* prompt. Telling it to, directly and unambiguously, is
-what moved it from 0 to 12/12 in one change. `runbook_searches` stays a
-separate budget (the more correct design regardless of this result —
-general guidance should not compete with incident-scoped evidence for the
-same scarce slot); `CAUSALOPS_LIVE_MODEL` stays available for future
-experiments, not as a production alternative to Sonnet 5. The imperative
-instruction is the first of these four levers with a real, positive,
-live-verified effect — production still runs FTS5 + Claude Sonnet 5, now
-with `search_runbooks` an active, verified part of every investigation's
-first turn rather than a claim the earlier record set could not back up.
-
-## Measured lessons
-
-- **Tool schema descriptions materially affect agent behavior.** The
-  `query_logs`/`row_limit` schema-description fix under "A real defect this
-  project found and fixed" above, and the denial-elimination result it
-  produced under "Paired live evaluation," are the clearest evidence:
-  nothing in policy or the graph changed, only what the model was told
-  about a tool it already had.
-- **Policy denials fell from 21/36 to 0/36** across the pre-fix and post-fix
-  tool-enabled batches described under "Paired live evaluation" above — the
-  same schema/budget fix.
-- **Three diagnostic checks (et=3) outperformed four (et=4)** in the v8
-  validation run above — see "The v8 validation run" for the traced
-  repair-budget mechanism behind that result.
-- **Diagnosis correctness and evidentiary grounding are measurably distinct
-  properties, not one score.** 11/12 correct diagnoses at et=3 and only
-  5/12 correct-and-grounded — see "The v8 validation run" for what the
-  other 6 were missing.
-- **Retrieval (`search_runbooks`) sat at 0 real uses for 192 consecutive
-  tool-enabled records across four independent conditions — FTS5-only, a
-  real Pinecone backend, a free dedicated budget, and a 5x-cheaper model —
-  until one direct imperative instruction moved it to 12/12 in the very
-  next batch.** See "Three more angles on the same question" above for the
-  full sequence. Backend quality, budget pricing, and model capability
-  were each tried and each ruled out as the blocker; only telling the
-  model directly what to do, rather than informing it a tool was free or
-  advantageous, actually changed its behavior. The mechanical lesson: for
-  this model, on this task, an *informational* system-prompt sentence and
-  a *directive* one are not interchangeable, even when they describe the
-  same underlying incentive — and the true cause of the original 0/192
-  pattern (why an informational nudge never worked, only a direct
-  instruction did) is still open.
+- **11/12 correct diagnoses**, zero `FAILED_SAFE`, at the recommended
+  `executed_tools=3` operating point — the headline result.
+- **A real mechanical bug found and fixed via live evaluation**: 21 policy
+  denials across 36 tool-enabled runs, traced to a schema/budget mismatch,
+  eliminated to 0/36 after the fix.
+- **A preregistered Pinecone-vs-FTS5 RAG comparison**, run for real twice:
+  first blocked on retrieval never being used at all (by either backend),
+  then — after root-causing and fixing that — blocked instead on a real,
+  narrow grounding-quality gap. FTS5 remains the production retrieval
+  backend.
+- **A four-way root-cause investigation into why the model never used its
+  retrieval tool**: backend quality, budget pricing, and model capability
+  were each tried and ruled out; a direct imperative prompt instruction
+  fixed it, confirmed at two evidence-budget points, with no cost to
+  diagnosis correctness.
 
 ## Development
 
@@ -819,6 +390,8 @@ tests/unit/         unit tests
 tests/integration/  tests against the real Docker lab
 tests/security/     trust-boundary and isolation tests
 results/            gitignored investigation and evaluation artifacts
+docs/               results, and the hosted-deployment walkthrough
+infra/              Terraform, Docker, and deployment docs for the hosted API
 ```
 
 ## Non-goals
@@ -827,9 +400,9 @@ CausalOps does not build causal graphs, estimate counterfactual outcomes, or
 run more than one investigator. It has no remediation executor: it may
 record an owner-approved suggested next step, but it never executes,
 verifies, or claims to fix anything. It does not add a web UI, a second
-model provider, a second database, Kubernetes, or cloud hosting. All data —
-services, telemetry, incidents — is synthetic; nothing here touches a real
-production system.
+model provider, a second database, Kubernetes, or cloud hosting beyond the
+optional Cloud Run split described above. All data — services, telemetry,
+incidents — is synthetic; nothing here touches a real production system.
 
 ## License
 
