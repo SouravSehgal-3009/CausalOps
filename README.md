@@ -153,9 +153,9 @@ per-service restrictions in prose (`src/causalops/tools.py`) — no policy or
 graph code changed, only what the model was told about a tool it already
 had. This is this project's clearest example of a defect invisible to code
 review — visible only by running real evaluations and reading what the
-model actually did. Full trace, including the policy-denial cascade this
-same class of bug caused later, in
-[`docs/RESULTS.md`](docs/RESULTS.md#paired-live-evaluation).
+model actually did. A related, larger bug this same class of defect caused
+later (a schema/budget mismatch behind 21 policy denials, fixed) is in
+[`docs/RESULTS.md`](docs/RESULTS.md).
 
 ### Budgets
 
@@ -357,11 +357,11 @@ methodology, raw run IDs, and honest negative results included — in
 - **A real mechanical bug found and fixed via live evaluation**: 21 policy
   denials across 36 tool-enabled runs, traced to a schema/budget mismatch,
   eliminated to 0/36 after the fix.
-- **A preregistered Pinecone-vs-FTS5 RAG comparison**, run for real twice:
-  first blocked on retrieval never being used at all (by either backend),
-  then — after root-causing and fixing that — blocked instead on a real,
-  narrow grounding-quality gap. FTS5 remains the production retrieval
-  backend.
+- **A preregistered Pinecone-vs-FTS5 RAG comparison**, run for real at two
+  evidence budgets: not selected at the recommended et=3 point (a narrow
+  grounding-quality gap, after root-causing why neither backend was used
+  at all); mixed at et=4 (Pinecone actually ahead there, reported honestly,
+  doesn't change the decision). FTS5 remains the production backend.
 - **A four-way root-cause investigation into why the model never used its
   retrieval tool**: backend quality, budget pricing, and model capability
   were each tried and ruled out; a direct imperative prompt instruction
