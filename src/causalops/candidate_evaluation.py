@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from causalops.domain import Budgets, Disposition, ReasonCode, RetrievalMode, Versions
 from causalops.evaluation import MechanicalScores
 
-PHASE4_SCHEMA_VERSION = "1"
+CANDIDATE_EVALUATION_SCHEMA_VERSION = "1"
 APPROVED_QWEN_MODEL: Literal["qwen3.5:4b"] = "qwen3.5:4b"
 FIXED_CORPUS_SIZE = 12
 EVALUATION_FAMILIES: tuple[str, ...] = (
@@ -37,7 +37,7 @@ class CandidateEvaluationRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: str = PHASE4_SCHEMA_VERSION
+    schema_version: str = CANDIDATE_EVALUATION_SCHEMA_VERSION
     case_id: str = Field(min_length=1)
     investigation_id: str = Field(min_length=1)
     model_name: Literal["qwen3.5:4b"]
