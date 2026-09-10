@@ -1,4 +1,7 @@
 .env
+.env.vm
+DEMO.md
+VIDEO_SCRIPT.md
 .venv/
 
 __pycache__/
@@ -14,6 +17,11 @@ dist/
 
 runs/
 results/
+
+infra/gcp/*.tfvars
+infra/gcp/.terraform/
+infra/gcp/*.tfstate*
+infra/ollama/*.env
 
 # Contributor instructions stay local; the product specification is not ignored.
 AGENTS.md

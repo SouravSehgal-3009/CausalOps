@@ -18,8 +18,17 @@ under its own `[project.scripts]` entry (`causalops-evaluate`) in
 `pyproject.toml` -- not a subcommand of it. `causalops.cli` never imports
 this module, and this module never imports `causalops.cli`;
 `tests/security/test_evaluate_cli_isolation.py` proves the first half
-directly. Both scripts share their live-model/tool-registry construction
-through `causalops.live_setup`, the neutral module neither one owns.
+directly.
+
+Unlike `causalops investigate --model claude`, which still dispatches tool
+calls through `live_setup.build_model_and_registry`'s direct in-process
+registry, this script dispatches through the real MCP local-stdio
+transport (`mcp_client_registry.build_claude_model_and_mcp_registry`) --
+the "final transport" the reference evaluation is meant to exercise once
+Phase 3's transport passes its own approval gate
+(`mcp_policy_adapter._APPROVED_MCP_DISPATCH`). One `McpChildProcess` is
+spawned per scored run and closed in `_run_one`'s own `finally`, mirroring
+`live_setup.ReplayRuntimeWiring`'s teardown contract.
 
 This script drives real, billed Anthropic requests through the exact same
 `cost_ledger.py` reservation/settlement machinery every other live call in
@@ -69,12 +78,14 @@ from causalops.evaluation import (
 )
 from causalops.evidence import new_opaque_id
 from causalops.graph import run_graph_investigation
+from causalops.live_model import pricing_for_model_name
 from causalops.live_setup import (
     MAXIMUM_POSSIBLE_RESERVATION_USD,
-    build_model_and_registry,
+    ProviderDisabledError,
+    claude_enabled,
     live_evaluation_ceiling_usd,
 )
-from causalops.pricing import CLAUDE_SONNET_5_PRICING
+from causalops.mcp_client_registry import build_claude_model_and_mcp_registry
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import (
     RunEvent,
@@ -310,10 +321,9 @@ def _run_one(
     checkpoints_db = ProjectPaths(root=root).checkpoints_db
     checkpoints_db.parent.mkdir(parents=True, exist_ok=True)
     paths = run_paths(root, incident.scope.incident_id)
-    model, registry, model_name, ledger_conn = build_model_and_registry(
-        incident, paths, budgets, "claude", checkpoints_db
+    model, registry, model_name, ledger_conn, release_child = (
+        build_claude_model_and_mcp_registry(incident, paths, budgets, checkpoints_db)
     )
-    assert ledger_conn is not None, "causalops-evaluate always uses the live model"
     try:
         recorder = RunRecorder(utc_now)
         result = run_graph_investigation(
@@ -383,8 +393,8 @@ def _run_one(
             runbook_corpus_version=runbook_corpus_version,
             fixture_sha256=fixture_sha256,
             model_name=model_name,
-            pricing_source=CLAUDE_SONNET_5_PRICING.source,
-            pricing_verified_on=CLAUDE_SONNET_5_PRICING.verified_on,
+            pricing_source=pricing_for_model_name(model_name).source,
+            pricing_verified_on=pricing_for_model_name(model_name).verified_on,
             configured_ceiling_usd=configured_ceiling_usd,
             reserved_usd=reserved_usd,
             actual_usd=None if incomplete_settlement else actual_usd,
@@ -395,6 +405,7 @@ def _run_one(
         )
     finally:
         ledger_conn.close()
+        release_child()
 
 
 def _preflight_worst_case_batch_usd(budgets: Budgets) -> float:
@@ -495,6 +506,11 @@ def run_evaluation(
     is a small fraction of a batch dominated by the tool-enabled arm's
     larger budget at higher curve points.
     """
+    # ``run_evaluation`` is callable independently of ``main`` in tests and
+    # automation. Preserve the disabled-provider preflight at that public
+    # boundary too, before git, cost, corpus, or scenario work begins.
+    if not claude_enabled(os.environ):
+        raise ProviderDisabledError("Claude is disabled by ENABLE_CLAUDE=false")
     git_sha, git_dirty = _git_provenance(root)
     configured_ceiling_usd = live_evaluation_ceiling_usd(os.environ)
     runbook_corpus_version = RunbookIndex().corpus_version
@@ -865,6 +881,12 @@ def main(argv: list[str] | None = None) -> int:
     if root is None:
         print(f"FAIL PROJECT_ROOT_NOT_FOUND No pyproject.toml at or above {start}.")
         return 1
+    # This gate must precede the API-key preflight and target creation. A
+    # disabled deployment must not inspect a credential or write an
+    # evaluation artifact merely because this legacy CLI was invoked.
+    if not claude_enabled(os.environ):
+        print("FAIL CLAUDE_DISABLED ENABLE_CLAUDE=false disables live evaluations.")
+        return 1
     if not os.environ.get(API_KEY_VARIABLE, "").strip():
         print("FAIL MISSING_API_KEY Set ANTHROPIC_API_KEY before a live evaluation.")
         return 1
@@ -881,6 +903,10 @@ def main(argv: list[str] | None = None) -> int:
         records = run_evaluation(root, target, budgets)
     except EvaluationAborted as aborted:
         print(f"FAIL EVALUATION_ABORTED {aborted.reason.value}")
+        print(f"records so far: {records_path}")
+        return 1
+    except ProviderDisabledError as refusal:
+        print(f"FAIL CLAUDE_DISABLED {refusal}")
         print(f"records so far: {records_path}")
         return 1
     except (LabError, RunRecordError, CheckpointStoreError) as refusal:

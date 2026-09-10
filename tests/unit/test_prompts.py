@@ -38,7 +38,13 @@ def context_with(summary: str) -> str:
     symptom, topology = packet_evidence()
     forged = symptom.model_copy(update={"summary": summary})
     return render_context(
-        alert_packet(), incident_scope(), [forged, topology], [], 4, 2
+        alert_packet(),
+        incident_scope(),
+        [forged, topology],
+        [],
+        4,
+        2,
+        runbook_searches_left=BUDGETS.runbook_searches,
     )
 
 
@@ -66,10 +72,13 @@ def test_recorded_telemetry_cannot_close_the_fence() -> None:
 
 
 def test_the_context_reports_the_real_budget_status() -> None:
-    context = render_context(alert_packet(), incident_scope(), [], [], 3, 1)
+    context = render_context(
+        alert_packet(), incident_scope(), [], [], 3, 1, runbook_searches_left=1
+    )
 
     assert "model calls left: 3" in context
     assert "checks left: 1" in context
+    assert "runbook searches left: 1" in context
 
 
 def test_system_text_forbids_narrative_alongside_a_tool_call() -> None:
@@ -99,6 +108,7 @@ def test_evidence_appears_with_its_opaque_id_inside_the_fence() -> None:
         ["[truncated: 1 more]"],
         4,
         2,
+        runbook_searches_left=BUDGETS.runbook_searches,
     )
 
     fenced = context.split(FENCE_OPEN)[1].split(FENCE_CLOSE)[0]
@@ -116,8 +126,12 @@ def test_no_denied_checks_renders_byte_identically_to_before_fix_f2() -> None:
     case."""
     args = (alert_packet(), incident_scope(), [], [], 4, 2)
 
-    implicit_default = render_context(*args)
-    explicit_empty = render_context(*args, denied_checks=())
+    implicit_default = render_context(
+        *args, runbook_searches_left=BUDGETS.runbook_searches
+    )
+    explicit_empty = render_context(
+        *args, denied_checks=(), runbook_searches_left=BUDGETS.runbook_searches
+    )
 
     assert implicit_default == explicit_empty
     assert "## Denied checks" not in implicit_default
@@ -156,7 +170,14 @@ def test_a_denied_check_renders_outside_the_fence_between_status_and_evidence() 
     )
 
     context = render_context(
-        alert_packet(), incident_scope(), [], [], 4, 2, denied_checks=(note,)
+        alert_packet(),
+        incident_scope(),
+        [],
+        [],
+        4,
+        2,
+        denied_checks=(note,),
+        runbook_searches_left=BUDGETS.runbook_searches,
     )
 
     assert context.count(FENCE_CLOSE) == 1

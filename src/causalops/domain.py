@@ -271,13 +271,23 @@ class Budgets(BaseModel):
     tool_timeout_seconds: int = 10
     model_calls: int = 4
     executed_tools: int = 2
-    # `policy.py`'s new `SearchRunbooksArguments` branch checks
-    # `arguments.limit` against this, the same role `log_rows` plays for
-    # `QueryLogsArguments.row_limit`. A `search_runbooks` call still spends
-    # one of the two `executed_tools` slots above -- runbook retrieval
-    # counts against that same shared per-investigation budget, not a
-    # separate one -- this only bounds how many passages one call may ask
-    # for.
+    # A `search_runbooks` call spends from `runbook_searches` below, a
+    # separate pool from `executed_tools` -- retrieving general guidance
+    # never competes with an incident-scoped diagnostic check for the same
+    # scarce slot. Originally shared: a real preregistered live comparison
+    # found `search_runbooks` called 0/168 times across every real batch
+    # this project ever ran, FTS5 and Pinecone alike, with a real, working
+    # backend genuinely available both times (README's "The Pinecone
+    # semantic-retrieval experiment"). Pricing a general-guidance lookup the
+    # same as a scarce incident-scoped check was one live candidate
+    # explanation for that pattern; this field exists to test it, not to
+    # assume it explains the whole thing.
+    runbook_searches: int = 1
+    # `policy.py`'s `SearchRunbooksArguments` branch checks `arguments.limit`
+    # against this, the same role `log_rows` plays for
+    # `QueryLogsArguments.row_limit` -- how many passages one call may ask
+    # for, independent of `runbook_searches` above, which bounds how many
+    # calls the whole investigation may make.
     runbook_passages: int = 5
     # `may_repair` (`graph.py`) checks `repairs_used < repairs` with no other
     # gate, so this field alone now bounds how many structured-output

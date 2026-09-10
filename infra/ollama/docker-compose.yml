@@ -1,0 +1,18 @@
+name: causalops-ollama
+
+# VM-only Ollama template. It fails closed until CAUSALOPS_OLLAMA_IMAGE is set
+# to a reviewed digest in an ignored `infra/ollama/compose.env` file. It does
+# not start the synthetic lab, application worker, or MCP process; those remain
+# separate restricted-environment composition work after policy approval.
+services:
+  ollama:
+    image: ${CAUSALOPS_OLLAMA_IMAGE:?set a reviewed Ollama image digest in compose.env}
+    restart: unless-stopped
+    mem_limit: 8g
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  ollama-models:

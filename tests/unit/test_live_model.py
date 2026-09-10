@@ -47,21 +47,27 @@ from causalops.domain import (
     ToolProposal,
 )
 from causalops.live_model import (
+    LIVE_MODEL_VARIABLE,
     RECORD_FINAL_ASSESSMENT_TOOL_NAME,
     RECORD_STOP_TOOL_NAME,
     LiveClaudeModel,
     MissingCredential,
     MissingProviderUsage,
     StopRecord,
+    UnknownLiveModel,
     _build_chat_anthropic,
     _domain_tool_definitions,
     _final_assessment_tool_definition,
     _stop_tool_definition,
     maximum_possible_reservation_usd,
+    pricing_for_model_name,
+    resolve_live_model_pricing,
 )
 from causalops.models import ModelRequest, Stage
 from causalops.policy import authorize
 from causalops.pricing import (
+    CLAUDE_HAIKU_4_5_PRICING,
+    CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     MAX_REQUEST_SECONDS,
@@ -81,6 +87,47 @@ CHEAP_PRICING = PricingSnapshot(
     source="test",
     verified_on="2026-01-01",
 )
+
+
+def test_resolve_live_model_pricing_defaults_to_sonnet_when_absent_or_blank() -> None:
+    assert resolve_live_model_pricing({}) is CLAUDE_SONNET_5_PRICING
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: ""}) is (
+        CLAUDE_SONNET_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "   "}) is (
+        CLAUDE_SONNET_5_PRICING
+    )
+
+
+def test_resolve_live_model_pricing_selects_haiku_case_insensitively() -> None:
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "haiku"}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "HAIKU"}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: " haiku "}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+
+
+def test_resolve_live_model_pricing_refuses_an_unrecognized_value() -> None:
+    """A typo'd model name must never silently fall back to the default --
+    that would run (and bill) a different model than the owner asked for."""
+    with pytest.raises(UnknownLiveModel, match="opus"):
+        resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "opus"})
+
+
+def test_pricing_for_model_name_recovers_each_known_snapshot() -> None:
+    assert pricing_for_model_name("claude-sonnet-5") is CLAUDE_SONNET_5_PRICING
+    assert pricing_for_model_name("claude-haiku-4-5-20251001") is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+
+
+def test_pricing_for_model_name_refuses_an_unknown_name() -> None:
+    with pytest.raises(UnknownLiveModel, match="not-a-real-model"):
+        pricing_for_model_name("not-a-real-model")
 
 
 class _FakeBoundModel:
@@ -480,6 +527,7 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools,
         passages=(),
+        runbook_searches_left=budgets.runbook_searches,
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
@@ -502,11 +550,40 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # trigger for another. `STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]` also
     # gained a sentence in this same change, but `context_text` above renders
     # only `Stage.FINAL_ASSESSMENT`'s instructions, so that second edit does
-    # not touch this pinned figure.
-    assert len(total) == 2_448
+    # not touch this pinned figure. It moved a sixth time, from 2,448 to
+    # 2,629: `SYSTEM_TEXT` gained one sentence stating `search_runbooks`
+    # spends from its own separate, smaller budget rather than the scarce
+    # diagnostic-check one, and `render_context` gained one new rendered
+    # status line, `"runbook searches left: N"`, present on every call
+    # including this one. It moved a seventh time, from 2,629 to 3,059:
+    # `SYSTEM_TEXT` gained two sentences instructing the model that its
+    # first proposal in an investigation must be one `search_runbooks`
+    # call, before any incident-scoped check -- the imperative follow-up
+    # tried after the dedicated-budget sentence alone still measured 0/12
+    # real uses (README's "Two more angles on the same question"). It moved
+    # an eighth time, from 3,059 to 3,330: `SYSTEM_TEXT` gained one more
+    # sentence telling the model to let cited runbook guidance shape which
+    # check it proposes next, without counting as evidence for the verdict
+    # -- a live investigation found the mandatory runbook call changed
+    # nothing else about the model's diagnostic behavior (near-identical
+    # tool-call counts with or without it), so this is the attempt to close
+    # that gap. It moved a ninth time, from 3,330 to 3,430: `SYSTEM_TEXT`
+    # dropped the "must be first, before any incident-scoped check"
+    # constraint on the mandatory `search_runbooks` call -- still exactly
+    # one call required, but the topic is now chosen once real evidence
+    # exists, not guessed blind from the alert alone (a live investigation
+    # showed the blind-first choice fetching guidance for the wrong half
+    # of a two-signal ambiguity). Reverted, back to 3,330: a real live
+    # batch found that edit cost more than it plausibly gained --
+    # `search_runbooks` usage dropped from a reliable 12/12 to 7/12, since
+    # "exactly once, whenever you choose" competed with the model's own
+    # judgment about when it was done. `SYSTEM_TEXT` reverts to its
+    # pre-that-edit wording exactly, so this figure returns to its earlier
+    # value rather than moving to a new one.
+    assert len(total) == 3_330
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 2_448
+    assert estimate_input_tokens(total) == 3_330
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
@@ -538,6 +615,7 @@ def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools - 1,
         passages=passages,
+        runbook_searches_left=budgets.runbook_searches,
     )
     context_text = (
         f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]}"
@@ -1408,6 +1486,40 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
     assert client.max_tokens == MAX_OUTPUT_TOKENS
     assert client.max_retries == 0
     assert client.model == CHEAP_PRICING.model_name
+
+
+def test_build_chat_anthropic_sets_adaptive_thinking_when_the_model_supports_it() -> (
+    None
+):
+    """`CHEAP_PRICING.supports_adaptive_thinking` defaults `True` (the
+    field's own default, matching Sonnet 5 -- see `PricingSnapshot`'s
+    docstring), so this is the branch every other test in this file already
+    exercises implicitly; asserted directly here, once, against the real
+    public `ChatAnthropic` attributes those two kwargs set."""
+    client = _build_chat_anthropic(CHEAP_PRICING)
+
+    assert client.thinking == {"type": "adaptive"}
+    assert client.reasoning_effort == "medium"
+
+
+def test_build_chat_anthropic_omits_thinking_when_the_model_does_not_support_it() -> (
+    None
+):
+    """The fix for a real bug: a live request against Claude Haiku 4.5 with
+    `thinking={"type": "adaptive"}` set was refused outright (`400
+    invalid_request_error: adaptive thinking is not supported on this
+    model`), confirmed directly against the real API. `CLAUDE_HAIKU_4_5_
+    PRICING.supports_adaptive_thinking` is `False` for exactly this reason;
+    this proves the constructed client actually omits both kwargs, not just
+    that the pricing flag exists."""
+    haiku_pricing = CHEAP_PRICING.model_copy(
+        update={"supports_adaptive_thinking": False}
+    )
+
+    client = _build_chat_anthropic(haiku_pricing)
+
+    assert client.thinking is None
+    assert client.reasoning_effort is None
 
 
 # --- the schema-vs-application cross-check --------------------------------

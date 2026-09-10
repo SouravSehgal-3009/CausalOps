@@ -2,7 +2,15 @@
 
 from collections.abc import Sequence
 
-from causalops.domain import Disposition, Evidence, InvestigationReport, ToolReceipt
+from causalops.domain import (
+    Disposition,
+    Evidence,
+    InvestigationReport,
+    PolicyResult,
+    ReceiptState,
+    ToolReceipt,
+)
+from causalops.tools import ToolName
 
 REPLAY_CAVEAT = (
     "This run used scripted replay fixtures. It shows that the workflow, policy, "
@@ -32,7 +40,7 @@ def render_report(
     lines.extend(["", *evidence_section(report, evidence)])
     lines.extend(["", *guidance_section(report)])
     lines.extend(["", *checks_section(receipts)])
-    lines.extend(["", *budget_section(report)])
+    lines.extend(["", *budget_section(report, receipts)])
     if report.escalation is not None:
         lines.extend(["", *escalation_section(report)])
     lines.extend(["", *limitations_section(report, model_name)])
@@ -128,7 +136,36 @@ def checks_section(receipts: Sequence[ToolReceipt]) -> list[str]:
     return lines
 
 
-def budget_section(report: InvestigationReport) -> list[str]:
+def budget_section(
+    report: InvestigationReport, receipts: Sequence[ToolReceipt]
+) -> list[str]:
+    # `report.tools_executed` (`InvestigationReport`'s own schema field)
+    # counts every settled, allowed receipt across all five tools --
+    # correct as a total, but `search_runbooks` spends from its own
+    # `budgets.runbook_searches` pool, separate from `budgets.executed_tools`
+    # the other four tools share (see `Budgets.runbook_searches`'s own
+    # docstring). Comparing that combined total against the single
+    # `executed_tools` denominator can read as "3 of 2" -- over budget --
+    # for a run that used both pools correctly and fully. Split here, the
+    # same fix `model_calls`/`repairs` above already needed for the same
+    # reason (see that line's own comment).
+    #
+    # Subtracted from the trusted schema total, not independently recounted
+    # from `receipts` alone: `receipts` is a second parameter a caller could
+    # in principle pass out of sync with the report that produced
+    # `tools_executed` (every real caller passes the matching list, but
+    # nothing enforces that structurally). Subtraction means a caller that
+    # passes no/mismatched receipts still gets the report's own honest
+    # total on the diagnostic line, rather than silently under-reporting it
+    # as zero.
+    runbook_searches_executed = sum(
+        1
+        for receipt in receipts
+        if receipt.policy_result is PolicyResult.ALLOWED
+        and receipt.state is ReceiptState.SETTLED
+        and receipt.tool is ToolName.SEARCH_RUNBOOKS
+    )
+    diagnostic_executed = report.tools_executed - runbook_searches_executed
     return [
         "## What it spent",
         "",
@@ -140,8 +177,10 @@ def budget_section(report: InvestigationReport) -> list[str]:
         f"- Model calls: {report.model_calls_used} of "
         f"{report.budgets.model_calls + report.budgets.repairs}",
         f"- Repairs: {report.repairs_used} of {report.budgets.repairs}",
-        f"- Checks executed: {report.tools_executed} of "
+        f"- Diagnostic checks executed: {diagnostic_executed} of "
         f"{report.budgets.executed_tools}",
+        f"- Runbook searches: {runbook_searches_executed} of "
+        f"{report.budgets.runbook_searches}",
         f"- Invalid responses: {report.invalid_responses}",
         f"- Token usage: {usage_line(report)}",
         # The CLI report must surface this value.

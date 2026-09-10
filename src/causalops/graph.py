@@ -308,8 +308,14 @@ def _dump_events(recorder: RunRecorder) -> list[dict[str, JsonValue]]:
 
 def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
     return ReservationLedger.from_receipts(
-        receipts, budgets.executed_tools
+        receipts, budgets.executed_tools, budgets.runbook_searches
     ).slots_left()
+
+
+def _runbook_searches_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
+    return ReservationLedger.from_receipts(
+        receipts, budgets.executed_tools, budgets.runbook_searches
+    ).runbook_slots_left()
 
 
 def _model_calls_left(
@@ -664,6 +670,7 @@ def _render_stage_request(
         _tools_left(receipts, budgets),
         passages,
         _denied_check_notes(receipts, budgets),
+        runbook_searches_left=_runbook_searches_left(receipts, budgets),
     )
     system_text = SYSTEM_TEXT
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}"
@@ -2061,6 +2068,87 @@ def run_graph_investigation(
 
     return _settle_invocation(
         compiled, config, invoke, budgets, clock, event_clock, recorder, initial_state
+    )
+
+
+def recover_graph_investigation(
+    thread_id: str,
+    checkpointer: BaseCheckpointSaver[str],
+    scope: IncidentScope,
+    packet: InitialAlertPacket,
+    model: ToolCallingModel,
+    dispatch_registry: Mapping[ToolName, ToolWrapper],
+    recorder: RunRecorder,
+    budgets: Budgets = DEFAULT_BUDGETS,
+    clock: Clock = utc_now,
+) -> InvestigationResult | EscalatedInvestigation | None:
+    """Recover an existing durable graph thread without starting it over.
+
+    ``run_graph_investigation`` deliberately always supplies a new initial
+    state. A worker that has lost its control-plane transition must therefore
+    not call it merely because the control-plane row has no checkpoint id:
+    LangGraph may already hold a pending interrupt, a completed report, or an
+    interrupted in-flight superstep for that thread. This helper recognizes
+    each durable shape before a caller decides whether a brand-new run is
+    appropriate.
+
+    ``None`` means the thread has no checkpoint. A pending interrupt is
+    reconstructed as ``EscalatedInvestigation`` without invoking the graph;
+    a completed report is reconstructed directly from checkpointed state;
+    and a nonterminal, non-paused state is continued from the saver with no
+    new initial input. The latter is the only safe way to recover a process
+    crash during graph execution.
+    """
+    event_clock = recorder.clock
+    compiled = build_graph(
+        scope,
+        packet,
+        budgets,
+        clock,
+        model,
+        dispatch_registry,
+        checkpointer,
+        event_clock=event_clock,
+    )
+    config: RunnableConfig = {
+        "recursion_limit": GRAPH_RECURSION_LIMIT,
+        "configurable": {"thread_id": thread_id},
+    }
+    snapshot = compiled.get_state(config)
+    if not snapshot.values:
+        return None
+    state = cast(GraphState, snapshot.values)
+    recorder.recorded = [RunEvent.model_validate(dump) for dump in state["events"]]
+
+    if snapshot.interrupts:
+        payload = snapshot.interrupts[0].value
+        checkpoint_id = str(snapshot.config["configurable"]["checkpoint_id"])
+        store = _rebuild_store(state["incident_id"], state["evidence"])
+        return EscalatedInvestigation(
+            thread_id=state["investigation_id"],
+            run_id=state["run_id"],
+            checkpoint_id=checkpoint_id,
+            reason=EscalationReason(payload["reason"]),
+            evidence=store.ordered(),
+            receipts=tuple(_rebuild_receipts(state)),
+            remaining_check_count=payload["remaining_check_count"],
+            proposal_fingerprint=None,
+        )
+
+    if state["report"] is not None:
+        report = InvestigationReport.model_validate(state["report"])
+        store = _rebuild_store(state["incident_id"], state["evidence"])
+        return InvestigationResult(
+            report=report,
+            evidence=store.ordered(),
+            receipts=tuple(_rebuild_receipts(state)),
+        )
+
+    def invoke() -> dict[str, Any]:
+        return cast(dict[str, Any], compiled.invoke(None, config))
+
+    return _settle_invocation(
+        compiled, config, invoke, budgets, clock, event_clock, recorder, state
     )
 
 

@@ -31,6 +31,20 @@ dependencies = [
     # the import itself stays safe only because `tests/conftest.py`'s
     # network guard is already active for the whole pytest session by then.
     "langchain-anthropic>=1.6.1",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "google-auth>=2.0",
+    # `gcs_artifacts.py`'s durable final-artifact upload to the Phase 2
+    # provisioned bucket (spec §3.1). Only imported by `api_runtime.py`,
+    # never by `cli.py`/`evaluate_cli.py` -- `tests/security/test_no_tracing.py`
+    # already proves those two import paths send no network request; this
+    # dependency does not enter that chain at all.
+    "google-cloud-storage>=2.18",
+    # `firestore_checkpointer.py`'s LangGraph checkpoint saver (spec §3.1) --
+    # only imported by `api_runtime.py`, same isolation guarantee as
+    # `google-cloud-storage` above.
+    "google-cloud-firestore>=2.19",
+    "pinecone>=10.0.0",
 ]
 
 [project.scripts]
@@ -42,6 +56,11 @@ causalops = "causalops.cli:main"
 # `[project.scripts]` key becomes an executable filename on `PATH`, which
 # cannot contain a space.
 causalops-evaluate = "causalops.evaluate_cli:main"
+# Offline inspector for sanitized candidate-evaluation VM artifacts. It
+# neither starts a candidate evaluation nor imports the Ollama adapter.
+causalops-candidate-assess = "causalops.candidate_evaluation_cli:main"
+causalops-qwen-evaluate = "causalops.qwen_evaluate_cli:main"
+causalops-pinecone-reindex = "causalops.pinecone_reindex_cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -73,6 +92,13 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[[tool.mypy.overrides]]
+# google-cloud-storage ships no py.typed marker mypy recognizes -- scoped
+# to exactly the two submodules gcs_artifacts.py imports, not a blanket
+# google.* exemption.
+module = ["google.cloud", "google.cloud.storage", "google.api_core.exceptions"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

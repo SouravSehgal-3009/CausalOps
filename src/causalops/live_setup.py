@@ -14,30 +14,45 @@ not itself a command entry point.
 import math
 import os
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
+from causalops.api import ScenarioFamily
 from causalops.approvals import CheckpointStoreError, CheckpointStoreReasonCode
 from causalops.cost_ledger import (
     RESERVATION_CEILING_BUFFER_USD,
     ensure_cost_ledger_table,
 )
 from causalops.doctor import API_KEY_VARIABLE
-from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
-from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
+from causalops.domain import (
+    REPLAY_MODEL_NAME,
+    Budgets,
+    IncidentScope,
+    RunbookCheckOutcome,
+    StoredIncident,
+)
 from causalops.live_model import (
     LiveClaudeModel,
     maximum_possible_reservation_usd,
     minimum_possible_reservation_usd,
+    resolve_live_model_pricing,
+)
+from causalops.model_profiles import (
+    CLAUDE_LEGACY_DISABLED,
+    OLLAMA_QWEN35_EXPERIMENT,
+    REPLAY_HOSTED,
+    ModelProfile,
 )
 from causalops.models import (
     ReplayReasoningModel,
     ReplayToolCallingModel,
     ToolCallingModel,
 )
+from causalops.ollama_model import OllamaQwenToolCallingModel
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
+from causalops.retrieval_experiment import rag_experiment_enabled
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
     RunPaths,
@@ -46,7 +61,7 @@ from causalops.telemetry import (
     run_topology_check,
 )
 from causalops.tool_wrappers import ToolWrapper, dispatch_registry
-from causalops.tools import ToolName
+from causalops.tools import SearchRunbooksArguments, ToolName
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # `dispatch_registry` wraps all four tools, so the graph
@@ -54,6 +69,124 @@ REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # tools -- exactly as the retired loop orchestrator did; parity between the
 # two was established and proven before the loop was retired.
 REPLAY_FIXTURE = REPLAY_FIXTURE_DIR / "lab_diagnosis.json"
+
+# Hosted-API-only: which scripted fixture correctly narrates each scenario
+# family's real root cause. `REPLAY_FIXTURE` above stays the CLI/evaluate
+# default (family-agnostic, unchanged) -- only `HostedReplayRuntimeWiring`/
+# `McpBackedReplayRuntimeWiring` consult this map, since the hosted API is
+# the one surface that lets an owner pick a family and never reaches a real
+# model to reason about it correctly on its own. `ambiguous_telemetry`'s
+# own real expected outcome (see `lab/scenarios/ambiguous_telemetry.json`)
+# is genuine abstention, not a demo trick -- both pool-exhaustion and
+# upstream-timeout error codes really do appear together in that family's
+# injected fault, so its fixture correctly declines to pick one.
+FAMILY_REPLAY_FIXTURES: Mapping[ScenarioFamily, Path] = {
+    ScenarioFamily.CONFIGURATION_CHANGE: REPLAY_FIXTURE,
+    ScenarioFamily.DOWNSTREAM_TIMEOUT_RETRY_AMPLIFICATION: (
+        REPLAY_FIXTURE_DIR / "downstream_timeout_demo.json"
+    ),
+    ScenarioFamily.RESOURCE_POOL_SATURATION: (
+        REPLAY_FIXTURE_DIR / "resource_pool_saturation_demo.json"
+    ),
+    ScenarioFamily.AMBIGUOUS_TELEMETRY: (
+        REPLAY_FIXTURE_DIR / "ambiguous_telemetry_demo.json"
+    ),
+}
+
+# A deliberately narrow opt-in: any value other than an affirmative spelling
+# disables the legacy hosted provider.  Deployments set this to ``false`` so
+# a disabled path returns before reading credentials or allocating a client.
+ENABLE_CLAUDE_VARIABLE = "ENABLE_CLAUDE"
+VM_EXECUTION_ENV_VARIABLE = "CAUSALOPS_EXECUTION_ENV"
+VM_EXECUTION_ENV = "vm"
+CANDIDATE_EVALUATION_VARIABLE = "CAUSALOPS_CANDIDATE_EVALUATION"
+
+
+class ProviderDisabledError(RuntimeError):
+    """A composition root attempted to construct a disabled provider."""
+
+
+class ReplayRuntimeWiring(Protocol):
+    """Replay-only graph dependencies selected by an application composition root.
+
+    The fourth element is a teardown callback the caller must invoke on
+    every exit path (finalize, pause/escalate, or exception) -- most
+    implementations return a no-op; `mcp_client_registry
+    .McpBackedReplayRuntimeWiring` uses it to close a spawned MCP child
+    process."""
+
+    def build(
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
+    ) -> tuple[
+        ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
+    ]: ...
+
+
+def claude_enabled(environment: Mapping[str, str]) -> bool:
+    """Whether an owner explicitly permits the legacy Claude adapter.
+
+    The legacy CLI remains backward compatible when the variable is absent,
+    while a deployment can set ``ENABLE_CLAUDE=false`` as a hard preflight
+    stop.  The check intentionally accepts only explicit affirmative values.
+    """
+    raw = environment.get(ENABLE_CLAUDE_VARIABLE)
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes"}
+
+
+def build_ollama_candidate_model(
+    environment: Mapping[str, str],
+) -> OllamaQwenToolCallingModel:
+    """Constructs Qwen only for an explicitly marked private VM process."""
+    if (
+        environment.get(VM_EXECUTION_ENV_VARIABLE, "").strip().lower()
+        != VM_EXECUTION_ENV
+    ):
+        raise ProviderDisabledError(
+            f"{OLLAMA_QWEN35_EXPERIMENT.kind.value} is VM-only; set "
+            f"{VM_EXECUTION_ENV_VARIABLE}={VM_EXECUTION_ENV!r} on the private VM"
+        )
+    if environment.get(CANDIDATE_EVALUATION_VARIABLE, "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        raise ProviderDisabledError(
+            f"{OLLAMA_QWEN35_EXPERIMENT.kind.value} requires "
+            f"{CANDIDATE_EVALUATION_VARIABLE}=true"
+        )
+    return OllamaQwenToolCallingModel(environment=environment)
+
+
+def build_ollama_candidate_model_and_registry(
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    environment: Mapping[str, str],
+) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
+    """The VM-only Qwen composition root for Phase 4 candidate evaluation."""
+    model = build_ollama_candidate_model(environment)
+    return (
+        model,
+        _build_tool_registry(paths, budgets, environment),
+        OLLAMA_QWEN35_EXPERIMENT.model_name,
+    )
+
+
+def profile_for_legacy_choice(
+    model_choice: Literal["replay", "claude"],
+) -> ModelProfile:
+    """Maps the legacy CLI vocabulary at the composition boundary only."""
+    if model_choice == "replay":
+        return REPLAY_HOSTED
+    return CLAUDE_LEGACY_DISABLED
+
 
 # `.env.example`-documented, application-wide, covering standalone
 # and paired-evaluation runs together. Only an
@@ -204,12 +337,125 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
     return value
 
 
+def _build_tool_registry(
+    paths: RunPaths, budgets: Budgets, environment: Mapping[str, str] | None = None
+) -> Mapping[ToolName, ToolWrapper]:
+    """Build the incident-scoped tool registry shared by fixed providers.
+
+    `search_runbooks`'s backend is the one conditional piece: FTS5
+    (`runbooks.py`) unless `RAG_EXPERIMENT_ENABLED` is set, in which case
+    the Pinecone backend is used instead -- never both, and the import of
+    `causalops.pinecone_runbooks` (and, transitively, the `pinecone` SDK)
+    stays local to this branch, so nothing in the default FTS5-only import
+    graph (CLI, evaluate CLI, the hosted API) ever reaches it.
+    """
+    env = environment if environment is not None else os.environ
+    run_search: Callable[[SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome]
+    if rag_experiment_enabled(env):
+        from causalops.pinecone_runbooks import (
+            PineconeRunbookIndex,
+            run_runbook_search_pinecone,
+        )
+
+        pinecone_index = PineconeRunbookIndex(environment=env)
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search_pinecone(arguments, pinecone_index)
+
+    else:
+        runbook_index = RunbookIndex()
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search(arguments, runbook_index)
+
+    return dispatch_registry(
+        run_metric=lambda arguments, scope: run_metric_check(
+            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
+        ),
+        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
+        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
+        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
+        run_search=run_search,
+    )
+
+
+def build_replay_model_and_registry(
+    incident: StoredIncident,
+    paths: RunPaths,
+    budgets: Budgets,
+    environment: Mapping[str, str] | None = None,
+    *,
+    fixture: Path = REPLAY_FIXTURE,
+) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
+    """Build only hosted replay dependencies; no other provider is reachable.
+
+    `fixture` defaults to the one fixed `REPLAY_FIXTURE` every existing
+    caller (CLI, evaluate, tests) already gets -- it exists as a parameter
+    only so `HostedReplayRuntimeWiring`/`McpBackedReplayRuntimeWiring` can
+    let `app()` point the hosted API at a different scripted fixture
+    without touching this shared default at all.
+    """
+    replay_model = ReplayToolCallingModel(
+        ReplayReasoningModel(
+            fixture,
+            substitutions={
+                "incident_id": incident.scope.incident_id,
+                "window_start": incident.scope.started_at.isoformat(),
+                "window_end": incident.scope.ended_at.isoformat(),
+                "symptom_evidence_id": incident.packet.symptom_evidence_id,
+            },
+        )
+    )
+    return (
+        replay_model,
+        _build_tool_registry(paths, budgets, environment),
+        REPLAY_MODEL_NAME,
+    )
+
+
+class HostedReplayRuntimeWiring:
+    """Composition-selected implementation of the replay-only runtime seam.
+
+    `fixture=None` (the default) selects per-family from
+    `FAMILY_REPLAY_FIXTURES` -- an explicit `fixture` overrides that lookup
+    for every family, the demo/ops-only escape hatch `CAUSALOPS_REPLAY_
+    FIXTURE` still uses (see `api_runtime.py`'s `app()`)."""
+
+    def __init__(self, fixture: Path | None = None) -> None:
+        self._fixture = fixture
+
+    def build(
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
+    ) -> tuple[
+        ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
+    ]:
+        fixture = (
+            self._fixture
+            if self._fixture is not None
+            else FAMILY_REPLAY_FIXTURES[family]
+        )
+        model, registry, model_name = build_replay_model_and_registry(
+            incident, paths, budgets, fixture=fixture
+        )
+        return model, registry, model_name, lambda: None
+
+
 def build_model_and_registry(
     incident: StoredIncident,
     paths: RunPaths,
     budgets: Budgets,
     model_choice: Literal["replay", "claude"],
     db_path: Path,
+    environment: Mapping[str, str] | None = None,
 ) -> tuple[
     ToolCallingModel, Mapping[ToolName, ToolWrapper], str, sqlite3.Connection | None
 ]:
@@ -230,36 +476,23 @@ def build_model_and_registry(
     SQLite transactions from another's on the same file. Returned to the
     caller (`None` for replay) so its lifetime is the caller's to close.
     """
-    # A fresh in-memory index per call -- the corpus is small and read-only,
-    # so rebuilding it costs nothing measurable, and it keeps this function's
-    # "everything an incident needs, built fresh" contract intact rather
-    # than reaching for a module-level singleton `search_runbooks` alone
-    # would need.
-    runbook_index = RunbookIndex()
-    registry = dispatch_registry(
-        run_metric=lambda arguments, scope: run_metric_check(
-            arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
-        ),
-        run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
-        run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
-        run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
-        ),
-    )
-    if model_choice == "replay":
-        replay_model = ReplayToolCallingModel(
-            ReplayReasoningModel(
-                REPLAY_FIXTURE,
-                substitutions={
-                    "incident_id": incident.scope.incident_id,
-                    "window_start": incident.scope.started_at.isoformat(),
-                    "window_end": incident.scope.ended_at.isoformat(),
-                    "symptom_evidence_id": incident.packet.symptom_evidence_id,
-                },
-            )
+    process_environment = environment if environment is not None else os.environ
+    profile = profile_for_legacy_choice(model_choice)
+    if profile == REPLAY_HOSTED:
+        model, registry, model_name = build_replay_model_and_registry(
+            incident, paths, budgets, process_environment
         )
-        return replay_model, registry, REPLAY_MODEL_NAME, None
+        return model, registry, model_name, None
+    # This must precede credential inspection, SQLite setup, and
+    # registry construction, and ``LiveClaudeModel`` construction. In
+    # particular it gives disabled deployments a no-configuration,
+    # no-credential, no-client, no-network failure path.
+    if not claude_enabled(process_environment):
+        raise ProviderDisabledError(
+            f"{CLAUDE_LEGACY_DISABLED.kind.value} is disabled by "
+            f"{ENABLE_CLAUDE_VARIABLE}=false"
+        )
+    registry = _build_tool_registry(paths, budgets, process_environment)
     ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
     ensure_cost_ledger_table(ledger_conn)
     # Presence only, mirroring `doctor.check_api_key`'s own
@@ -268,10 +501,12 @@ def build_model_and_registry(
     # docstring; `tests/security/test_credential_isolation.py` proves the
     # module neither imports `os` nor names the variable in code), so this
     # `bool` is the only thing that crosses that boundary.
-    credential_present = bool(os.environ.get(API_KEY_VARIABLE, "").strip())
+    credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
+    pricing = resolve_live_model_pricing(process_environment)
     live_model = LiveClaudeModel(
         ledger_conn,
-        ceiling_usd=live_evaluation_ceiling_usd(os.environ),
+        ceiling_usd=live_evaluation_ceiling_usd(process_environment),
+        pricing=pricing,
         credential_present=credential_present,
     )
-    return live_model, registry, LIVE_MODEL_NAME, ledger_conn
+    return live_model, registry, pricing.model_name, ledger_conn

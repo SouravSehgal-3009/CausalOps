@@ -32,7 +32,7 @@ still rejected locally and use the graph's normal repair path.
 
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -68,6 +68,7 @@ from causalops.models import (
     parse_response,
 )
 from causalops.pricing import (
+    CLAUDE_HAIKU_4_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -87,9 +88,73 @@ from causalops.tools import (
     ToolName,
 )
 
-# claude-sonnet-5 is the model specified for the live adapter, not a free
-# choice this module makes.
+# claude-sonnet-5 is the default model for the live adapter, kept as the
+# module-level constant every existing caller/test already imports. Opus is
+# deliberately not offered here: the two live behavioral experiments this
+# constant's docstring history covers (README's "Pinecone semantic-
+# retrieval experiment" and the dedicated runbook-search budget) both need
+# a *weaker* model to be informative, not a more capable, more expensive
+# one that would only be even more confident from raw evidence alone.
 MODEL_NAME = "claude-sonnet-5"
+
+LIVE_MODEL_VARIABLE = "CAUSALOPS_LIVE_MODEL"
+_LIVE_MODEL_PRICING: dict[str, PricingSnapshot] = {
+    "sonnet": CLAUDE_SONNET_5_PRICING,
+    "haiku": CLAUDE_HAIKU_4_5_PRICING,
+}
+# Keyed by the real provider model id (`PricingSnapshot.model_name`), not
+# the short `CAUSALOPS_LIVE_MODEL` key above -- `pricing_for_model_name`
+# below is how a caller that only has the model name a run actually used
+# (e.g. `evaluate_cli.py`'s `EvaluationRecord.model_name`, already resolved
+# once per run) recovers that same run's pricing provenance
+# (`source`/`verified_on`) without re-reading `CAUSALOPS_LIVE_MODEL` a
+# second time -- a second read could disagree with the first if the
+# environment changed between the two calls, which a single resolved
+# string can never do.
+_PRICING_BY_MODEL_NAME: dict[str, PricingSnapshot] = {
+    pricing.model_name: pricing for pricing in _LIVE_MODEL_PRICING.values()
+}
+
+
+class UnknownLiveModel(ValueError):
+    """`CAUSALOPS_LIVE_MODEL` named a model this adapter does not support."""
+
+
+def pricing_for_model_name(model_name: str) -> PricingSnapshot:
+    """The `PricingSnapshot` whose `model_name` matches exactly -- for
+    recovering pricing provenance from an already-resolved run's model
+    name, never for resolving which model to use in the first place (that
+    is `resolve_live_model_pricing`'s job, from configuration, not a
+    result)."""
+    try:
+        return _PRICING_BY_MODEL_NAME[model_name]
+    except KeyError:
+        raise UnknownLiveModel(
+            f"no known pricing for model_name={model_name!r}"
+        ) from None
+
+
+def resolve_live_model_pricing(environment: Mapping[str, str]) -> PricingSnapshot:
+    """Which live model's `PricingSnapshot` (and, through
+    `PricingSnapshot.model_name`, which real provider model id) this run
+    uses -- absent or blank defaults to Sonnet 5, matching every run before
+    this variable existed. An unrecognized value is refused loudly rather
+    than silently falling back to the default, the same posture
+    `retrieval_experiment.rag_experiment_enabled`'s sibling gates take for
+    every other owner-configured choice in this codebase: a typo'd model
+    name should never silently run (and bill) a different model than the
+    owner asked for.
+    """
+    raw = environment.get(LIVE_MODEL_VARIABLE, "").strip().lower()
+    if not raw:
+        return CLAUDE_SONNET_5_PRICING
+    try:
+        return _LIVE_MODEL_PRICING[raw]
+    except KeyError:
+        raise UnknownLiveModel(
+            f"{LIVE_MODEL_VARIABLE}={raw!r} is not one of {sorted(_LIVE_MODEL_PRICING)}"
+        ) from None
+
 
 # Neither collides with any `ToolName` value (`tools.py`) -- Claude echoes
 # back exactly the tool name it was given, so this module's own
@@ -389,8 +454,9 @@ def _has_visible_content(content: object) -> bool:
     function rejected every list-typed response outright, which would also
     have refused a genuine turn carrying only `tool_use`/`thinking` blocks
     -- the ordinary shape once extended thinking is on
-    (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}`
-    unconditionally) -- burning the run's one repair slot on a wholly valid
+    (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}` for every
+    model that supports it, `pricing.supports_adaptive_thinking`) --
+    burning the run's one repair slot on a wholly valid
     turn; fixed by allow-listing the three
     real provider block types explicitly instead of rejecting every list.
     """
@@ -436,6 +502,15 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     project leaves all three at the provider's own default, and Sonnet 5
     rejects all three outright once `thinking` is on.
 
+    Both kwargs are omitted entirely, not passed as `None`, when
+    `pricing.supports_adaptive_thinking` is `False`: a real live request
+    against Claude Haiku 4.5 with `thinking={"type": "adaptive"}` set was
+    refused outright (`400 invalid_request_error: adaptive thinking is not
+    supported on this model`), confirmed directly against the real API.
+    `CAUSALOPS_LIVE_MODEL=haiku` (`resolve_live_model_pricing`) is the only
+    way this branch is reached today; `CLAUDE_HAIKU_4_5_PRICING` is the one
+    `PricingSnapshot` with `supports_adaptive_thinking=False`.
+
     Keyword-only aliases (`model_name`/`max_tokens_to_sample`/`effort`),
     not the plain field names (`model`/`max_tokens`/`reasoning_effort`) a
     reader would expect from `ChatAnthropic.model_fields`: pydantic's
@@ -456,14 +531,18 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     installed package: `is_required() == False`). Behaviourally inert;
     here to satisfy `mypy src lab`, not to change the default.
     """
+    thinking_kwargs: dict[str, Any] = (
+        {"thinking": {"type": "adaptive"}, "effort": "medium"}
+        if pricing.supports_adaptive_thinking
+        else {}
+    )
     return ChatAnthropic(
         model_name=pricing.model_name,
         max_tokens_to_sample=MAX_OUTPUT_TOKENS,
         max_retries=0,
-        thinking={"type": "adaptive"},
-        effort="medium",
         timeout=MAX_REQUEST_SECONDS,
         stop=None,
+        **thinking_kwargs,
     )
 
 
@@ -861,6 +940,7 @@ def build_minimum_final_assessment_request() -> ModelRequest:
         markers=(),
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools,
+        runbook_searches_left=budgets.runbook_searches,
         passages=(),
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"

@@ -105,16 +105,29 @@ class ReservationLedger:
     restart -- collapsing this bookkeeping into free functions over a
     `receipts: tuple[ToolReceipt, ...]` tuple living in graph state, with no
     separate ledger object, remains undone.
+
+    Two independent pools, not one: `slots_left()` counts every ALLOWED
+    receipt except `search_runbooks` against `Budgets.executed_tools`;
+    `runbook_slots_left()` counts only `search_runbooks` ALLOWED receipts
+    against `Budgets.runbook_searches`. `reserve()` charges whichever pool
+    matches its own `tool` argument -- see `Budgets.runbook_searches`'s own
+    docstring for why these are separate.
     """
 
-    def __init__(self, executed_tools_budget: int) -> None:
+    def __init__(
+        self, executed_tools_budget: int, runbook_searches_budget: int = 1
+    ) -> None:
         self._budget = executed_tools_budget
+        self._runbook_budget = runbook_searches_budget
         self._receipts: dict[str, ToolReceipt] = {}
         self._evidence: dict[str, Evidence] = {}
 
     @classmethod
     def from_receipts(
-        cls, receipts: Sequence[ToolReceipt], executed_tools_budget: int
+        cls,
+        receipts: Sequence[ToolReceipt],
+        executed_tools_budget: int,
+        runbook_searches_budget: int = 1,
     ) -> Self:
         """Rebuild a ledger from a prior dispatch's full receipt list.
 
@@ -125,7 +138,7 @@ class ReservationLedger:
         and a rebuilt ledger can never drift from the one that wrote those
         receipts in the first place.
         """
-        ledger = cls(executed_tools_budget)
+        ledger = cls(executed_tools_budget, runbook_searches_budget)
         for receipt in receipts:
             if receipt.receipt_id in ledger._receipts:
                 raise ValueError(
@@ -134,13 +147,31 @@ class ReservationLedger:
             ledger._receipts[receipt.receipt_id] = receipt
         return ledger
 
-    def slots_left(self) -> int:
-        spent = sum(
+    def _spent(self, *, runbook: bool) -> int:
+        return sum(
             1
             for receipt in self._receipts.values()
             if receipt.policy_result is PolicyResult.ALLOWED
+            and (receipt.tool is ToolName.SEARCH_RUNBOOKS) == runbook
         )
-        return self._budget - spent
+
+    def slots_left(self) -> int:
+        return self._budget - self._spent(runbook=False)
+
+    def runbook_slots_left(self) -> int:
+        return self._runbook_budget - self._spent(runbook=True)
+
+    def slots_left_for(self, tool: ToolName) -> int:
+        """The remaining count `authorize()` should be given for a proposal
+        naming `tool` -- `runbook_slots_left()` for `search_runbooks`,
+        `slots_left()` for every other tool. The one seam `dispatch()` and
+        this class's own `reserve()` share so the two can never price a
+        tool into different pools."""
+        return (
+            self.runbook_slots_left()
+            if tool is ToolName.SEARCH_RUNBOOKS
+            else self.slots_left()
+        )
 
     def reserve(
         self,
@@ -159,7 +190,7 @@ class ReservationLedger:
         should fail at the call site, not produce a receipt silently missing
         the data this parameter exists to capture.
         """
-        if self.slots_left() <= 0:
+        if self.slots_left_for(tool) <= 0:
             return None
         receipt = ToolReceipt(
             receipt_id=new_opaque_id(),
@@ -488,7 +519,11 @@ def _make_wrapper[ArgsT: BaseModel](
             update={"arguments": effective_arguments}
         )
         decision = authorize(
-            effective_proposal, scope, seen_fingerprints, budgets, ledger.slots_left()
+            effective_proposal,
+            scope,
+            seen_fingerprints,
+            budgets,
+            ledger.slots_left_for(tool),
         )
         # A fingerprint is marked seen whether the decision allows or denies
         # it, matching the retired loop's own order: a denial is not a reason
@@ -518,14 +553,15 @@ def _make_wrapper[ArgsT: BaseModel](
             arguments=effective_arguments,
         )
         if reserved is None:
-            # authorize() was fed ledger.slots_left() directly above, so the
-            # two can never disagree -- reaching here would mean that
+            # authorize() was fed ledger.slots_left_for(tool) directly above,
+            # and reserve() checks that same method against the same tool, so
+            # the two can never disagree -- reaching here would mean that
             # invariant broke, which is worth failing loudly for rather than
             # manufacturing a denial that would read as a real policy
             # decision in evaluation data.
             raise AssertionError(
                 "ledger reservation refused immediately after authorize() "
-                "used the same slots_left() value -- should be unreachable"
+                "used the same slots_left_for() value -- should be unreachable"
             )
 
         outcome = run_check(  # not caught -- see module docstring

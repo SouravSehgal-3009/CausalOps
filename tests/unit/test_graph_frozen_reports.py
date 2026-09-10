@@ -338,6 +338,119 @@ untouched by any of this. `assert_report_matches_frozen`'s `Versions(...)`
 literal moves from `prompt_version="7"`/`tool_registry_version="7"` to
 `prompt_version="8"`/`tool_registry_version="8"`, with `policy_version="4"`
 unchanged.
+
+**The dedicated runbook-search-budget edit moves every `final_context_digest`
+literal below an eighth time, and moves `assert_report_matches_frozen`'s
+`prompt_version` field, and nothing else.** `SYSTEM_TEXT` (`prompts.py`)
+gained one sentence telling the model that `search_runbooks` draws from its
+own separate budget, not the scarce diagnostic-check one --
+`Budgets.runbook_searches`, a new field, replacing the prior design where a
+`search_runbooks` call spent an `executed_tools` slot like every other tool
+(a real preregistered live comparison found 0/168 real uses either way; see
+README's "The Pinecone semantic-retrieval experiment"). `render_context`
+also gained one new rendered line, `"runbook searches left: N"`, on every
+call regardless of stage -- both changes are stage-independent, so every
+digest in this file moves again, the same "moves them all" pattern every
+`SYSTEM_TEXT` edit above has. `TOOL_REGISTRY_VERSION` is untouched: no tool
+schema changed, only server-side budget accounting invisible to the tool
+definitions themselves. `POLICY_VERSION` is untouched: `policy.py`'s
+`authorize()` itself has the same signature and logic as before -- the
+split lives entirely in `ReservationLedger` (`tool_wrappers.py`), which
+`POLICY_VERSION` does not cover. `assert_report_matches_frozen`'s
+`Versions(...)` literal moves from `prompt_version="8"` to
+`prompt_version="9"`, with `policy_version="4"`/`tool_registry_version="8"`
+unchanged.
+
+**The search-runbooks-first imperative edit moves every `final_context_
+digest` literal below a ninth time, and moves `assert_report_matches_
+frozen`'s `prompt_version` field, and nothing else.** `SYSTEM_TEXT`
+(`prompts.py`) gained two sentences instructing the model that its first
+proposal in an investigation must be one `search_runbooks` call, before any
+incident-scoped check -- a direct, imperative follow-up to the dedicated-
+budget edit above, tried after that change alone (and, separately, a
+weaker live model) both still measured 0/12 real uses; see README's "Two
+more angles on the same question." `system_text` is identical across
+every stage in every scenario here, so the new sentences shift every
+digest in this file again, the same "moves them all" pattern every
+`SYSTEM_TEXT` edit above has. No scenario below ever proposes
+`search_runbooks` (confirmed: no fixture script references it, same as the
+"runbook-guidance" edit far above), so ids, disposition, receipt shapes,
+evidence kinds, and event vocabulary are all unaffected -- only the digest
+and `prompt_version` moved. `TOOL_REGISTRY_VERSION`/`POLICY_VERSION` are
+untouched: nothing about the tool schemas or `policy.py`'s own logic
+changed, only rendered system prose. `assert_report_matches_frozen`'s
+`Versions(...)` literal moves from `prompt_version="9"` to
+`prompt_version="10"`, with `policy_version="4"`/`tool_registry_version="8"`
+unchanged.
+
+**The runbook-guidance-should-shape-investigation edit moves every
+`final_context_digest` literal below a tenth time, and moves
+`assert_report_matches_frozen`'s `prompt_version` field, and nothing
+else.** `SYSTEM_TEXT` (`prompts.py`) gained one more sentence: after citing
+retrieved guidance, let it inform which check comes next (an ordering,
+mechanism, or distinguishing signal it names) without letting it count as
+evidence for the verdict -- a live investigation found the model calling
+`search_runbooks` (now mandatory) but not otherwise changing its diagnostic
+behavior at all: real batches showed near-identical tool-call counts with
+or without the mandatory runbook call (2.79 vs 2.92 mean), i.e. it was
+citing guidance as a formality, never acting on it. This edit is the
+attempt to close that gap. `system_text` is identical across every stage in
+every scenario here, so the new sentence shifts every digest in this file
+again, the same "moves them all" pattern every `SYSTEM_TEXT` edit above
+has. No scenario below ever proposes `search_runbooks`, so ids,
+disposition, receipt shapes, evidence kinds, and event vocabulary are all
+unaffected -- only the digest and `prompt_version` moved.
+`TOOL_REGISTRY_VERSION`/`POLICY_VERSION` are untouched. `assert_report_
+matches_frozen`'s `Versions(...)` literal moves from `prompt_version="10"`
+to `prompt_version="11"`, with `policy_version="4"`/
+`tool_registry_version="8"` unchanged.
+
+**The runbook-search-need-not-be-first edit moves every `final_context_
+digest` literal below an eleventh time, and moves `assert_report_matches_
+frozen`'s `prompt_version` field, and nothing else.** `SYSTEM_TEXT`
+(`prompts.py`) dropped the "must be your first proposal, before any
+incident-scoped check" constraint from the mandatory `search_runbooks`
+instruction -- still exactly one call required per investigation, but the
+model now chooses the topic once it has gathered some real evidence,
+rather than guessing blind from the initial alert alone. Motivation: a
+live investigation showed the model picking a topic before any evidence
+existed, fetching guidance for the wrong half of a two-signal ambiguity
+(the passage written for exactly that ambiguity was never fetched) --
+plausible evidence that forcing the search first, before any evidence,
+starves the topic choice of the context it needs to be useful. `system_
+text` is identical across every stage in every scenario here, so the
+reworded sentence shifts every digest in this file again. No scenario
+below ever proposes `search_runbooks`, so ids, disposition, receipt
+shapes, evidence kinds, and event vocabulary are all unaffected -- only
+the digest and `prompt_version` moved. `TOOL_REGISTRY_VERSION`/
+`POLICY_VERSION` are untouched. `assert_report_matches_frozen`'s
+`Versions(...)` literal moves from `prompt_version="11"` to
+`prompt_version="12"`, with `policy_version="4"`/`tool_registry_version="8"`
+unchanged.
+
+**Reverted: the runbook-search-need-not-be-first edit above moves every
+`final_context_digest` literal below a twelfth time, back to their
+eleventh-move (`prompt_version="11"`) values exactly, and moves
+`prompt_version` again, and nothing else.** A real live batch testing that
+edit found it cost more than it plausibly gained: `search_runbooks` usage
+dropped from a reliable 12/12 (every batch since the "must be first"
+instruction was introduced) to 7/12 -- in 5 of 12 runs the model reached a
+stopping point without ever making the now-optionally-timed mandatory
+call. "Exactly once, whenever you choose" competed with the model's own
+judgment about when it was done; the hard "first, before anything else"
+framing was doing real compliance work the relaxed version gave up, for
+an unconfirmed relevance benefit (4/7 correct-and-grounded when it did
+search vs 1/5 when it didn't -- suggestive, but confounded by small,
+different populations, not evidence the later-timing theory helped).
+`SYSTEM_TEXT` reverts to its eleventh-move wording exactly (the "let it
+shape your investigation" sentence from that same move stays); since the
+reverted text is byte-identical to that earlier state, every digest below
+returns to its eleventh-move value, not a new one. `assert_report_matches_
+frozen`'s `Versions(...)` literal moves from `prompt_version="12"` to
+`prompt_version="13"` -- a new version number, not a reuse of `"11"`,
+since `PROMPT_VERSION` only ever moves forward and `"12"` already shipped
+and was measured against real data; `policy_version="4"`/
+`tool_registry_version="8"` unchanged.
 """
 
 from pathlib import Path
@@ -683,7 +796,7 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="8",
+        prompt_version="13",
         policy_version="4",
         tool_registry_version="8",
     )
@@ -720,7 +833,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "f78b1a4d91b7f6d71ac48639409fb32a5dd59759b84cf2c992a5b42d0f9bbb15"
+            "08a827c20bba7f7fd0bb7f0410d4e5c1e8209a18f68576440cbe57b90c6615da"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -796,7 +909,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "afb9f1018cbcda00e480920b32fb90a102e8f6ddcbb4c8d02d70a81ea86e00a1"
+            "db1fc829c8effe676175c880c15edec8fef69a1cb7420fc362bfdf7a58f03322"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -877,7 +990,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "e1d2c57f8a1177ee3ecb23641cead99ce9b9ad49a9ea4f4823133a3a83996a52"
+            "64ad987c7b309eca310575004a0c8f27d263b1768db20039405c9c577c609285"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -947,7 +1060,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "8a3f6d470aa18625eb879b40090d0d6948c9e451f3b99c9456fa9f69770ebb24"
+            "3f7d7531156eff2688a3f7afc07291fafcae0878057f21345aa2748e5a30b059"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -1004,7 +1117,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "eba5f8d616199dbfb8414efb63d6ae1ef1a25961a5a52f280cbd2bde146f153b"
+            "4d58020b9b3204799513d3e009b92014134cbd671aa10accca5e6b3fa180276c"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -1105,7 +1218,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "eba5f8d616199dbfb8414efb63d6ae1ef1a25961a5a52f280cbd2bde146f153b"
+            "4d58020b9b3204799513d3e009b92014134cbd671aa10accca5e6b3fa180276c"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

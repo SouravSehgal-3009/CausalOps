@@ -113,14 +113,15 @@ def test_a_missing_corpus_file_fails_loudly_at_construction() -> None:
 
 
 def test_the_checked_in_corpus_version_is_read_and_stringified() -> None:
-    """`runbook_corpus.json`'s own `corpus_version` key is `"1"`, a
-    string -- passed through `str()` (a no-op here) to match every other
-    "_version" field in this codebase (`SCHEMA_VERSION`, `prompt_version`,
-    ...), all of which are strings regardless of how small the underlying
-    number is."""
+    """`runbook_corpus.json`'s own `corpus_version` key is `"2"` (bumped
+    from `"1"` when 4 disambiguation passages were added), a string --
+    passed through `str()` (a no-op here) to match every other "_version"
+    field in this codebase (`SCHEMA_VERSION`, `prompt_version`, ...), all
+    of which are strings regardless of how small the underlying number
+    is."""
     index = RunbookIndex()
 
-    assert index.corpus_version == "1"
+    assert index.corpus_version == "2"
 
 
 def test_a_corpus_file_with_no_version_key_reports_none(tmp_path: Path) -> None:
