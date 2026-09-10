@@ -3,15 +3,18 @@
 ## Executive summary
 
 > CausalOps is a policy-governed agentic incident investigator that improved
-> diagnosis correctness from 3/12 without tools to 11/12 with three bounded
-> diagnostic checks, while holding citation validity at 12/12 and zero
-> failed-safe runs.
+> diagnosis correctness from 3/12 without tools to 8-9/12 with three bounded
+> diagnostic checks, holding grounded-citation correctness at 5/12 across
+> repeated real runs.
 
 That result is measured against a fixed, evaluator-hidden 12-incident
 synthetic corpus — a small sample from a local synthetic lab, not a
-production benchmark. See [`docs/RESULTS.md`](docs/RESULTS.md) for the
-full scorecard, every real live-model run this project has made, and what
-each number does and doesn't establish.
+production benchmark, and it's the current, real number under the
+currently-shipped prompt, not a historical best. See
+[`docs/RESULTS.md`](docs/RESULTS.md) for the full scorecard, every real
+live-model run this project has made — including where a later fix traded
+some diagnosis reliability for something else, honestly reported — and
+what each number does and doesn't establish.
 
 ```mermaid
 flowchart TD
@@ -352,8 +355,9 @@ project has run against the real live model, is documented in full —
 methodology, raw run IDs, and honest negative results included — in
 [`docs/RESULTS.md`](docs/RESULTS.md). Highlights:
 
-- **11/12 correct diagnoses**, zero `FAILED_SAFE`, at the recommended
-  `executed_tools=3` operating point — the headline result.
+- **8-9/12 correct diagnoses, 5/12 fully grounded**, at the recommended
+  `executed_tools=3` operating point, across two repeated real batches —
+  the current headline result.
 - **A real mechanical bug found and fixed via live evaluation**: 21 policy
   denials across 36 tool-enabled runs, traced to a schema/budget mismatch,
   eliminated to 0/36 after the fix.
@@ -365,8 +369,8 @@ methodology, raw run IDs, and honest negative results included — in
 - **A four-way root-cause investigation into why the model never used its
   retrieval tool**: backend quality, budget pricing, and model capability
   were each tried and ruled out; a direct imperative prompt instruction
-  fixed it, confirmed at two evidence-budget points, with no cost to
-  diagnosis correctness.
+  fixed usage (0/12 → 12/12) — but not for free: `FAILED_SAFE` at et=3 rose
+  from 0/12 to 2/12 alongside it, reported as measured, not smoothed over.
 
 ## Development
 

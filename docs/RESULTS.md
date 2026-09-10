@@ -5,36 +5,39 @@ projection or simulation. Run IDs are given so any row can be independently
 checked against `results/evaluations/<id>/`. See the root
 [`README.md`](../README.md) for architecture and setup.
 
-## Headline: evidence-budget curve (FTS5, Claude Sonnet 5)
+## Headline: evidence-budget curve (FTS5, Claude Sonnet 5, current prompt)
 
 12-incident corpus, `causalops-evaluate --executed-tools <N>`, one no-tool
-baseline + one tool-enabled run per incident.
+baseline + one tool-enabled run per incident. Current prompt = includes the
+mandatory runbook-first instruction (see below) — these are the real,
+current numbers, not a historical peak from before that instruction
+existed.
 
-| et | Baseline diagnosis | Tool-enabled diagnosis | Correct & grounded | Citation valid | `FAILED_SAFE` |
-|---|---:|---:|---:|---:|---:|
-| 2 | 3/12 | 6/12 | 3/12 | — | 0 |
-| 3 | 3/12 | **11/12** | 5/12 | 12/12 | 0 |
-| 4 | 3/12 | 7/12 | 6/12 | 7/12 | 5 |
+| et | Baseline diagnosis | Tool-enabled diagnosis | Correct & grounded | `FAILED_SAFE` | Run ID |
+|---|---:|---:|---:|---:|---|
+| 2 | — | not yet re-verified under the current prompt | — | — | — |
+| 3 | 3/12 | 8/12, 9/12 (two batches) | 5/12 (both) | 2/12 (both) | `4e2f8ec4...`, `40cb6f69...` |
+| 4 | 3/12 | 7/12 | 3/12 | 5/12 | `20f432b0...` |
 
-- **et=3 is the recommended operating point** — best diagnosis rate, zero
-  `FAILED_SAFE`.
-- et=4's 5 `FAILED_SAFE` runs all trace to one mechanism: a single
-  investigation-wide repair credit gets consumed by an early structured-
-  output violation, leaving none for a later one. Safe stops, not wrong
-  diagnoses — still an open item, not yet fixed.
-- Diagnosis correctness and grounding are distinct scores: et=3 hit 11/12
-  diagnoses but only 5/12 were also fully grounded in required evidence.
-- A real bug was found and fixed via these runs, not code review: `query_logs`'s
-  `row_limit` schema didn't state the real 40-row policy limit, so the
-  model's default guess (50) drew a policy denial in 21 of 36 tool-enabled
-  runs, each one burning the run's one spare repair credit. Fix: state the
-  real limit in the schema description. Result: 21/36 denials → 0/36.
+- **et=3 is still the recommended operating point** — best diagnosis rate
+  of the two, though `FAILED_SAFE` is no longer zero there (see below).
+- **A real, honest tradeoff from the runbook-first fix**: `FAILED_SAFE`
+  at et=3 went from 0/12 (before that instruction existed) to 2/12 in
+  *both* new batches — plausibly the extra mandatory turn tightens the
+  model-call headroom the same `REPAIR_EXHAUSTED` mechanism below already
+  depends on. Not yet root-caused further; reported as measured, not
+  explained away.
+- et=4's `FAILED_SAFE` runs trace to one mechanism: a single investigation-
+  wide repair credit gets consumed by an early structured-output
+  violation, leaving none for a later one. Safe stops, not wrong
+  diagnoses — still open, not yet fixed.
+- A real bug was found and fixed via earlier runs, not code review:
+  `query_logs`'s `row_limit` schema didn't state the real 40-row policy
+  limit, so the model's default guess (50) drew a policy denial in 21 of
+  36 tool-enabled runs. Fix: state the real limit in the schema
+  description. Result: 21/36 denials → 0/36.
 - 12 incidents = 4 families × 3 seeds (near-replicates); effective sample
   size is closer to 4 than 12 — read per-point percentages accordingly.
-- `ambiguous_telemetry` (correct answer: abstain) was answered correctly by
-  the no-tool baseline every time (18/18 across all early batches) and
-  incorrectly by the tool-enabled arm every time in those same batches —
-  since fixed (see below).
 
 ## Retrieval backend comparison: FTS5 vs Pinecone
 
@@ -81,14 +84,16 @@ tried and ruled out, before one fix worked:
 - Telling the model directly what to do — not just informing it a tool was
   free or available — is what worked. An informational prompt sentence and
   a directive one are not interchangeable here.
-- No cost to correctness: diagnosis/grounding at et=3 with the instruction
-  (8/12, 5/12) match or slightly beat the pre-instruction baseline
-  (7/12, 5/12).
+- **Not a free fix**: grounding held steady (5/12, matching the
+  pre-instruction baseline), but `FAILED_SAFE` at et=3 rose from 0/12 to
+  2/12 across two post-fix batches — see the headline table above. Usage
+  went from 0 to 12/12; that came with a measured, real cost elsewhere,
+  not a pure win.
 - `Budgets.runbook_searches` (a dedicated pool, separate from
   `executed_tools`) stays in place regardless — the more correct design.
 
 ## Cost
 
-~$30 in real Anthropic spend across every batch on this page, application-
+~$34 in real Anthropic spend across every batch on this page, application-
 wide, tracked in `cost_ledger` and reserved/settled before every request
 against `LIVE_EVALUATION_MAX_USD`.
