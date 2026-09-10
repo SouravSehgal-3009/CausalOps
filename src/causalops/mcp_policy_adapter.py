@@ -44,7 +44,7 @@ class McpDispatchApproval(BaseModel):
 
 
 # Reviewed and recorded per docs/mcp-approval/POLICY_APPROVAL.md's 5
-# conditions, all evidenced live on causalops-test (asia-south1-c) against
+# conditions, all evidenced live on the project's dedicated GCE VM against
 # real backends (Prometheus, log files, changes, topology, runbook search)
 # -- see docs/mcp-approval/VALIDATION.md's "Real local-stdio MCP transport"
 # entry for the full record: manifest/protocol pin verified over a real

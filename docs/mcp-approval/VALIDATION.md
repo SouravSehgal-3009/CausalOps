@@ -1,7 +1,7 @@
 # Phase 3 restricted-environment validation record
 
-Dedicated VM (`causalops-test`, asia-south1-c, project
-`project-7b68a103-d482-4418-a35`), same VM as `infra/phase2/VALIDATION.md`.
+Dedicated GCE VM (same VM referenced throughout this project's other
+validation records, project details omitted here).
 Two entries: the initial local slice (2026-09-09, on top of Phase 2's
 already-deployed control plane and lab), and the real MCP transport built
 and live-validated later the same day (below).
