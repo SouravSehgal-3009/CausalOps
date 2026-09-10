@@ -339,7 +339,7 @@ directly-constructed test fixtures.
 
 ## Demo video
 
-<!-- Add the recorded walkthrough link here once available. -->
+**[Watch the walkthrough](https://youtu.be/iDr9oj04_Ec)**
 
 A recorded walkthrough of the hosted (Cloud Run) deployment — sign-in,
 creating an investigation across all four incident families, the
