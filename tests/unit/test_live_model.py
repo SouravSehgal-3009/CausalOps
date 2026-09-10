@@ -560,11 +560,18 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # first proposal in an investigation must be one `search_runbooks`
     # call, before any incident-scoped check -- the imperative follow-up
     # tried after the dedicated-budget sentence alone still measured 0/12
-    # real uses (README's "Two more angles on the same question").
-    assert len(total) == 3_059
+    # real uses (README's "Two more angles on the same question"). It moved
+    # an eighth time, from 3,059 to 3,330: `SYSTEM_TEXT` gained one more
+    # sentence telling the model to let cited runbook guidance shape which
+    # check it proposes next, without counting as evidence for the verdict
+    # -- a live investigation found the mandatory runbook call changed
+    # nothing else about the model's diagnostic behavior (near-identical
+    # tool-call counts with or without it), so this is the attempt to close
+    # that gap.
+    assert len(total) == 3_330
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 3_059
+    assert estimate_input_tokens(total) == 3_330
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
