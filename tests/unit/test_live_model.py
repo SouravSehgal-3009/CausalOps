@@ -555,11 +555,16 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # spends from its own separate, smaller budget rather than the scarce
     # diagnostic-check one, and `render_context` gained one new rendered
     # status line, `"runbook searches left: N"`, present on every call
-    # including this one.
-    assert len(total) == 2_629
+    # including this one. It moved a seventh time, from 2,629 to 3,059:
+    # `SYSTEM_TEXT` gained two sentences instructing the model that its
+    # first proposal in an investigation must be one `search_runbooks`
+    # call, before any incident-scoped check -- the imperative follow-up
+    # tried after the dedicated-budget sentence alone still measured 0/12
+    # real uses (README's "Two more angles on the same question").
+    assert len(total) == 3_059
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 2_629
+    assert estimate_input_tokens(total) == 3_059
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(

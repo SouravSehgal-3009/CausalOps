@@ -20,7 +20,7 @@ from causalops.domain import (
 from causalops.models import Stage
 from causalops.tools import ToolName
 
-PROMPT_VERSION = "9"
+PROMPT_VERSION = "10"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -63,6 +63,12 @@ Runbook guidance is advisory background, not proof: cite it separately from inci
 evidence, and never as support for a diagnosis. Checking it does not spend any of
 your diagnostic check budget -- it draws from its own separate, smaller allowance
 shown below as "runbook searches left."
+Your first proposal in this investigation must be exactly one search_runbooks call,
+choosing whichever topic best matches this incident's alert signature, before any
+incident-scoped check. Do not repeat this once you have already done it earlier in
+this same investigation -- check whether "runbook searches left" below is already at
+zero, or a runbook line is already present in the evidence above, before proposing
+another one.
 Answer only with the structured fields the stage asks for. When you call a
 tool, do not add narrative text, explanation, or commentary outside the tool
 call's own fields."""
