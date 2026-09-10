@@ -7,3 +7,8 @@ output "artifact_bucket_name" {
   value       = google_storage_bucket.replay_artifacts.name
   description = "Private, versioned bucket for write-once investigation artifacts."
 }
+
+output "firestore_database_name" {
+  value       = google_firestore_database.default.name
+  description = "Firestore Native database backing FirestoreCheckpointSaver/FirestoreReplayControlPlane."
+}
