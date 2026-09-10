@@ -573,11 +573,17 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # one call required, but the topic is now chosen once real evidence
     # exists, not guessed blind from the alert alone (a live investigation
     # showed the blind-first choice fetching guidance for the wrong half
-    # of a two-signal ambiguity).
-    assert len(total) == 3_430
+    # of a two-signal ambiguity). Reverted, back to 3,330: a real live
+    # batch found that edit cost more than it plausibly gained --
+    # `search_runbooks` usage dropped from a reliable 12/12 to 7/12, since
+    # "exactly once, whenever you choose" competed with the model's own
+    # judgment about when it was done. `SYSTEM_TEXT` reverts to its
+    # pre-that-edit wording exactly, so this figure returns to its earlier
+    # value rather than moving to a new one.
+    assert len(total) == 3_330
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 3_430
+    assert estimate_input_tokens(total) == 3_330
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
