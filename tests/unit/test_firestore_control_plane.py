@@ -364,6 +364,7 @@ def test_retry_running_exhausts_after_max_attempts(tmp_path: Path) -> None:
     assert final.status is InvestigationStatus.FAILED_SAFE
 
 
+@requires_posix_no_follow_reads
 def test_finalize_then_report_round_trips_the_written_file(tmp_path: Path) -> None:
     plane, _ = _plane(tmp_path)
     created = plane.create("owner@example.com", _request(), "key-1")
@@ -398,6 +399,7 @@ def test_report_refuses_before_finalization(tmp_path: Path) -> None:
         plane.report("owner@example.com", created.investigation_id)
 
 
+@requires_posix_no_follow_reads
 def test_claim_delivery_then_mark_delivered(tmp_path: Path) -> None:
     plane, _ = _plane(tmp_path)
     created = plane.create("owner@example.com", _request(), "key-1")
@@ -422,6 +424,7 @@ def test_claim_delivery_then_mark_delivered(tmp_path: Path) -> None:
         plane.mark_delivered(created.investigation_id, delivery.claim_token)
 
 
+@requires_posix_no_follow_reads
 def test_release_delivery_returns_it_to_the_outbox(tmp_path: Path) -> None:
     plane, _ = _plane(tmp_path)
     created = plane.create("owner@example.com", _request(), "key-1")
@@ -443,6 +446,7 @@ def test_release_delivery_returns_it_to_the_outbox(tmp_path: Path) -> None:
     assert again.investigation_id == created.investigation_id
 
 
+@requires_posix_no_follow_reads
 def test_retry_delivery_exhausts_after_max_attempts(tmp_path: Path) -> None:
     plane, _ = _plane(tmp_path, max_delivery_attempts=1)
     created = plane.create("owner@example.com", _request(), "key-1")
@@ -569,6 +573,7 @@ def test_finalize_with_a_forged_report_path_is_refused(tmp_path: Path) -> None:
         )
 
 
+@requires_posix_no_follow_reads
 def test_corrupt_report_content_is_detected_on_read(tmp_path: Path) -> None:
     """Simulates storage corruption directly (no code path in this class
     can otherwise produce it): a mismatched `report_sha256` must be
