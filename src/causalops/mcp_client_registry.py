@@ -39,6 +39,7 @@ from causalops.domain import (
     EvidenceKind,
     IncidentScope,
     ReasonCode,
+    RunbookCheckOutcome,
     StoredIncident,
     ToolOutcome,
 )
@@ -64,10 +65,11 @@ from causalops.models import (
     ReplayToolCallingModel,
     ToolCallingModel,
 )
+from causalops.retrieval_experiment import rag_experiment_enabled
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import RunPaths
 from causalops.tool_wrappers import DispatchResult, ToolWrapper, dispatch_registry
-from causalops.tools import ToolArguments, ToolName
+from causalops.tools import SearchRunbooksArguments, ToolArguments, ToolName
 
 REPLAY_MODEL_NAME = "replay"
 
@@ -154,15 +156,46 @@ def _forwarding_run_check(
 
 
 def build_mcp_tool_registry(
-    child: McpChildProcess, budgets: Budgets
+    child: McpChildProcess,
+    budgets: Budgets,
+    environment: Mapping[str, str] | None = None,
 ) -> Mapping[ToolName, ToolWrapper]:
     """Real reuse of `dispatch_registry` -- no new dispatch logic here. The 4
     observability tools forward over the real MCP child; `search_runbooks`
-    is answered locally (a fresh `RunbookIndex()` per call, matching
-    `live_setup._build_tool_registry`'s own "cheap to rebuild" reasoning),
-    never routed through MCP -- see this module's own docstring."""
+    is answered locally, never routed through MCP -- see this module's own
+    docstring.
+
+    `search_runbooks`'s backend selection mirrors
+    `live_setup._build_tool_registry` exactly: FTS5 (a fresh `RunbookIndex()`
+    per call, "cheap to rebuild") unless `RAG_EXPERIMENT_ENABLED` is set in
+    `environment`, in which case the Pinecone backend is used instead. The
+    import of `causalops.pinecone_runbooks` stays local to that branch, for
+    the same import-time-isolation reason `live_setup.py`'s does.
+    """
+    env = environment if environment is not None else os.environ
     timeout_seconds = float(budgets.tool_timeout_seconds)
-    runbook_index = RunbookIndex()
+    run_search: Callable[[SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome]
+    if rag_experiment_enabled(env):
+        from causalops.pinecone_runbooks import (
+            PineconeRunbookIndex,
+            run_runbook_search_pinecone,
+        )
+
+        pinecone_index = PineconeRunbookIndex(environment=env)
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search_pinecone(arguments, pinecone_index)
+
+    else:
+        runbook_index = RunbookIndex()
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search(arguments, runbook_index)
+
     return dispatch_registry(
         run_metric=_forwarding_run_check(ToolName.QUERY_METRIC, child, timeout_seconds),
         run_logs=_forwarding_run_check(ToolName.QUERY_LOGS, child, timeout_seconds),
@@ -172,9 +205,7 @@ def build_mcp_tool_registry(
         run_topology=_forwarding_run_check(
             ToolName.GET_TOPOLOGY, child, timeout_seconds
         ),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
-        ),
+        run_search=run_search,
     )
 
 
@@ -262,7 +293,7 @@ def build_claude_model_and_mcp_registry(
         )
     child = McpChildProcess()
     child.start(paths.root, incident.scope, budgets)
-    registry = build_mcp_tool_registry(child, budgets)
+    registry = build_mcp_tool_registry(child, budgets, process_environment)
     ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
     ensure_cost_ledger_table(ledger_conn)
     credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
