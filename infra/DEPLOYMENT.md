@@ -148,8 +148,14 @@ Open `http://localhost:8000` in a browser, sign in, create a
 `configuration_change` investigation, confirm it reaches `COMPLETED` — see
 [`../docs/CLOUD_RUN_DEMO.md`](../docs/CLOUD_RUN_DEMO.md) for the full
 owner-facing walkthrough (all four families, the pause/approve/reject
-flow, talking points). Once confirmed, Ctrl-C it and run it for real via
-systemd so it survives crashes and reboots:
+flow, talking points). This runs replay-only by default — every
+investigation plays back a scripted fixture, real and safe with no
+credential or spend needed. `.env.vm.example`'s `CAUSALOPS_HOSTED_LIVE_MODEL`
+(commented out) is the opt-in for a genuinely live deployment instead —
+real billed Claude requests per investigation, only sensible when
+`CAUSALOPS_ALLOWED_OWNERS` is a tight, trusted allowlist (see that
+variable's own comment for the full tradeoff). Once confirmed, Ctrl-C it
+and run it for real via systemd so it survives crashes and reboots:
 
 ```bash
 cp infra/docker/causalops-api.service.example /tmp/causalops-api.service

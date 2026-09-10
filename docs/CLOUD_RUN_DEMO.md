@@ -15,13 +15,26 @@ output cloud_run_api_url`.
 
 ## What's different about this surface
 
-The hosted API is **replay-only** — no live model, incident, or tool
-selection is ever exposed here, by design (a spec-driven safety boundary,
-not a missing feature). Every investigation replays a real, fixed fixture
-against the real synthetic lab; the point of this surface is to demonstrate
-the owner-facing product experience (sign-in, create, poll, approve/reject,
-retrieve a report) without exposing a billed live-model surface to the
-public internet.
+The hosted API is **replay-only by default** — no live model, incident, or
+tool selection is ever exposed to a *client*, by design (a spec-driven
+safety boundary, not a missing feature): `CreateInvestigationRequest` has
+no model field, on any deployment, ever. The *operator* can still opt the
+whole deployment into a genuinely live worker
+(`CAUSALOPS_HOSTED_LIVE_MODEL`, `.env.vm.example`) — every investigation
+then gets a real, billed Claude request instead of a scripted fixture. That
+toggle is deliberately not client-facing, and is only safe on a
+deployment whose `CAUSALOPS_ALLOWED_OWNERS` is a tight, trusted allowlist
+(every signed-in owner could otherwise trigger real spend with no
+per-owner cap). The deployment used for the recorded walkthrough runs
+live, for exactly that reason: a single-owner allowlist makes it safe, and
+it shows the real thing instead of a script.
+
+If you deploy replay-only (the default, and the right choice for a wider
+allowlist), every investigation replays a real, fixed fixture against the
+real synthetic lab instead — same graph, same policy layer, same report
+shape, just no live model call. Either way this surface demonstrates the
+owner-facing product experience: sign-in, create, poll,
+approve/reject, retrieve a report.
 
 Sign-in is a real Google ID token verified server-side against an explicit
 per-owner allowlist — not "anyone with the link." An account outside the
@@ -31,15 +44,21 @@ since it's easy to mistake for a bug rather than the intended behavior.
 ## Walkthrough
 
 1. **Sign in.** The dashboard shows "Sign in with an approved Google
-   account." Talking point: this replay-only hosted API never exposes live
-   model/incident/tool selection to a browser, by design.
+   account." Talking point: this hosted API never exposes live
+   model/incident/tool selection to a *browser*, by design — whether the
+   deployment behind it runs replay or live is an operator-only choice, not
+   something any client request can select.
 
 2. **Create an investigation.** All 4 scenario families are real, distinct
    faults against the real synthetic lab (gateway/orders/inventory
    containers on the worker machine) — pick `ambiguous_telemetry` to show
-   the pause/decide flow, any other family for a clean `DIAGNOSED` run.
-   Each family has its own real fixture matched to its actual root cause
-   (`live_setup.FAMILY_REPLAY_FIXTURES`).
+   the pause/decide flow, any other family for a clean `DIAGNOSED` run. On
+   a replay deployment, each family has its own real fixture matched to its
+   actual root cause (`live_setup.FAMILY_REPLAY_FIXTURES`); on a live
+   deployment (`CAUSALOPS_HOSTED_LIVE_MODEL`), the model does real
+   diagnostic reasoning instead — expect real per-call latency (tens of
+   seconds, not instant) and small run-to-run variation in exactly which
+   checks it proposes.
 
 3. **Poll status.** The investigation moves `QUEUED` → `RUNNING`. Talking
    point: the VM-hosted worker picked this up from Firestore — the exact
@@ -52,8 +71,10 @@ since it's easy to mistake for a bug rather than the intended behavior.
    evidence-grounded, not autonomous-and-unaccountable. Look at the events
    timeline before deciding. `ambiguous_telemetry`'s real fault always
    produces two conflicting error signals, so this pause is genuine, not a
-   staged demo trick. The other 3 families resolve straight to `COMPLETED`
-   — that's correct, not a bug.
+   staged demo trick — true on both a replay and a live deployment, though
+   on live it's the model's own real evidence-gathering reaching that
+   conclusion, not a scripted narrative reproducing it. The other 3
+   families resolve straight to `COMPLETED` — that's correct, not a bug.
 
 5. **Approve or reject.** Either is a fine demo path — approving resumes
    the graph to a finalized report; rejecting exercises the safe-refusal
@@ -77,3 +98,8 @@ since it's easy to mistake for a bug rather than the intended behavior.
   failing request.
 - Cloud Run logs (if deployed): `gcloud run services logs read
   causalops-api --region <region> --limit 50`.
+- On a live deployment specifically: confirm `ANTHROPIC_API_KEY` is set in
+  the worker's `.env.vm` and that `LIVE_EVALUATION_MAX_USD` leaves enough
+  headroom for at least one more investigation — a stalled `RUNNING`
+  investigation that never progresses is the usual symptom of either being
+  missing or exhausted.

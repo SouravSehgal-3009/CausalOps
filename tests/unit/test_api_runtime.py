@@ -30,7 +30,7 @@ from causalops.api_runtime import (
     WorkerClaim,
 )
 from causalops.approvals import ensure_decisions_table, record_decision_before_resume
-from causalops.doctor import find_project_root
+from causalops.doctor import ProjectPaths, find_project_root
 from causalops.domain import utc_now
 from causalops.gcs_artifacts import ARTIFACT_NAMES
 from causalops.live_setup import HostedReplayRuntimeWiring
@@ -1164,6 +1164,91 @@ def test_app_factory_default_omits_the_replay_fixture_override(
     api_runtime.app()
 
     assert built["called_with_kwargs"] == {}
+
+
+def test_app_factory_selects_live_wiring_when_hosted_live_model_is_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`CAUSALOPS_HOSTED_LIVE_MODEL` is an operator-only deployment toggle,
+    read once at worker startup -- never a client-facing choice
+    (`CreateInvestigationRequest` gains no field for this). Proves the flag
+    actually reaches wiring selection, and that the live wiring is
+    constructed with the same `checkpoints_db` path the sqlite control-plane
+    branch already uses for its own checkpointer, without needing a real
+    graph run or a real `ANTHROPIC_API_KEY`."""
+
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    built: dict[str, object] = {}
+
+    class FakeMcpBackedLiveRuntimeWiring:
+        def __init__(self, db_path: Path) -> None:
+            built["db_path"] = db_path
+
+    class FakeMcpBackedReplayRuntimeWiring:
+        def __init__(self, **kwargs: object) -> None:
+            built["replay_wiring_constructed"] = True
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CAUSALOPS_PROJECT_ROOT", str(find_project_root(Path.cwd())))
+    monkeypatch.setenv("CAUSALOPS_HOSTED_LIVE_MODEL", "true")
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(
+        api_runtime, "McpBackedLiveRuntimeWiring", FakeMcpBackedLiveRuntimeWiring
+    )
+    monkeypatch.setattr(
+        api_runtime, "McpBackedReplayRuntimeWiring", FakeMcpBackedReplayRuntimeWiring
+    )
+
+    api_runtime.app()
+
+    project_root = find_project_root(Path.cwd())
+    assert project_root is not None
+    assert built["db_path"] == ProjectPaths(root=project_root).checkpoints_db
+    assert "replay_wiring_constructed" not in built
+
+
+def test_app_factory_default_never_selects_live_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent `CAUSALOPS_HOSTED_LIVE_MODEL`, every existing deployment keeps
+    its current replay-only behavior unchanged -- the live wiring class is
+    never even constructed."""
+
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    built: dict[str, object] = {}
+
+    class FakeMcpBackedLiveRuntimeWiring:
+        def __init__(self, db_path: Path) -> None:
+            built["live_wiring_constructed"] = True
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.delenv("CAUSALOPS_HOSTED_LIVE_MODEL", raising=False)
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(
+        api_runtime, "McpBackedLiveRuntimeWiring", FakeMcpBackedLiveRuntimeWiring
+    )
+
+    api_runtime.app()
+
+    assert "live_wiring_constructed" not in built
 
 
 def test_app_factory_disables_the_background_worker_when_requested(
