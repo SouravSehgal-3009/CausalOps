@@ -206,15 +206,20 @@ machine (it will — they share the same Firestore database).
    `start` — a real restart, do this from outside the VM if you're running
    commands from inside it).
 2. **OAuth client type** — see Step 4. This is the one to read twice.
-3. **Don't run the docker-marked integration tests
-   (`pytest tests/integration`) while `causalops-api` is running on the
-   same machine.** The background worker polls every 0.25s and reconciles
-   any scenario marker with no matching Firestore job — correct for
-   cleaning up genuinely orphaned state, but these tests call
-   `scenario_control.start_scenario()` directly, bypassing Firestore
-   entirely, so the worker sees their marker as orphaned and releases it
-   mid-test. `sudo systemctl stop causalops-api` first, run the tests, then
-   start it again.
+3. **Don't run anything that calls `scenario_control.start_scenario()`
+   directly on the local lab (the docker-marked integration tests, `causalops
+   scenario start`, `causalops-evaluate`) while `causalops-api` is running
+   on the same machine.** The background worker polls every 0.25s and
+   reconciles any scenario marker with no matching Firestore job — correct
+   for cleaning up genuinely orphaned state, but all of these bypass
+   Firestore entirely, so the worker sees the marker as orphaned and
+   releases it mid-run. The observed symptom is not an obvious "marker
+   released" error: `start_scenario`'s own fault-injection phase reads that
+   same marker on every request, so losing it mid-batch surfaces as `FAIL
+   FAULT_NOT_OBSERVED` (or, in a `causalops-evaluate` run, an incident that
+   silently investigates the wrong/no fault) — confusing unless you know to
+   suspect the worker first. `sudo systemctl stop causalops-api` first, run
+   the local work, then start it again.
 4. **The synthetic lab isn't designed for indefinite uptime.** After many
    scenario cycles, fault injection can stop reliably producing a failing
    request (`LabError: FAULT_NOT_OBSERVED`). Fix: `docker compose -f

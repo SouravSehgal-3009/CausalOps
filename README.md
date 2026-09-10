@@ -623,6 +623,60 @@ exactly why `correct_and_grounded` is `0/12` there.
 These two v8 batches cost **$2.80** in real spend ($1.26 at et=3, $1.54 at
 et=4).
 
+### The Pinecone semantic-retrieval experiment
+
+`infra/phase4/PREREGISTRATION.md`'s "Fixed retrieval comparison" set the bar
+before any Pinecone code existed: select Pinecone over FTS5 only with
+**at least 3/12 actual retrieval uses, no safety regression, and
+non-inferior correct-and-grounded results** against a matched FTS5 arm over
+the same corpus, budgets, and model identity. `search_runbooks` had never
+been called once across 120 real records with FTS5 as the only wired
+backend (see "Measured lessons" below) — a real, stated risk going in: if
+that held with Pinecone wired too, the experiment would fail on usage
+alone, independent of retrieval quality.
+
+The engineering was built for real: a Pinecone serverless index
+(`multilingual-e5-large` hosted embedding inference, no second API key),
+`pinecone_runbooks.py` mirroring `runbooks.py`'s exact interface, gated
+behind `RAG_EXPERIMENT_ENABLED` in both tool-registry composition roots
+(`live_setup._build_tool_registry` and
+`mcp_client_registry.build_mcp_tool_registry` — the real MCP transport
+`causalops-evaluate` runs on), proven to fail closed without
+`PINECONE_API_KEY` before any network call, and live-verified against the
+real provisioned index for every `RunbookTopic` before any evaluation run.
+
+**The preregistered comparison then ran for real** — two `causalops-evaluate
+--executed-tools 3` invocations over the same 12-incident corpus, one per
+arm, real billed Claude requests:
+
+| Arm | Run ID | `search_runbooks` used | `correct_and_grounded` |
+| --- | --- | --- | --- |
+| FTS5 (`RAG_EXPERIMENT_ENABLED=false`) | `48225f19a9ea452abb8bb6a51c5fa3a2` | 0/12 | 5/12 |
+| Pinecone (`RAG_EXPERIMENT_ENABLED=true`) | `fabad365a29c48b7ab77a22d7731f4ca` | 0/12 | 4/12 |
+
+Zero policy denials and zero `REPAIR_EXHAUSTED`-or-worse failures in the
+Pinecone arm; `control.denied`/`control.out_of_scope` were 0/12 in both
+arms. **Pinecone is not selected: `pinecone_used_count` is 0/12, short of
+the preregistered 3/12 floor.** The model never called `search_runbooks`
+in either arm — the same behavior FTS5 alone already showed, now confirmed
+with a real, working semantic backend genuinely available to call. This is
+an honest negative result against the exact bar set in advance, not a
+build defect: the retrieval backend works (see the topic-by-topic live
+verification above); the model simply never reaches for it, in either
+retrieval mode, at this evidence-budget point. FTS5 remains the only
+retrieval path in production use.
+
+One scoring-path note for a reader comparing this to the Qwen candidate
+track above: `candidate_evaluation.py`'s `RetrievalComparisonRecord` and
+`causalops-candidate-assess --retrieval-comparison` implement this same
+preregistered rule, but against `CandidateEvaluationRecord`'s Qwen-specific
+shape (`model_name: Literal["qwen3.5:4b"]`, Ollama image/manifest digests)
+— built for the private-VM Qwen track the preregistration document also
+covers, not for `causalops-evaluate`'s Claude-shaped `EvaluationRecord`.
+The comparison above applies the same selection rule directly to the two
+real `EvaluationRecord` batches instead of forcing them through a schema
+built for a different model identity.
+
 ## Measured lessons
 
 - **Tool schema descriptions materially affect agent behavior.** The
@@ -642,13 +696,16 @@ et=4).
   5/12 correct-and-grounded — see "The v8 validation run" for what the
   other 6 were missing.
 - **Retrieval (`search_runbooks`) remained unused across every real batch
-  this project has ever run** — 72 tool-enabled records before v8 (see
-  "Paired live evaluation" above) plus both v8 batches above, confirmed
-  directly: `retrieval_mode` is `disabled` in all 48 v8 records, and no
-  run's receipts include a `search_runbooks` call. Pinecone was scoped as a
-  later, opt-in semantic-retrieval experiment but never implemented or
-  wired into the codebase — retrieval had no measured usage in any real
-  batch, so there was no basis to justify building it.
+  this project has ever run, including with a real, working Pinecone
+  backend genuinely available to call.** 72 tool-enabled records before v8
+  (see "Paired live evaluation" above), both v8 batches, and both arms of
+  the preregistered Pinecone comparison (see "The Pinecone
+  semantic-retrieval experiment" above) — 168 tool-enabled records total,
+  `retrieval_mode` `disabled` in every one. This was tested twice, not
+  assumed once: first with FTS5 as the only backend, then again with a
+  real Pinecone index live-verified to return good results per topic —
+  same outcome both times, so the finding is about model behavior, not
+  backend quality or backend absence.
 
 ## Development
 
