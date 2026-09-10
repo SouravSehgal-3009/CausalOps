@@ -454,8 +454,9 @@ def _has_visible_content(content: object) -> bool:
     function rejected every list-typed response outright, which would also
     have refused a genuine turn carrying only `tool_use`/`thinking` blocks
     -- the ordinary shape once extended thinking is on
-    (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}`
-    unconditionally) -- burning the run's one repair slot on a wholly valid
+    (`_build_chat_anthropic` sets `thinking={"type": "adaptive"}` for every
+    model that supports it, `pricing.supports_adaptive_thinking`) --
+    burning the run's one repair slot on a wholly valid
     turn; fixed by allow-listing the three
     real provider block types explicitly instead of rejecting every list.
     """
@@ -501,6 +502,15 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     project leaves all three at the provider's own default, and Sonnet 5
     rejects all three outright once `thinking` is on.
 
+    Both kwargs are omitted entirely, not passed as `None`, when
+    `pricing.supports_adaptive_thinking` is `False`: a real live request
+    against Claude Haiku 4.5 with `thinking={"type": "adaptive"}` set was
+    refused outright (`400 invalid_request_error: adaptive thinking is not
+    supported on this model`), confirmed directly against the real API.
+    `CAUSALOPS_LIVE_MODEL=haiku` (`resolve_live_model_pricing`) is the only
+    way this branch is reached today; `CLAUDE_HAIKU_4_5_PRICING` is the one
+    `PricingSnapshot` with `supports_adaptive_thinking=False`.
+
     Keyword-only aliases (`model_name`/`max_tokens_to_sample`/`effort`),
     not the plain field names (`model`/`max_tokens`/`reasoning_effort`) a
     reader would expect from `ChatAnthropic.model_fields`: pydantic's
@@ -521,14 +531,18 @@ def _build_chat_anthropic(pricing: PricingSnapshot) -> ChatAnthropic:
     installed package: `is_required() == False`). Behaviourally inert;
     here to satisfy `mypy src lab`, not to change the default.
     """
+    thinking_kwargs: dict[str, Any] = (
+        {"thinking": {"type": "adaptive"}, "effort": "medium"}
+        if pricing.supports_adaptive_thinking
+        else {}
+    )
     return ChatAnthropic(
         model_name=pricing.model_name,
         max_tokens_to_sample=MAX_OUTPUT_TOKENS,
         max_retries=0,
-        thinking={"type": "adaptive"},
-        effort="medium",
         timeout=MAX_REQUEST_SECONDS,
         stop=None,
+        **thinking_kwargs,
     )
 
 

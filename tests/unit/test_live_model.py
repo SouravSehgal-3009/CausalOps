@@ -1464,6 +1464,40 @@ def test_build_chat_anthropic_pins_the_four_bounded_construction_choices() -> No
     assert client.model == CHEAP_PRICING.model_name
 
 
+def test_build_chat_anthropic_sets_adaptive_thinking_when_the_model_supports_it() -> (
+    None
+):
+    """`CHEAP_PRICING.supports_adaptive_thinking` defaults `True` (the
+    field's own default, matching Sonnet 5 -- see `PricingSnapshot`'s
+    docstring), so this is the branch every other test in this file already
+    exercises implicitly; asserted directly here, once, against the real
+    public `ChatAnthropic` attributes those two kwargs set."""
+    client = _build_chat_anthropic(CHEAP_PRICING)
+
+    assert client.thinking == {"type": "adaptive"}
+    assert client.reasoning_effort == "medium"
+
+
+def test_build_chat_anthropic_omits_thinking_when_the_model_does_not_support_it() -> (
+    None
+):
+    """The fix for a real bug: a live request against Claude Haiku 4.5 with
+    `thinking={"type": "adaptive"}` set was refused outright (`400
+    invalid_request_error: adaptive thinking is not supported on this
+    model`), confirmed directly against the real API. `CLAUDE_HAIKU_4_5_
+    PRICING.supports_adaptive_thinking` is `False` for exactly this reason;
+    this proves the constructed client actually omits both kwargs, not just
+    that the pricing flag exists."""
+    haiku_pricing = CHEAP_PRICING.model_copy(
+        update={"supports_adaptive_thinking": False}
+    )
+
+    client = _build_chat_anthropic(haiku_pricing)
+
+    assert client.thinking is None
+    assert client.reasoning_effort is None
+
+
 # --- the schema-vs-application cross-check --------------------------------
 #
 # A root-cause investigation found five payloads the emitted wire schema

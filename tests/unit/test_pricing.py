@@ -8,6 +8,7 @@ import pytest
 
 from causalops import pricing
 from causalops.pricing import (
+    CLAUDE_HAIKU_4_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -144,6 +145,34 @@ def test_claude_sonnet_5_pricing_names_a_source_and_a_date() -> None:
     assert CLAUDE_SONNET_5_PRICING.source.startswith("https://")
     assert CLAUDE_SONNET_5_PRICING.verified_on
     assert CLAUDE_SONNET_5_PRICING.model_name == "claude-sonnet-5"
+    assert CLAUDE_SONNET_5_PRICING.supports_adaptive_thinking is True
+
+
+def test_claude_haiku_4_5_pricing_names_a_source_and_a_date() -> None:
+    assert CLAUDE_HAIKU_4_5_PRICING.source.startswith("https://")
+    assert CLAUDE_HAIKU_4_5_PRICING.verified_on
+    assert CLAUDE_HAIKU_4_5_PRICING.model_name == "claude-haiku-4-5-20251001"
+    # A real live request against Haiku 4.5 with adaptive thinking set was
+    # refused outright (400 invalid_request_error), confirmed directly
+    # against the real API -- see `live_model._build_chat_anthropic`'s own
+    # docstring.
+    assert CLAUDE_HAIKU_4_5_PRICING.supports_adaptive_thinking is False
+
+
+def test_claude_haiku_4_5_is_strictly_cheaper_than_sonnet_5_per_token() -> None:
+    """The whole point of offering Haiku as a `CAUSALOPS_LIVE_MODEL` choice:
+    a real live-model behavioral experiment (README's "The Pinecone
+    semantic-retrieval experiment" sibling, the dedicated runbook-search
+    budget) needs a model that is meaningfully weaker/cheaper, not a
+    same-priced alternative that would tell you nothing new."""
+    assert (
+        CLAUDE_HAIKU_4_5_PRICING.input_usd_per_million_tokens
+        < CLAUDE_SONNET_5_PRICING.input_usd_per_million_tokens
+    )
+    assert (
+        CLAUDE_HAIKU_4_5_PRICING.output_usd_per_million_tokens
+        < CLAUDE_SONNET_5_PRICING.output_usd_per_million_tokens
+    )
 
 
 def test_input_too_large_carries_the_estimate_that_tripped_it() -> None:

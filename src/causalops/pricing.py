@@ -67,6 +67,16 @@ class PricingSnapshot(BaseModel):
     output_usd_per_million_tokens: float = Field(gt=0)
     source: str
     verified_on: str
+    # `live_model._build_chat_anthropic` reads this to decide whether to
+    # pass `thinking={"type": "adaptive"}`/`effort="medium"` at all -- Claude
+    # Sonnet 5 supports adaptive thinking; a real live request against
+    # Claude Haiku 4.5 with those same two kwargs was refused outright
+    # (`400 invalid_request_error: adaptive thinking is not supported on
+    # this model`), confirmed directly against the real API, not assumed
+    # from documentation. Defaults `True` so every existing `PricingSnapshot`
+    # construction (including every test's own) keeps today's behavior
+    # unchanged; only `CLAUDE_HAIKU_4_5_PRICING` below sets it `False`.
+    supports_adaptive_thinking: bool = True
 
     def reservation_usd(
         self, input_tokens: int, max_output_tokens: int = MAX_OUTPUT_TOKENS
@@ -122,4 +132,5 @@ CLAUDE_HAIKU_4_5_PRICING = PricingSnapshot(
     output_usd_per_million_tokens=5.00,
     source="https://platform.claude.com/docs/en/about-claude/pricing",
     verified_on="2026-09-10",
+    supports_adaptive_thinking=False,
 )
