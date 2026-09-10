@@ -678,6 +678,28 @@ The comparison above applies the same selection rule directly to the two
 real `EvaluationRecord` batches instead of forcing them through a schema
 built for a different model identity.
 
+**Rerun after the imperative first-proposal instruction (see "Three more
+angles" below) fixed the usage floor** — the original 0/12-vs-0/12 result
+above left the question of retrieval *quality* untested, since neither arm
+ever actually retrieved anything to judge. With the model reliably calling
+`search_runbooks` on every run, the same matched comparison was repeated
+for real, same corpus, same budgets:
+
+| Arm | Run ID | `search_runbooks` used | `correct_and_grounded` |
+| --- | --- | --- | --- |
+| FTS5 (`RAG_EXPERIMENT_ENABLED=false`) | `4e2f8ec48a354e088c675c9b46ed8acb` | 12/12 | 5/12 |
+| Pinecone (`RAG_EXPERIMENT_ENABLED=true`) | `f493cc19efc04f04a37c029f8d51c85d` | 12/12 | 4/12 |
+
+**Still not selected — but for a different, more informative reason this
+time.** The usage floor (≥3/12) is now trivially cleared on both arms;
+zero policy denials or safety regressions in either. The blocker is now
+squarely `correct_and_grounded`: Pinecone's 4/12 is not non-inferior to
+FTS5's 5/12, missing by exactly one incident. This is the first time the
+preregistered rule has actually been tested against real retrieval
+quality rather than real retrieval absence — a genuine, if narrow,
+quality gap, not another usage no-op. FTS5 remains the only retrieval
+path in production use.
+
 ### Three more angles on the same question — two negative, one that worked
 
 `search_runbooks` sitting at 0 real uses out of every batch this project
