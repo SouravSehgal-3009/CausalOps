@@ -272,6 +272,9 @@ optionally Cloud Run) on your own GCP account, see
 | `causalops approve <thread-id>` | Accepts a paused investigation's diagnosis or abstention. |
 | `causalops reject <thread-id> "<reason>"` | Rejects a paused investigation and records why. |
 | `causalops-evaluate [--executed-tools <2\|3\|4>]` | Runs the fixed paired live-evaluation corpus at one evidence-budget curve point (separate binary; defaults to 2). |
+| `causalops-candidate-assess` | Offline inspector for sanitized candidate-evaluation artifacts; no provider access. |
+| `causalops-qwen-evaluate` | Private-VM-only runner for the fixed Qwen/Ollama candidate corpus (see "Non-goals"). |
+| `causalops-pinecone-reindex` | Administrative: upserts `runbook_corpus.json` into the provisioned Pinecone index. |
 
 ## Running an investigation
 
@@ -410,10 +413,16 @@ infra/              Terraform, Docker, and deployment docs for the hosted API
 CausalOps does not build causal graphs, estimate counterfactual outcomes, or
 run more than one investigator. It has no remediation executor: it may
 record an owner-approved suggested next step, but it never executes,
-verifies, or claims to fix anything. It does not add a web UI, a second
-model provider, a second database, Kubernetes, or cloud hosting beyond the
-optional Cloud Run split described above. All data — services, telemetry,
-incidents — is synthetic; nothing here touches a real production system.
+verifies, or claims to fix anything. Beyond the small owner-only dashboard
+the hosted API serves (sign-in and investigation status, no model controls),
+it does not add a general-purpose web UI, Kubernetes, or cloud hosting
+beyond the optional Cloud Run split described above. It has no
+default-path second model provider — the Qwen/Ollama candidate is a
+private-VM-only, gated experiment (`causalops-qwen-evaluate`), not
+something a normal install ever reaches — and no database beyond SQLite
+(local) and Firestore (the hosted deployment's own durable state, not a
+separate addition). All data — services, telemetry, incidents — is
+synthetic; nothing here touches a real production system.
 
 ## License
 
