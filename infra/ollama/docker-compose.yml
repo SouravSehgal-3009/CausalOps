@@ -1,7 +1,7 @@
-name: causalops-phase3
+name: causalops-ollama
 
 # VM-only Ollama template. It fails closed until CAUSALOPS_OLLAMA_IMAGE is set
-# to a reviewed digest in an ignored `infra/phase3/compose.env` file. It does
+# to a reviewed digest in an ignored `infra/ollama/compose.env` file. It does
 # not start the synthetic lab, application worker, or MCP process; those remain
 # separate restricted-environment composition work after policy approval.
 services:

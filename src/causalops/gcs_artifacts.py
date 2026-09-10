@@ -1,6 +1,6 @@
 """Durable Cloud Storage upload for finalized investigation artifacts.
 
-Wires the already-provisioned `infra/phase2/main.tf` bucket
+Wires the already-provisioned `infra/gcp/storage.tf` bucket
 (`google_storage_bucket.replay_artifacts`) into the application -- spec
 §3.1: "Cloud Storage stores immutable final artifacts under
 `investigations/{investigation_id}/`... Writes use generation
@@ -67,7 +67,7 @@ def _impersonated_client(target_service_account: str) -> storage.Client:
     """The VM's own runtime identity is its default Compute Engine service
     account, never granted a bucket role of its own -- only permission to
     impersonate `target_service_account` for exactly as long as one GCS
-    request (`infra/phase2/main.tf`'s own
+    request (`infra/gcp/storage.tf`'s own
     `google_service_account_iam_member.vm_impersonates_control_plane`
     comment explains why). `google.auth.default()` resolves the VM's own
     ambient credentials; `ImpersonatedCredentials` mints a short-lived
@@ -120,7 +120,7 @@ class GcsArtifactStore:
         treated as success, not an error: the caller's own retry may land
         here after an earlier attempt already uploaded this exact artifact
         (the bucket's `objectCreator` IAM grant permits create only, never
-        overwrite, by design -- `infra/phase2/main.tf`'s own comment), so a
+        overwrite, by design -- `infra/gcp/storage.tf`'s own comment), so a
         repeat upload of byte-identical content is the expected idempotent
         case, not a real failure. Any other exception (network, auth,
         permission) propagates for the caller's own bounded-retry

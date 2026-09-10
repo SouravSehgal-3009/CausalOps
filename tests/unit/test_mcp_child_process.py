@@ -3,7 +3,7 @@
 Spawns the actual `causalops.mcp_server_main` entry point as a real OS
 process against `tmp_path` fixtures -- no Docker, no VM, laptop-safe. A
 reviewed `mcp_policy_adapter._APPROVED_MCP_DISPATCH` record now exists (see
-`infra/phase3/VALIDATION.md`), so `tools/call` here actually executes
+`docs/mcp-approval/VALIDATION.md`), so `tools/call` here actually executes
 against the real backend rather than being refused by the safe default.
 `tmp_path` starts with no telemetry/topology data written, so a call comes
 back as a clean `UNAVAILABLE` outcome rather than `EXECUTED` -- these tests

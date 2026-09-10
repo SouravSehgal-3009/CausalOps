@@ -8,7 +8,7 @@ registries by construction, not by anything MCP-specific. These tests
 prove that reuse holds for real, against a real spawned subprocess.
 
 A reviewed `mcp_policy_adapter._APPROVED_MCP_DISPATCH` record now exists
-(see `infra/phase3/VALIDATION.md`), so the last test here proves real
+(see `docs/mcp-approval/VALIDATION.md`), so the last test here proves real
 EXECUTED-outcome equivalence -- condition 2's "same evidence, citations,
 outcome for an EXECUTED check" -- against a real spawned child process,
 not just the pre-approval refusal shape.

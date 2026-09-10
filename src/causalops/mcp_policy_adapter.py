@@ -43,21 +43,21 @@ class McpDispatchApproval(BaseModel):
     protocol_version: str
 
 
-# Reviewed and recorded per infra/phase3/POLICY_APPROVAL.md's 5 conditions,
-# all evidenced live on causalops-test (asia-south1-c) against real backends
-# (Prometheus, log files, changes, topology, runbook search) -- see
-# infra/phase3/VALIDATION.md's "Real local-stdio MCP transport" entry for
-# the full record: manifest/protocol pin verified over a real pipe (1);
-# real EXECUTED-outcome equivalence, all 5 tools, direct vs MCP dispatch,
-# byte-identical (2); cross-incident and duplicate-proposal refused
-# identically by both paths before any subprocess is touched (3); no MCP
-# network listener, minimal explicit child env, verified live via `ss
-# -tlnp` before/after (4); kill/timeout/respawn all preserve receipt
+# Reviewed and recorded per docs/mcp-approval/POLICY_APPROVAL.md's 5
+# conditions, all evidenced live on causalops-test (asia-south1-c) against
+# real backends (Prometheus, log files, changes, topology, runbook search)
+# -- see docs/mcp-approval/VALIDATION.md's "Real local-stdio MCP transport"
+# entry for the full record: manifest/protocol pin verified over a real
+# pipe (1); real EXECUTED-outcome equivalence, all 5 tools, direct vs MCP
+# dispatch, byte-identical (2); cross-incident and duplicate-proposal
+# refused identically by both paths before any subprocess is touched (3);
+# no MCP network listener, minimal explicit child env, verified live via
+# `ss -tlnp` before/after (4); kill/timeout/respawn all preserve receipt
 # semantics, verified against real spawned subprocesses (5).
 #
 # No container image exists for this deployment (host-process, not
-# Dockerized -- see VALIDATION.md's "Deployment shape, decided
-# deliberately"), so `server_image_digest` is the same reviewed commit
+# Dockerized -- see docs/mcp-approval/VALIDATION.md's "Deployment shape,
+# decided deliberately"), so `server_image_digest` is the same reviewed commit
 # SHA as `approval_commit`, pinning the code identity a host-process
 # deployment actually has instead of an image digest it doesn't.
 _APPROVED_MCP_DISPATCH: McpDispatchApproval | None = McpDispatchApproval(

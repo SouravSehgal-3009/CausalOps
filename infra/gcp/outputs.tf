@@ -15,7 +15,7 @@ output "firestore_database_name" {
 
 output "api_image_repository" {
   value       = google_artifact_registry_repository.api_images.name
-  description = "Push infra/phaseD/Dockerfile's built image here, then set api_image to deploy the Cloud Run service."
+  description = "Push infra/docker/api.Dockerfile's built image here, then set api_image to deploy the Cloud Run service."
 }
 
 output "cloud_run_api_url" {

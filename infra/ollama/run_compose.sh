@@ -62,7 +62,7 @@ if [[ "${1:-}" == "--validate" ]]; then
 fi
 
 if [[ "${CAUSALOPS_EXECUTION_ENV:-}" != "vm" ]]; then
-    echo "Phase 3 Compose may run only with CAUSALOPS_EXECUTION_ENV=vm" >&2
+    echo "Ollama Compose may run only with CAUSALOPS_EXECUTION_ENV=vm" >&2
     exit 2
 fi
 

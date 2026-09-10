@@ -59,7 +59,7 @@ permission is missing if you under-provision.
 ## Step 2 — Base infrastructure
 
 ```bash
-cd infra/phase2
+cd infra/gcp
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars: set project_id, region, artifact_bucket_name
 # (bucket names are globally unique across all of GCS, not just your project)
@@ -150,7 +150,7 @@ confirmed, Ctrl-C it and run it for real via systemd so it survives crashes
 and reboots:
 
 ```bash
-cp infra/phaseD/causalops-api.service.example /tmp/causalops-api.service
+cp infra/docker/causalops-api.service.example /tmp/causalops-api.service
 # edit /tmp/causalops-api.service: replace YOUR_USER and every
 # /absolute/path/to/... placeholder with your real values
 sudo cp /tmp/causalops-api.service /etc/systemd/system/causalops-api.service
@@ -173,7 +173,7 @@ causalops-api`) before continuing.
 ```bash
 gcloud auth configure-docker REGION-docker.pkg.dev   # once per machine
 
-docker build -f infra/phaseD/Dockerfile \
+docker build -f infra/docker/api.Dockerfile \
   -t REGION-docker.pkg.dev/YOUR_PROJECT_ID/causalops-api/causalops-api:v1 .
 docker push REGION-docker.pkg.dev/YOUR_PROJECT_ID/causalops-api/causalops-api:v1
 ```
@@ -184,7 +184,7 @@ client ID), `allowed_owners` (same list as `.env.vm`'s
 `CAUSALOPS_ALLOWED_OWNERS`, as a Terraform list).
 
 ```bash
-cd infra/phase2
+cd infra/gcp
 terraform apply
 terraform output cloud_run_api_url
 ```
@@ -224,10 +224,11 @@ machine (it will — they share the same Firestore database).
 5. **`docker push` can fail with a permission error even though
    `terraform apply` succeeded** — the identity that actually runs `docker
    push` (your `gcloud` CLI's active account) may differ from the one
-   Terraform used (its own ADC identity). This repo's own `main.tf` already
-   grants `roles/artifactregistry.writer` to the VM's default compute SA
-   for this reason; if you're pushing as a different identity, it needs
-   the same grant.
+   Terraform used (its own ADC identity). This repo's own
+   `infra/gcp/artifact_registry.tf` already grants
+   `roles/artifactregistry.writer` to the VM's default compute SA for
+   this reason; if you're pushing as a different identity, it needs the
+   same grant.
 6. **Cloud Run must never run its own background worker.** Terraform
    already sets `CAUSALOPS_RUN_WORKER=false` on the Cloud Run service for
    you — if you ever deploy that image outside Terraform (a manual `gcloud
@@ -244,7 +245,7 @@ bills continuously if left running — stop it when you're not using it.
 ## Tearing down
 
 ```bash
-cd infra/phase2
+cd infra/gcp
 # unset api_image in terraform.tfvars first if you deployed Cloud Run,
 # then:
 terraform destroy

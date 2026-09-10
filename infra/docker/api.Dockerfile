@@ -1,12 +1,12 @@
 # Cloud Run image for the owner-facing HTTP API only (`causalops.api_runtime:app`).
-# The replay worker/lab stay VM-hosted -- see infra/phaseD's own scoping
-# notes for why (lab/docker-compose.yml binds gateway/orders/inventory to
-# 127.0.0.1 only, and shares a bind-mounted runs/ directory with the
+# The replay worker/lab stay VM-hosted -- see infra/gcp/cloud_run.tf's own
+# scoping notes for why (lab/docker-compose.yml binds gateway/orders/inventory
+# to 127.0.0.1 only, and shares a bind-mounted runs/ directory with the
 # worker; neither survives a stateless container).
 #
 # Build from the REPO ROOT, not this directory, since it needs
 # pyproject.toml/uv.lock/src/:
-#   docker build -f infra/phaseD/Dockerfile -t causalops-api .
+#   docker build -f infra/docker/api.Dockerfile -t causalops-api .
 
 FROM python:3.12-slim
 

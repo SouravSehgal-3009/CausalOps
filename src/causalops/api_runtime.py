@@ -1729,7 +1729,7 @@ class BackgroundControlPlaneWorkers:
 class NoOpWorkerService:
     """`app()`'s Cloud Run deployment must NOT run a `BackgroundControl
     PlaneWorkers` loop of its own -- it has no lab/docker access at all
-    (`infra/phaseD`'s own scoping notes), so a job its own worker won the
+    (`infra/gcp/cloud_run.tf`'s own scoping notes), so a job its own worker won the
     claim race for would fail immediately with no lab to reach. Found live
     this session as a real design gap once the Cloud Run split shipped:
     `app()` built a real worker unconditionally regardless of deployment
@@ -1763,7 +1763,7 @@ def app() -> FastAPI:
     # Phase C (Firestore migration): "sqlite" (the default) keeps every
     # existing deployment's behavior unchanged. "firestore" opts into the
     # provisioned `google_firestore_database.default`
-    # (`infra/phase2/main.tf`) instead -- an explicit opt-in, not yet the
+    # (`infra/gcp/firestore.tf`) instead -- an explicit opt-in, not yet the
     # default, until a live VM run against it is validated the same way
     # Phase A's MCP-default flip needed both an equivalence test and a
     # live comparison run before becoming the default.
@@ -1835,7 +1835,7 @@ def app() -> FastAPI:
     # for every deployment that has not set this yet. `GcsArtifactStore`'s
     # own constructor resolves ADC (or impersonated credentials, when
     # `CAUSALOPS_ARTIFACT_SERVICE_ACCOUNT` is also set -- see
-    # `infra/phase2/main.tf`'s `vm_impersonates_control_plane` grant) at
+    # `infra/gcp/storage.tf`'s `vm_impersonates_control_plane` grant) at
     # this point, not at import time.
     artifact_bucket_name = os.environ.get("CAUSALOPS_ARTIFACT_BUCKET", "").strip()
     artifact_service_account = os.environ.get(

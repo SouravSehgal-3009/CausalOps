@@ -1,4 +1,4 @@
-"""Hermetic checks for the VM-only Phase 3 Compose image guard."""
+"""Hermetic checks for the VM-only Ollama Compose image guard."""
 
 import os
 import subprocess
@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 # run_compose.sh is a bash script (`#!/usr/bin/env bash`, bash arrays,
-# `[[ ]]`, `BASH_SOURCE`) that RESTRICTED_HANDOFF.md documents as VM-only,
-# never meant to run on a Windows host at all. Every test here execs it
+# `[[ ]]`, `BASH_SOURCE`) that docs/mcp-approval/RESTRICTED_HANDOFF.md
+# documents as VM-only, never meant to run on a Windows host at all.
+# Every test here execs it
 # directly via subprocess.run([str(SCRIPT), ...]); Windows has no shebang
 # dispatch at the CreateProcess level, so that always raises
 # `OSError: [WinError 193] %1 is not a valid Win32 application` -- not a
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-SCRIPT = Path(__file__).parents[2] / "infra" / "phase3" / "run_compose.sh"
+SCRIPT = Path(__file__).parents[2] / "infra" / "ollama" / "run_compose.sh"
 VALID_IMAGE = "registry.example.invalid/ollama@sha256:" + "a" * 64
 
 

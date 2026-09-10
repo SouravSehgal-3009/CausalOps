@@ -61,7 +61,7 @@ def test_uploads_all_five_artifacts_under_the_investigation_prefix() -> None:
 def test_a_repeated_upload_of_the_same_artifact_is_treated_as_success() -> None:
     """A duplicate delivery (a retried finalize) lands on an object that
     already exists -- `PreconditionFailed` must be swallowed, not raised,
-    since the bucket's own IAM grant (`infra/phase2/main.tf`) is
+    since the bucket's own IAM grant (`infra/gcp/storage.tf`) is
     create-only and this is the expected idempotent case, not a real
     failure."""
     client = FakeClient()
@@ -80,7 +80,7 @@ def test_target_service_account_requests_impersonated_credentials(
     """When `target_service_account` is set, `GcsArtifactStore` must
     request impersonated credentials for that exact principal -- the VM's
     own default Compute Engine service account is never granted a bucket
-    role of its own (`infra/phase2/main.tf`'s `vm_impersonates_control_plane`
+    role of its own (`infra/gcp/storage.tf`'s `vm_impersonates_control_plane`
     grant is the only thing that lets it act as `causalops-replay-control`
     at all), so this is a real security property, not an implementation
     detail."""

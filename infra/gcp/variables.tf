@@ -13,12 +13,12 @@ variable "artifact_bucket_name" {
   description = "Globally unique, private bucket name for finalized reports."
 }
 
-# Phase D (Cloud Run API deployment)
+# Cloud Run API deployment (optional)
 
 variable "api_image" {
   type        = string
   default     = ""
-  description = "Fully-qualified Artifact Registry image (region-docker.pkg.dev/PROJECT/REPO/causalops-api:TAG) built from infra/phaseD/Dockerfile. Empty skips creating the Cloud Run service entirely -- Phase D's terraform is a no-op until an image has actually been pushed."
+  description = "Fully-qualified Artifact Registry image (region-docker.pkg.dev/PROJECT/REPO/causalops-api:TAG) built from infra/docker/api.Dockerfile. Empty skips creating the Cloud Run service entirely -- this is a no-op until an image has actually been pushed."
 }
 
 variable "google_client_id" {
@@ -36,7 +36,7 @@ variable "allowed_owners" {
 variable "billing_account_id" {
   type        = string
   default     = ""
-  description = "Billing account id (billingAccounts/XXXXXX-XXXXXX-XXXXXX) for the google_billing_budget sign-off gate. Empty skips creating a budget -- managing billing budgets needs billing-account-level IAM the project-scoped terraform identity may not hold; see infra/phaseD/VALIDATION.md for how this was actually applied."
+  description = "Billing account id (billingAccounts/XXXXXX-XXXXXX-XXXXXX) for the google_billing_budget sign-off gate. Empty skips creating a budget -- managing billing budgets needs billing-account-level IAM the project-scoped terraform identity may not hold; see infra/DEPLOYMENT.md's Gotchas for how to apply it separately if so."
 }
 
 variable "budget_monthly_usd" {
