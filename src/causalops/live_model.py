@@ -861,6 +861,7 @@ def build_minimum_final_assessment_request() -> ModelRequest:
         markers=(),
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools,
+        runbook_searches_left=budgets.runbook_searches,
         passages=(),
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"

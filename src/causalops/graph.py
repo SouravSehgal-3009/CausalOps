@@ -308,8 +308,14 @@ def _dump_events(recorder: RunRecorder) -> list[dict[str, JsonValue]]:
 
 def _tools_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
     return ReservationLedger.from_receipts(
-        receipts, budgets.executed_tools
+        receipts, budgets.executed_tools, budgets.runbook_searches
     ).slots_left()
+
+
+def _runbook_searches_left(receipts: Sequence[ToolReceipt], budgets: Budgets) -> int:
+    return ReservationLedger.from_receipts(
+        receipts, budgets.executed_tools, budgets.runbook_searches
+    ).runbook_slots_left()
 
 
 def _model_calls_left(
@@ -664,6 +670,7 @@ def _render_stage_request(
         _tools_left(receipts, budgets),
         passages,
         _denied_check_notes(receipts, budgets),
+        runbook_searches_left=_runbook_searches_left(receipts, budgets),
     )
     system_text = SYSTEM_TEXT
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[stage]}"

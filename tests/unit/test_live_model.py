@@ -480,6 +480,7 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools,
         passages=(),
+        runbook_searches_left=budgets.runbook_searches,
     )
     context_text = f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.FINAL_ASSESSMENT]}"
     total = SYSTEM_TEXT + context_text
@@ -502,11 +503,16 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # trigger for another. `STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]` also
     # gained a sentence in this same change, but `context_text` above renders
     # only `Stage.FINAL_ASSESSMENT`'s instructions, so that second edit does
-    # not touch this pinned figure.
-    assert len(total) == 2_448
+    # not touch this pinned figure. It moved a sixth time, from 2,448 to
+    # 2,629: `SYSTEM_TEXT` gained one sentence stating `search_runbooks`
+    # spends from its own separate, smaller budget rather than the scarce
+    # diagnostic-check one, and `render_context` gained one new rendered
+    # status line, `"runbook searches left: N"`, present on every call
+    # including this one.
+    assert len(total) == 2_629
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 2_448
+    assert estimate_input_tokens(total) == 2_629
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
@@ -538,6 +544,7 @@ def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(
         model_calls_left=budgets.model_calls - model_calls_used,
         checks_left=budgets.executed_tools - 1,
         passages=passages,
+        runbook_searches_left=budgets.runbook_searches,
     )
     context_text = (
         f"{context}\n\n## Task\n{STAGE_INSTRUCTIONS[Stage.HYPOTHESIS_UPDATE]}"

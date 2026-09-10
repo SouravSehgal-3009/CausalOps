@@ -73,7 +73,9 @@ def sample_context(passages: tuple[RunbookPassage, ...] = ()) -> str:
         symptom_evidence_id="evidence-1",
         topology_evidence_id="evidence-2",
     )
-    return render_context(packet, scope, [sample_evidence()], [], 4, 2, passages)
+    return render_context(
+        packet, scope, [sample_evidence()], [], 4, 2, passages, runbook_searches_left=1
+    )
 
 
 def adversarial_passage(content: str) -> RunbookPassage:
