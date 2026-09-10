@@ -1,5 +1,5 @@
 {
-  "corpus_version": "1",
+  "corpus_version": "2",
   "passages": [
     {
       "passage_id": "runbook-gateway-errors-01",
@@ -50,6 +50,26 @@
       "passage_id": "runbook-recent-config-changes-02",
       "source_version": "1",
       "content": "Not every change near an incident's start caused it -- confirm the change actually touched the affected service, or a service directly upstream of it, before treating the timing alone as proof."
+    },
+    {
+      "passage_id": "runbook-resource-pool-pressure-03",
+      "source_version": "2",
+      "content": "When a pool-exhaustion signal and a downstream-timeout signal appear together in the same window, check which one leads the other before treating them as one cause. A pool filling up because calls to a dependency are taking longer to return points to the slow dependency as the driver; a dependency reporting timeouts because callers were already queued waiting for a slot points the other way. Ordering, not co-occurrence, tells them apart."
+    },
+    {
+      "passage_id": "runbook-downstream-timeouts-03",
+      "source_version": "2",
+      "content": "Two error signatures in the same narrow window -- one naming exhausted capacity, one naming a slow dependency -- can both stem from a single change if that change affects shared capacity a slow call also depends on. Check whether the two error types share a common upstream trigger before treating them as two separate problems."
+    },
+    {
+      "passage_id": "runbook-recent-config-changes-03",
+      "source_version": "2",
+      "content": "When more than one plausible change landed close together in time, check them oldest first. Anchoring on whichever change appears most recently in the log is a common mistake -- an earlier change can already explain the full timeline, making a later one a coincidence rather than a cause."
+    },
+    {
+      "passage_id": "runbook-recent-config-changes-04",
+      "source_version": "2",
+      "content": "If the available evidence cannot separate two plausible causes with real confidence, say so rather than defaulting to the more recent or more familiar one. Name the specific additional check that would resolve the ambiguity so the owner can supply it directly, instead of guessing between two changes that both fit the timeline."
     }
   ]
 }
