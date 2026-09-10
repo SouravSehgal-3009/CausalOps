@@ -12,3 +12,13 @@ output "firestore_database_name" {
   value       = google_firestore_database.default.name
   description = "Firestore Native database backing FirestoreCheckpointSaver/FirestoreReplayControlPlane."
 }
+
+output "api_image_repository" {
+  value       = google_artifact_registry_repository.api_images.name
+  description = "Push infra/phaseD/Dockerfile's built image here, then set api_image to deploy the Cloud Run service."
+}
+
+output "cloud_run_api_url" {
+  value       = length(google_cloud_run_v2_service.api) > 0 ? google_cloud_run_v2_service.api[0].uri : null
+  description = "Live URL once var.api_image is set and applied; null while Phase D's Cloud Run service is skipped."
+}
