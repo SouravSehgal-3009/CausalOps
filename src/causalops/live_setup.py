@@ -326,11 +326,20 @@ def build_replay_model_and_registry(
     paths: RunPaths,
     budgets: Budgets,
     environment: Mapping[str, str] | None = None,
+    *,
+    fixture: Path = REPLAY_FIXTURE,
 ) -> tuple[ToolCallingModel, Mapping[ToolName, ToolWrapper], str]:
-    """Build only hosted replay dependencies; no other provider is reachable."""
+    """Build only hosted replay dependencies; no other provider is reachable.
+
+    `fixture` defaults to the one fixed `REPLAY_FIXTURE` every existing
+    caller (CLI, evaluate, tests) already gets -- it exists as a parameter
+    only so `HostedReplayRuntimeWiring`/`McpBackedReplayRuntimeWiring` can
+    let `app()` point the hosted API at a different scripted fixture
+    without touching this shared default at all.
+    """
     replay_model = ReplayToolCallingModel(
         ReplayReasoningModel(
-            REPLAY_FIXTURE,
+            fixture,
             substitutions={
                 "incident_id": incident.scope.incident_id,
                 "window_start": incident.scope.started_at.isoformat(),
@@ -349,13 +358,16 @@ def build_replay_model_and_registry(
 class HostedReplayRuntimeWiring:
     """Composition-selected implementation of the replay-only runtime seam."""
 
+    def __init__(self, fixture: Path = REPLAY_FIXTURE) -> None:
+        self._fixture = fixture
+
     def build(
         self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
     ) -> tuple[
         ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
     ]:
         model, registry, model_name = build_replay_model_and_registry(
-            incident, paths, budgets
+            incident, paths, budgets, fixture=self._fixture
         )
         return model, registry, model_name, lambda: None
 

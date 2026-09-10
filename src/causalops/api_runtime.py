@@ -1506,7 +1506,17 @@ class ReplayGraphJobRunner:
         if not incident_id.isalnum():
             raise ControlPlaneIntegrityError("active scenario marker is invalid")
         scenario_status = self._control_plane.scenario_status(incident_id)
-        if scenario_status is InvestigationStatus.PAUSED_APPROVAL:
+        if scenario_status is None:
+            # No job carries this incident_id at all -- not "still in
+            # progress" (that's QUEUED/RUNNING, left alone below), but a
+            # genuinely orphaned marker (e.g. its job document was deleted
+            # after `reserve_incident` already wrote this file, or a crash
+            # landed between those two writes). Found live: with no branch
+            # for this case, the marker survived forever and
+            # `SCENARIO_ALREADY_ACTIVE` failed every future scenario start
+            # until manually released.
+            release_scenario(self._root, incident_id)
+        elif scenario_status is InvestigationStatus.PAUSED_APPROVAL:
             release_scenario(self._root, incident_id)
         elif scenario_status in {
             InvestigationStatus.FAILED_SAFE,
@@ -1785,10 +1795,23 @@ def app() -> FastAPI:
         == VM_EXECUTION_ENV
         and not mcp_dispatch_disabled
     )
+    # Demo/ops-only override: every deployment that never sets this keeps
+    # `REPLAY_FIXTURE` (`lab_diagnosis.json`), whose scripted final
+    # assessment is always DIAGNOSED with no contrary evidence -- under
+    # healthy conditions it can never trigger `PAUSED_APPROVAL` (confirmed
+    # live this session: none of `_escalation_reason`'s 4 triggers can fire
+    # from that exact script). Pointing this at a fixture that scripts
+    # INSUFFICIENT_EVIDENCE with a tool budget still remaining (e.g.
+    # `hosted_escalation_demo.json`) makes the pause/decide path reachable
+    # on demand -- for a demo, not a permanent behavior change.
+    replay_fixture_override = os.environ.get("CAUSALOPS_REPLAY_FIXTURE", "").strip()
+    replay_fixture_kwargs = (
+        {"fixture": Path(replay_fixture_override)} if replay_fixture_override else {}
+    )
     replay_wiring: ReplayRuntimeWiring = (
-        McpBackedReplayRuntimeWiring()
+        McpBackedReplayRuntimeWiring(**replay_fixture_kwargs)
         if mcp_dispatch_requested
-        else HostedReplayRuntimeWiring()
+        else HostedReplayRuntimeWiring(**replay_fixture_kwargs)
     )
     # Optional: no bucket configured means no GCS upload, unchanged behavior
     # for every deployment that has not set this yet. `GcsArtifactStore`'s

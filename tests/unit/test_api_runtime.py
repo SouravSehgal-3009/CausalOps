@@ -768,6 +768,24 @@ def test_runner_reconciles_marker_cleanup_after_a_transition_crash(
     assert not run_directory.exists()
 
 
+def test_runner_releases_a_marker_whose_job_no_longer_exists(tmp_path: Path) -> None:
+    """Found live: `reconcile_scenarios` had no branch for `scenario_status`
+    returning `None` -- an orphaned marker (its job document deleted, or a
+    crash between `reserve_incident` and the job write) survived forever,
+    and every future scenario start failed with `SCENARIO_ALREADY_ACTIVE`
+    until manually released. Distinct from QUEUED/RUNNING, which correctly
+    still means "leave the marker alone" and isn't covered here."""
+    control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db")
+    marker = tmp_path / "runs" / "active-incident.txt"
+    marker.parent.mkdir()
+    marker.write_text("orphanedincidentid", encoding="utf-8")
+    runner = ReplayGraphJobRunner(tmp_path, control_plane, HostedReplayRuntimeWiring())
+
+    runner.reconcile_scenarios()
+
+    assert not marker.exists()
+
+
 def test_worker_runner_failure_requeues_its_own_claim(tmp_path: Path) -> None:
     clock = FakeClock()
     control_plane = SqliteReplayControlPlane(tmp_path / "control-plane.db", clock=clock)
@@ -1079,3 +1097,70 @@ def test_app_factory_selects_firestore_control_plane_when_requested(
     root = find_project_root(Path.cwd())
     assert built["artifacts_root"] == root / "results" / "investigations"
     assert "checkpointer" not in built  # only built lazily, inside a run()
+
+
+def test_app_factory_honours_a_replay_fixture_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (unset) must keep every existing deployment's
+    `HostedReplayRuntimeWiring()` exactly as before -- this proves the
+    demo/ops-only `CAUSALOPS_REPLAY_FIXTURE` override actually reaches the
+    wiring class's constructor, without needing a real graph run."""
+
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    built: dict[str, object] = {}
+
+    class FakeHostedReplayRuntimeWiring:
+        def __init__(self, fixture: Path | None = None) -> None:
+            built["fixture"] = fixture
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CAUSALOPS_REPLAY_FIXTURE", "/tmp/some_demo_fixture.json")
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(
+        api_runtime, "HostedReplayRuntimeWiring", FakeHostedReplayRuntimeWiring
+    )
+
+    api_runtime.app()
+
+    assert built["fixture"] == Path("/tmp/some_demo_fixture.json")
+
+
+def test_app_factory_default_omits_the_replay_fixture_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    built: dict[str, object] = {"called_with_kwargs": None}
+
+    class FakeHostedReplayRuntimeWiring:
+        def __init__(self, **kwargs: object) -> None:
+            built["called_with_kwargs"] = kwargs
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.delenv("CAUSALOPS_REPLAY_FIXTURE", raising=False)
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(
+        api_runtime, "HostedReplayRuntimeWiring", FakeHostedReplayRuntimeWiring
+    )
+
+    api_runtime.app()
+
+    assert built["called_with_kwargs"] == {}

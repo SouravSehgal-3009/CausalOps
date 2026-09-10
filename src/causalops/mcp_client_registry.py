@@ -180,10 +180,16 @@ def build_mcp_tool_registry(
 class McpBackedReplayRuntimeWiring:
     """MCP-backed alternative to `live_setup.HostedReplayRuntimeWiring`.
 
-    Same replay reasoning model, same fixture -- only the tool registry's
-    transport differs. Spawns one child process per investigation; the
-    returned teardown callback must be invoked on every exit path (see
+    Same replay reasoning model, same default fixture -- only the tool
+    registry's transport differs. `fixture` defaults to the shared
+    `REPLAY_FIXTURE`, overridable for the same reason
+    `HostedReplayRuntimeWiring` accepts it (see that class's own
+    docstring). Spawns one child process per investigation; the returned
+    teardown callback must be invoked on every exit path (see
     `live_setup.ReplayRuntimeWiring`'s widened 4-tuple contract)."""
+
+    def __init__(self, fixture: Path = REPLAY_FIXTURE) -> None:
+        self._fixture = fixture
 
     def build(
         self, incident: StoredIncident, paths: RunPaths, budgets: Budgets
@@ -195,7 +201,7 @@ class McpBackedReplayRuntimeWiring:
         registry = build_mcp_tool_registry(child, budgets)
         replay_model = ReplayToolCallingModel(
             ReplayReasoningModel(
-                REPLAY_FIXTURE,
+                self._fixture,
                 substitutions={
                     "incident_id": incident.scope.incident_id,
                     "window_start": incident.scope.started_at.isoformat(),
