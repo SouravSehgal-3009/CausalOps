@@ -44,6 +44,7 @@ dependencies = [
     # only imported by `api_runtime.py`, same isolation guarantee as
     # `google-cloud-storage` above.
     "google-cloud-firestore>=2.19",
+    "pinecone>=10.0.0",
 ]
 
 [project.scripts]
@@ -59,6 +60,7 @@ causalops-evaluate = "causalops.evaluate_cli:main"
 # neither starts a candidate evaluation nor imports the Ollama adapter.
 causalops-candidate-assess = "causalops.candidate_evaluation_cli:main"
 causalops-qwen-evaluate = "causalops.qwen_evaluate_cli:main"
+causalops-pinecone-reindex = "causalops.pinecone_reindex_cli:main"
 
 [build-system]
 requires = ["hatchling"]

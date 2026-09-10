@@ -25,7 +25,13 @@ from causalops.cost_ledger import (
     ensure_cost_ledger_table,
 )
 from causalops.doctor import API_KEY_VARIABLE
-from causalops.domain import REPLAY_MODEL_NAME, Budgets, StoredIncident
+from causalops.domain import (
+    REPLAY_MODEL_NAME,
+    Budgets,
+    IncidentScope,
+    RunbookCheckOutcome,
+    StoredIncident,
+)
 from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
 from causalops.live_model import (
     LiveClaudeModel,
@@ -46,7 +52,7 @@ from causalops.models import (
 from causalops.ollama_model import OllamaQwenToolCallingModel
 from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.prometheus import DEFAULT_PROMETHEUS_URL, run_metric_check
-from causalops.retrieval_experiment import require_fts5_only
+from causalops.retrieval_experiment import rag_experiment_enabled
 from causalops.runbooks import RunbookIndex, run_runbook_search
 from causalops.telemetry import (
     RunPaths,
@@ -55,7 +61,7 @@ from causalops.telemetry import (
     run_topology_check,
 )
 from causalops.tool_wrappers import ToolWrapper, dispatch_registry
-from causalops.tools import ToolName
+from causalops.tools import SearchRunbooksArguments, ToolName
 
 REPLAY_FIXTURE_DIR = Path(__file__).parent / "replay_fixtures"
 # `dispatch_registry` wraps all four tools, so the graph
@@ -334,9 +340,38 @@ def live_evaluation_ceiling_usd(environment: Mapping[str, str]) -> float:
 def _build_tool_registry(
     paths: RunPaths, budgets: Budgets, environment: Mapping[str, str] | None = None
 ) -> Mapping[ToolName, ToolWrapper]:
-    """Build the incident-scoped tool registry shared by fixed providers."""
-    require_fts5_only(environment if environment is not None else os.environ)
-    runbook_index = RunbookIndex()
+    """Build the incident-scoped tool registry shared by fixed providers.
+
+    `search_runbooks`'s backend is the one conditional piece: FTS5
+    (`runbooks.py`) unless `RAG_EXPERIMENT_ENABLED` is set, in which case
+    the Pinecone backend is used instead -- never both, and the import of
+    `causalops.pinecone_runbooks` (and, transitively, the `pinecone` SDK)
+    stays local to this branch, so nothing in the default FTS5-only import
+    graph (CLI, evaluate CLI, the hosted API) ever reaches it.
+    """
+    env = environment if environment is not None else os.environ
+    run_search: Callable[[SearchRunbooksArguments, IncidentScope], RunbookCheckOutcome]
+    if rag_experiment_enabled(env):
+        from causalops.pinecone_runbooks import (
+            PineconeRunbookIndex,
+            run_runbook_search_pinecone,
+        )
+
+        pinecone_index = PineconeRunbookIndex(environment=env)
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search_pinecone(arguments, pinecone_index)
+
+    else:
+        runbook_index = RunbookIndex()
+
+        def run_search(
+            arguments: SearchRunbooksArguments, scope: IncidentScope
+        ) -> RunbookCheckOutcome:
+            return run_runbook_search(arguments, runbook_index)
+
     return dispatch_registry(
         run_metric=lambda arguments, scope: run_metric_check(
             arguments, scope, DEFAULT_PROMETHEUS_URL, budgets.tool_timeout_seconds
@@ -344,9 +379,7 @@ def _build_tool_registry(
         run_logs=lambda arguments, scope: run_logs_check(arguments, paths),
         run_changes=lambda arguments, scope: run_changes_check(arguments, paths),
         run_topology=lambda arguments, scope: run_topology_check(arguments, paths),
-        run_search=lambda arguments, scope: run_runbook_search(
-            arguments, runbook_index
-        ),
+        run_search=run_search,
     )
 
 
