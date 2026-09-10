@@ -1164,3 +1164,69 @@ def test_app_factory_default_omits_the_replay_fixture_override(
     api_runtime.app()
 
     assert built["called_with_kwargs"] == {}
+
+
+def test_app_factory_disables_the_background_worker_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud Run has no lab/docker access -- its own deployment must set
+    CAUSALOPS_RUN_WORKER=false so `create_app` gets a `NoOpWorkerService`
+    instead of a real `BackgroundControlPlaneWorkers`, found live as a real
+    gap this session (a real worker started unconditionally would race the
+    VM's own worker for jobs it could never actually run)."""
+
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    captured: dict[str, object] = {}
+
+    def fake_create_app(control_plane: object, **kwargs: object) -> str:
+        captured["worker_service"] = kwargs["worker_service"]
+        return "app"
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CAUSALOPS_RUN_WORKER", "false")
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(api_runtime, "create_app", fake_create_app)
+
+    api_runtime.app()
+
+    assert isinstance(captured["worker_service"], api_runtime.NoOpWorkerService)
+
+
+def test_app_factory_default_runs_the_background_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGoogleIdentityVerifier:
+        def __init__(self, client_id: str) -> None:
+            pass
+
+        def verify(self, bearer_token: str) -> str:
+            return "owner@example.com"
+
+    captured: dict[str, object] = {}
+
+    def fake_create_app(control_plane: object, **kwargs: object) -> str:
+        captured["worker_service"] = kwargs["worker_service"]
+        return "app"
+
+    monkeypatch.setenv("CAUSALOPS_ALLOWED_OWNERS", "owner@example.com")
+    monkeypatch.setenv("CAUSALOPS_GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.delenv("CAUSALOPS_RUN_WORKER", raising=False)
+    monkeypatch.setattr(
+        api_runtime, "GoogleIdentityVerifier", FakeGoogleIdentityVerifier
+    )
+    monkeypatch.setattr(api_runtime, "create_app", fake_create_app)
+
+    api_runtime.app()
+
+    assert isinstance(
+        captured["worker_service"], api_runtime.BackgroundControlPlaneWorkers
+    )

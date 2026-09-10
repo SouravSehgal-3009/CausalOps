@@ -225,6 +225,14 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "CAUSALOPS_CONTROL_PLANE_BACKEND"
         value = "firestore"
       }
+      env {
+        # Cloud Run has no lab/docker access -- without this, app()'s own
+        # BackgroundControlPlaneWorkers would start here too and race the
+        # VM's real worker for jobs it could never actually run (found
+        # live this session as a real gap in the first Cloud Run deploy).
+        name  = "CAUSALOPS_RUN_WORKER"
+        value = "false"
+      }
 
       ports {
         container_port = 8080

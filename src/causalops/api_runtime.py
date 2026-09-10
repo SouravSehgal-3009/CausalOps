@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict
 from causalops.api import (
     ControlPlaneConflictError,
     ControlPlaneNotFoundError,
+    ControlPlaneWorkerService,
     CreateInvestigationRequest,
     DecisionRequest,
     DeliveryClaim,
@@ -1725,6 +1726,23 @@ class BackgroundControlPlaneWorkers:
                 self._stop.wait(self._poll_seconds)
 
 
+class NoOpWorkerService:
+    """`app()`'s Cloud Run deployment must NOT run a `BackgroundControl
+    PlaneWorkers` loop of its own -- it has no lab/docker access at all
+    (`infra/phaseD`'s own scoping notes), so a job its own worker won the
+    claim race for would fail immediately with no lab to reach. Found live
+    this session as a real design gap once the Cloud Run split shipped:
+    `app()` built a real worker unconditionally regardless of deployment
+    target. `CAUSALOPS_RUN_WORKER=false` swaps this in instead -- the VM
+    keeps running the real one."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 def app() -> FastAPI:
     """Uvicorn factory with a real Google verifier and explicit configuration."""
     import os
@@ -1848,10 +1866,23 @@ def app() -> FastAPI:
             FilesystemReportDeliverySender(root / "results" / "deliveries"),
         ),
     )
+    # Cloud Run has no lab/docker access at all -- its own deployment must
+    # set CAUSALOPS_RUN_WORKER=false so only the VM's `app()` process ever
+    # starts the real background worker loop against the shared Firestore
+    # control plane. Every existing (VM-only) deployment keeps running it,
+    # unchanged, since this defaults to enabled.
+    run_worker = os.environ.get("CAUSALOPS_RUN_WORKER", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    worker_service: ControlPlaneWorkerService = (
+        workers if run_worker else NoOpWorkerService()
+    )
     return create_app(
         control_plane,
         allowed_owners=owners,
         identity_verifier=GoogleIdentityVerifier(google_client_id),
         google_client_id=google_client_id,
-        worker_service=workers,
+        worker_service=worker_service,
     )
