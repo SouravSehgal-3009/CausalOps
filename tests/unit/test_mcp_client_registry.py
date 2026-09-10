@@ -17,8 +17,12 @@ from fake_incident import alert_packet, incident_scope, packet_evidence
 
 from causalops import mcp_client_registry
 from causalops.api import ScenarioFamily
-from causalops.domain import Budgets, StoredIncident
-from causalops.mcp_client_registry import McpBackedLiveRuntimeWiring
+from causalops.domain import Budgets, IncidentScope, StoredIncident
+from causalops.mcp_client_registry import (
+    McpBackedLiveRuntimeWiring,
+    McpBackedReplayRuntimeWiring,
+    build_claude_model_and_mcp_registry,
+)
 from causalops.telemetry import RunPaths
 
 
@@ -109,6 +113,85 @@ def test_build_passes_through_db_path_and_environment(
 
     assert captured["db_path"] == db_path
     assert captured["environment"] == env
+
+
+class _FakeChildProcess:
+    """Records `start`/`close` without spawning a real subprocess -- proves
+    cleanup happens on a failure between `start()` and a successful return,
+    the gap a real MCP child process would otherwise be orphaned in."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+
+    def start(self, root: Path, scope: IncidentScope, budgets: Budgets) -> None:
+        self.started = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_failure_building_the_registry_still_closes_the_replay_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: `McpBackedReplayRuntimeWiring.build` used to spawn
+    the real MCP child via `McpChildProcess.start()` and only return its
+    `close` as part of the *successful* 4-tuple -- an exception from
+    `build_mcp_tool_registry` (or fixture loading) after `start()` succeeded
+    left the child running with no caller ever able to reach its `close`.
+    """
+    fake_child = _FakeChildProcess()
+    monkeypatch.setattr(mcp_client_registry, "McpChildProcess", lambda: fake_child)
+
+    def raising_build_mcp_tool_registry(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("registry build blew up")
+
+    monkeypatch.setattr(
+        mcp_client_registry, "build_mcp_tool_registry", raising_build_mcp_tool_registry
+    )
+    wiring = McpBackedReplayRuntimeWiring()
+
+    with pytest.raises(RuntimeError, match="registry build blew up"):
+        wiring.build(
+            _stored_incident(),
+            RunPaths(root=tmp_path / "runs" / "incident-1"),
+            Budgets(),
+            family=ScenarioFamily.CONFIGURATION_CHANGE,
+        )
+
+    assert fake_child.started is True
+    assert fake_child.closed is True
+
+
+def test_a_failure_building_the_live_registry_still_closes_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same regression as above, for `build_claude_model_and_mcp_registry`
+    itself -- the real composition root `McpBackedLiveRuntimeWiring`
+    delegates to. A failure after `child.start()` (e.g. a real
+    `PineconeRunbookIndexError` from a bad `PINECONE_API_KEY` while building
+    the registry) must not orphan the spawned child."""
+    fake_child = _FakeChildProcess()
+    monkeypatch.setattr(mcp_client_registry, "McpChildProcess", lambda: fake_child)
+
+    def raising_build_mcp_tool_registry(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("registry build blew up")
+
+    monkeypatch.setattr(
+        mcp_client_registry, "build_mcp_tool_registry", raising_build_mcp_tool_registry
+    )
+    monkeypatch.setenv("ENABLE_CLAUDE", "true")
+
+    with pytest.raises(RuntimeError, match="registry build blew up"):
+        build_claude_model_and_mcp_registry(
+            _stored_incident(),
+            RunPaths(root=tmp_path / "runs" / "incident-1"),
+            Budgets(),
+            tmp_path / "checkpoints.db",
+        )
+
+    assert fake_child.started is True
+    assert fake_child.closed is True
 
 
 def test_build_accepts_any_family_without_using_it_for_fixture_selection(

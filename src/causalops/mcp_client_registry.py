@@ -240,18 +240,22 @@ class McpBackedReplayRuntimeWiring:
         )
         child = McpChildProcess()
         child.start(paths.root, incident.scope, budgets)
-        registry = build_mcp_tool_registry(child, budgets)
-        replay_model = ReplayToolCallingModel(
-            ReplayReasoningModel(
-                fixture,
-                substitutions={
-                    "incident_id": incident.scope.incident_id,
-                    "window_start": incident.scope.started_at.isoformat(),
-                    "window_end": incident.scope.ended_at.isoformat(),
-                    "symptom_evidence_id": incident.packet.symptom_evidence_id,
-                },
+        try:
+            registry = build_mcp_tool_registry(child, budgets)
+            replay_model = ReplayToolCallingModel(
+                ReplayReasoningModel(
+                    fixture,
+                    substitutions={
+                        "incident_id": incident.scope.incident_id,
+                        "window_start": incident.scope.started_at.isoformat(),
+                        "window_end": incident.scope.ended_at.isoformat(),
+                        "symptom_evidence_id": incident.packet.symptom_evidence_id,
+                    },
+                )
             )
-        )
+        except BaseException:
+            child.close()
+            raise
         return replay_model, registry, REPLAY_MODEL_NAME, child.close
 
 
@@ -348,15 +352,22 @@ def build_claude_model_and_mcp_registry(
         )
     child = McpChildProcess()
     child.start(paths.root, incident.scope, budgets)
-    registry = build_mcp_tool_registry(child, budgets, process_environment)
-    ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    ensure_cost_ledger_table(ledger_conn)
-    credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
-    pricing = resolve_live_model_pricing(process_environment)
-    live_model = LiveClaudeModel(
-        ledger_conn,
-        ceiling_usd=live_evaluation_ceiling_usd(process_environment),
-        pricing=pricing,
-        credential_present=credential_present,
-    )
+    ledger_conn: sqlite3.Connection | None = None
+    try:
+        registry = build_mcp_tool_registry(child, budgets, process_environment)
+        ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        ensure_cost_ledger_table(ledger_conn)
+        credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
+        pricing = resolve_live_model_pricing(process_environment)
+        live_model = LiveClaudeModel(
+            ledger_conn,
+            ceiling_usd=live_evaluation_ceiling_usd(process_environment),
+            pricing=pricing,
+            credential_present=credential_present,
+        )
+    except BaseException:
+        if ledger_conn is not None:
+            ledger_conn.close()
+        child.close()
+        raise
     return live_model, registry, pricing.model_name, ledger_conn, child.close
