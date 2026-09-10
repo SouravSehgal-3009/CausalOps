@@ -55,9 +55,9 @@ causalops = "causalops.cli:main"
 # `[project.scripts]` key becomes an executable filename on `PATH`, which
 # cannot contain a space.
 causalops-evaluate = "causalops.evaluate_cli:main"
-# Offline inspector for sanitized Phase 4 VM artifacts. It neither starts a
-# candidate evaluation nor imports the Ollama adapter.
-causalops-phase4-assess = "causalops.phase4_evaluation_cli:main"
+# Offline inspector for sanitized candidate-evaluation VM artifacts. It
+# neither starts a candidate evaluation nor imports the Ollama adapter.
+causalops-candidate-assess = "causalops.candidate_evaluation_cli:main"
 causalops-qwen-evaluate = "causalops.qwen_evaluate_cli:main"
 
 [build-system]

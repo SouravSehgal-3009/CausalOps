@@ -111,7 +111,7 @@ def test_no_investigator_module_imports_the_evaluator() -> None:
         not in {
             "evaluation.py",
             "evaluate_cli.py",
-            "phase4_evaluation.py",
+            "candidate_evaluation.py",
             "qwen_evaluate_cli.py",
         }
         and EVALUATOR_MODULE

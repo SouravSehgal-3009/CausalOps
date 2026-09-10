@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from causalops.candidate_evaluation import (
+    APPROVED_QWEN_MODEL,
+    EVALUATION_FAMILIES,
+    EVALUATION_SEEDS,
+    CandidateEvaluationRecord,
+)
 from causalops.domain import (
     Budgets,
     InvestigationResult,
@@ -24,12 +30,6 @@ from causalops.live_setup import (
     VM_EXECUTION_ENV_VARIABLE,
     ProviderDisabledError,
     build_ollama_candidate_model_and_registry,
-)
-from causalops.phase4_evaluation import (
-    APPROVED_QWEN_MODEL,
-    EVALUATION_FAMILIES,
-    EVALUATION_SEEDS,
-    CandidateEvaluationRecord,
 )
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, finalize_investigation, write_jsonl

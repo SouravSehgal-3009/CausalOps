@@ -1,11 +1,11 @@
-"""Inspect sanitized Phase 4 candidate artifacts without provider access."""
+"""Inspect sanitized candidate-evaluation artifacts without provider access."""
 
 import argparse
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from causalops.phase4_evaluation import (
+from causalops.candidate_evaluation import (
     CandidateEvaluationRecord,
     RetrievalComparisonRecord,
     summarize_candidate_evaluation,
@@ -15,8 +15,8 @@ from causalops.phase4_evaluation import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="causalops-phase4-assess",
-        description="Assess sanitized Phase 4 candidate-evaluation JSONL artifacts.",
+        prog="causalops-candidate-assess",
+        description="Assess sanitized candidate-evaluation JSONL artifacts.",
     )
     parser.add_argument("records", type=Path, help="A sanitized JSONL artifact.")
     parser.add_argument(
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_records
             ).model_dump_json(indent=2)
     except (OSError, ValidationError) as error:
-        print(f"FAIL INVALID_PHASE4_ARTIFACT {error}")
+        print(f"FAIL INVALID_CANDIDATE_ARTIFACT {error}")
         return 1
     print(rendered)
     return 0

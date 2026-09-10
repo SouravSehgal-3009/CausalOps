@@ -1,19 +1,19 @@
-"""Pure, no-provider checks for Phase 4 candidate assessment."""
+"""Pure, no-provider checks for candidate-evaluation assessment."""
 
 from pathlib import Path
 
 import pytest
 
-from causalops.domain import Budgets, Disposition, RetrievalMode, Versions
-from causalops.evaluation import ControlCounts, Efficiency, MechanicalScores
-from causalops.phase4_evaluation import (
+from causalops.candidate_evaluation import (
     FROZEN_CASE_IDS,
     CandidateEvaluationRecord,
     RetrievalComparisonRecord,
     summarize_candidate_evaluation,
     summarize_retrieval_comparison,
 )
-from causalops.phase4_evaluation_cli import main
+from causalops.candidate_evaluation_cli import main
+from causalops.domain import Budgets, Disposition, RetrievalMode, Versions
+from causalops.evaluation import ControlCounts, Efficiency, MechanicalScores
 
 _DIGEST = "sha256:" + "a" * 64
 _SHA = "a" * 40

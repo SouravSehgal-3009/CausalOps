@@ -1,4 +1,4 @@
-"""Offline, deterministic assessment for Phase 4 candidate artifacts.
+"""Offline, deterministic assessment for candidate-evaluation artifacts.
 
 This module never constructs a model, loads credentials, or contacts an
 experiment service.  The private VM writes sanitized candidate records; this
