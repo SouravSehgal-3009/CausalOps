@@ -169,6 +169,7 @@ model actually did, not by reading the tool's code.
 | Limit | Default |
 |---|---:|
 | Diagnostic checks executed | 2 |
+| Runbook searches, a separate pool from diagnostic checks | 1 |
 | Model calls, including one structured-output repair | 4 |
 | Structured-output repairs | 1 |
 | Live-model spend, application-wide, all runs combined | USD 5.00 |
@@ -677,12 +678,13 @@ The comparison above applies the same selection rule directly to the two
 real `EvaluationRecord` batches instead of forcing them through a schema
 built for a different model identity.
 
-### Two more angles on the same question, both negative
+### Three more angles on the same question — two negative, one that worked
 
 `search_runbooks` sitting at 0 real uses out of every batch this project
 has ever run (168 records, FTS5 and Pinecone alike) raises an obvious
-question: is the model simply never *incentivized* to reach for it? Two
-follow-up experiments, both real, both live, both negative:
+question: is the model simply never *incentivized* to reach for it? Three
+follow-up experiments, all real, all live — two negative, one that
+reversed the pattern completely:
 
 **Does pricing a lookup the same as a scarce diagnostic check explain it?**
 `Budgets.runbook_searches` gives `search_runbooks` its own dedicated pool
@@ -710,14 +712,35 @@ this far below the task's basic schema-compliance bar never gets far
 enough into the investigation loop for a "would extra guidance help"
 choice to arise.
 
-Neither experiment identified what *does* explain the 0/168 pattern; both
-ruled out one real, specific, well-motivated candidate explanation. FTS5
-with Claude Sonnet 5 remains the production configuration; `runbook_searches`
-stays a separate budget going forward regardless (it is the more correct
-design either way — general guidance should not compete with incident-scoped
-evidence for the same scarce slot), and `CAUSALOPS_LIVE_MODEL` stays
-available for future experiments, not as a production alternative to
-Sonnet 5.
+**Does a direct imperative instruction, not just an informational one,
+work?** The dedicated-budget sentence above only *informed* the model the
+lookup was free; it never *told it to use it*. `SYSTEM_TEXT` gained a
+third, separate instruction: its first proposal in every investigation
+must be one `search_runbooks` call, before any incident-scoped check,
+with an explicit stop condition (`"runbook searches left"` already zero,
+or a runbook line already in evidence) so it does not repeat this on
+later turns. Run for real (`causalops-evaluate --executed-tools 3`, FTS5,
+Claude Sonnet 5, the same 12 incidents): **12/12 uses — every single run**,
+each one on the first proposal, none repeated. Zero policy denials.
+`diagnosis_correct` 8/12 and `correct_and_grounded` 5/12, matching or
+slightly exceeding the pre-instruction FTS5 baseline (7/12, 5/12) — the
+added check did not cost correctness or grounding to get. Cost $3.76 for
+the batch.
+
+So the three experiments together answer the original question precisely:
+the model was capable of using the tool all along (backend quality,
+budget pricing, and model strength all ruled out as blockers), it simply
+never chose to on its own, at this evidence-budget point, under an
+*informational* prompt. Telling it to, directly and unambiguously, is
+what moved it from 0 to 12/12 in one change. `runbook_searches` stays a
+separate budget (the more correct design regardless of this result —
+general guidance should not compete with incident-scoped evidence for the
+same scarce slot); `CAUSALOPS_LIVE_MODEL` stays available for future
+experiments, not as a production alternative to Sonnet 5. The imperative
+instruction is the first of these four levers with a real, positive,
+live-verified effect — production still runs FTS5 + Claude Sonnet 5, now
+with `search_runbooks` an active, verified part of every investigation's
+first turn rather than a claim the earlier record set could not back up.
 
 ## Measured lessons
 
@@ -737,20 +760,20 @@ Sonnet 5.
   properties, not one score.** 11/12 correct diagnoses at et=3 and only
   5/12 correct-and-grounded — see "The v8 validation run" for what the
   other 6 were missing.
-- **Retrieval (`search_runbooks`) remained unused across every real batch
-  this project has ever run, including with a real, working Pinecone
-  backend, a free dedicated budget, and a much weaker model, each tried in
-  turn.** 72 tool-enabled records before v8 (see "Paired live evaluation"
-  above), both v8 batches, both arms of the preregistered Pinecone
-  comparison, and both single-arm follow-ups under "Two more angles on the
-  same question" (all above) — 192 tool-enabled records total,
-  `retrieval_mode` `disabled` in every one. Four real, independent
-  candidate explanations were tried, not assumed away: FTS5-only, a real
-  Pinecone backend live-verified to return good results per topic, a free
-  dedicated budget with an explicit prompt sentence, and a 5x-cheaper
-  model likelier to want outside guidance — same outcome every time, so
-  the finding is about model behavior at this task's current prompt/tool
-  design, not backend quality, budget pricing, or model capability alone.
+- **Retrieval (`search_runbooks`) sat at 0 real uses for 192 consecutive
+  tool-enabled records across four independent conditions — FTS5-only, a
+  real Pinecone backend, a free dedicated budget, and a 5x-cheaper model —
+  until one direct imperative instruction moved it to 12/12 in the very
+  next batch.** See "Three more angles on the same question" above for the
+  full sequence. Backend quality, budget pricing, and model capability
+  were each tried and each ruled out as the blocker; only telling the
+  model directly what to do, rather than informing it a tool was free or
+  advantageous, actually changed its behavior. The mechanical lesson: for
+  this model, on this task, an *informational* system-prompt sentence and
+  a *directive* one are not interchangeable, even when they describe the
+  same underlying incentive — and the true cause of the original 0/192
+  pattern (why an informational nudge never worked, only a direct
+  instruction did) is still open.
 
 ## Development
 
