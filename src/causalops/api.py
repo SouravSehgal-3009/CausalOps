@@ -212,22 +212,26 @@ function onGoogleCredential(response) {{
 window.onGoogleCredential = onGoogleCredential;
 document.getElementById("create-form").addEventListener("submit", async (event) => {{
   event.preventDefault();
-  const createHeaders = headers();
-  createHeaders["Idempotency-Key"] = crypto.randomUUID();
-  const view = await request("/api/v1/investigations", {{method: "POST", headers: createHeaders,
-    body: JSON.stringify({{scenario_family: document.getElementById("scenario-family").value}})}});
-  document.getElementById("investigation-id").value = view.investigation_id;
-  await refresh();
+  try {{
+    const createHeaders = headers();
+    createHeaders["Idempotency-Key"] = crypto.randomUUID();
+    const view = await request("/api/v1/investigations", {{method: "POST", headers: createHeaders,
+      body: JSON.stringify({{scenario_family: document.getElementById("scenario-family").value}})}});
+    document.getElementById("investigation-id").value = view.investigation_id;
+    await refresh();
+  }} catch (error) {{ showError(error); }}
 }});
 document.getElementById("refresh").addEventListener("click", () => refresh().catch(showError));
 document.getElementById("decision-form").addEventListener("submit", async (event) => {{
   event.preventDefault();
-  const decision = document.getElementById("decision").value;
-  const payload = {{decision: decision}};
-  if (decision === "reject") payload.rejection_note = document.getElementById("rejection-note").value;
-  await request("/api/v1/investigations/" + encodeURIComponent(id()) + "/decision", {{
-    method: "POST", headers: headers(), body: JSON.stringify(payload)}});
-  await refresh();
+  try {{
+    const decision = document.getElementById("decision").value;
+    const payload = {{decision: decision}};
+    if (decision === "reject") payload.rejection_note = document.getElementById("rejection-note").value;
+    await request("/api/v1/investigations/" + encodeURIComponent(id()) + "/decision", {{
+      method: "POST", headers: headers(), body: JSON.stringify(payload)}});
+    await refresh();
+  }} catch (error) {{ showError(error); }}
 }});
 function showError(error) {{ document.getElementById("result").textContent = error.message; }}
 </script><script src="https://accounts.google.com/gsi/client" async defer>
