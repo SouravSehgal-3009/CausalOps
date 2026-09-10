@@ -255,6 +255,62 @@ class McpBackedReplayRuntimeWiring:
         return replay_model, registry, REPLAY_MODEL_NAME, child.close
 
 
+class McpBackedLiveRuntimeWiring:
+    """A real, live-Claude alternative to `McpBackedReplayRuntimeWiring`,
+    for the hosted API's `api_runtime.ReplayGraphJobRunner`.
+
+    Not a client-facing choice -- `CreateInvestigationRequest` still accepts
+    no model field at all, and `api_runtime.app()` selects this wiring (over
+    the two always-replay wirings) only from one operator-controlled
+    environment variable (`CAUSALOPS_HOSTED_LIVE_MODEL`), read once at
+    worker startup. `ReplayGraphJobRunner` holds exactly one
+    `replay_wiring` instance for its whole process lifetime
+    (`api_runtime.py`), so every investigation the deployment runs -- fresh
+    or resumed after a pause -- uses this same wiring; there is no
+    per-investigation model choice to persist or get wrong on resume.
+
+    Thin wrapper around `build_claude_model_and_mcp_registry` -- the same
+    composition root `evaluate_cli.py` uses -- reshaping its 5-tuple
+    (model, registry, model_name, ledger connection, child teardown) into
+    the `ReplayRuntimeWiring` Protocol's 4-tuple by folding the ledger
+    connection's own close into the returned teardown callable alongside
+    the MCP child's. Every safety property that function already has
+    (credential-presence gate, `LIVE_EVALUATION_MAX_USD` reservation
+    ceiling, the `mcp_policy_adapter._APPROVED_MCP_DISPATCH` approval gate
+    the spawned child itself enforces) applies here unchanged -- nothing
+    about going through this wiring bypasses any of it.
+    """
+
+    def __init__(
+        self, db_path: Path, environment: Mapping[str, str] | None = None
+    ) -> None:
+        self._db_path = db_path
+        self._environment = environment
+
+    def build(
+        self,
+        incident: StoredIncident,
+        paths: RunPaths,
+        budgets: Budgets,
+        *,
+        family: ScenarioFamily,
+    ) -> tuple[
+        ToolCallingModel, Mapping[ToolName, ToolWrapper], str, Callable[[], None]
+    ]:
+        del family  # live mode does real diagnostic work; no fixture to pick
+        model, registry, model_name, ledger_conn, close_child = (
+            build_claude_model_and_mcp_registry(
+                incident, paths, budgets, self._db_path, self._environment
+            )
+        )
+
+        def release() -> None:
+            close_child()
+            ledger_conn.close()
+
+        return model, registry, model_name, release
+
+
 def build_claude_model_and_mcp_registry(
     incident: StoredIncident,
     paths: RunPaths,

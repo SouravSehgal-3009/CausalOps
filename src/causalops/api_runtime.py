@@ -63,7 +63,10 @@ from causalops.live_setup import (
     HostedReplayRuntimeWiring,
     ReplayRuntimeWiring,
 )
-from causalops.mcp_client_registry import McpBackedReplayRuntimeWiring
+from causalops.mcp_client_registry import (
+    McpBackedLiveRuntimeWiring,
+    McpBackedReplayRuntimeWiring,
+)
 from causalops.report import render_report as render_markdown_report
 from causalops.report_snapshot import (
     artifact_path,
@@ -1443,12 +1446,17 @@ class ReportDeliveryWorker:
 
 
 class ReplayGraphJobRunner:
-    """Concrete VM runner wired permanently to the replay model profile.
+    """Concrete VM runner, wired to whichever `ReplayRuntimeWiring` `app()`
+    constructed it with.
 
-    The API never accepts a model selector. This adapter is the only factory
-    runner and passes the fixed ``replay`` profile into the existing graph
-    composition. It is invoked only by the background worker, never during
-    import or HTTP request handling.
+    The HTTP API itself never accepts a model selector --
+    `CreateInvestigationRequest` has no such field, on any deployment. Which
+    wiring this runner holds (scripted replay, or, since
+    `CAUSALOPS_HOSTED_LIVE_MODEL`, a genuinely live `LiveClaudeModel`) is an
+    operator's deployment-time choice via environment variable, resolved
+    once in `app()` and fixed for this process's whole lifetime -- never a
+    per-request or per-investigation choice. It is invoked only by the
+    background worker, never during import or HTTP request handling.
     """
 
     def __init__(
@@ -1826,11 +1834,32 @@ def app() -> FastAPI:
     replay_fixture_kwargs = (
         {"fixture": Path(replay_fixture_override)} if replay_fixture_override else {}
     )
-    replay_wiring: ReplayRuntimeWiring = (
-        McpBackedReplayRuntimeWiring(**replay_fixture_kwargs)
-        if mcp_dispatch_requested
-        else HostedReplayRuntimeWiring(**replay_fixture_kwargs)
-    )
+    # Operator-only deployment toggle, never a client-facing choice --
+    # `CreateInvestigationRequest` still accepts no model field at all.
+    # Read once here, at worker startup; `ReplayGraphJobRunner` then holds
+    # exactly one `replay_wiring` instance for its whole process lifetime,
+    # so every investigation this deployment runs -- fresh or resumed after
+    # a pause -- uses whichever wiring this resolved to, with no
+    # per-investigation choice to persist or get wrong on resume. Safe only
+    # because `CAUSALOPS_ALLOWED_OWNERS` is expected to be a tight,
+    # genuinely trusted allowlist on any deployment that sets this -- see
+    # `docs/CLOUD_RUN_DEMO.md` and `infra/DEPLOYMENT.md`.
+    hosted_live_model_enabled = os.environ.get(
+        "CAUSALOPS_HOSTED_LIVE_MODEL", ""
+    ).strip().lower() in {"1", "true", "yes"}
+    replay_wiring: ReplayRuntimeWiring
+    if hosted_live_model_enabled:
+        # Live mode always uses the real MCP transport -- matching
+        # `evaluate_cli.py`'s own posture, `build_claude_model_and_mcp_
+        # registry` has no direct-dispatch alternative to offer, so this
+        # branch ignores `mcp_dispatch_requested` entirely.
+        replay_wiring = McpBackedLiveRuntimeWiring(
+            ProjectPaths(root=root).checkpoints_db
+        )
+    elif mcp_dispatch_requested:
+        replay_wiring = McpBackedReplayRuntimeWiring(**replay_fixture_kwargs)
+    else:
+        replay_wiring = HostedReplayRuntimeWiring(**replay_fixture_kwargs)
     # Optional: no bucket configured means no GCS upload, unchanged behavior
     # for every deployment that has not set this yet. `GcsArtifactStore`'s
     # own constructor resolves ADC (or impersonated credentials, when
