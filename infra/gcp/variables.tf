@@ -42,5 +42,5 @@ variable "billing_account_id" {
 variable "budget_monthly_usd" {
   type        = number
   default     = 20
-  description = "Conservative monthly notification threshold for the Phase D budget alert. Not a hard spend cap -- GCP has no per-request pre-spend gate the way cost_ledger.py enforces for Claude spend; this only emails/notifies once crossed."
+  description = "Conservative monthly notification threshold for the hosted-deployment budget alert. Not a hard spend cap -- GCP has no per-request pre-spend gate the way cost_ledger.py enforces for Claude spend; this only emails/notifies once crossed."
 }

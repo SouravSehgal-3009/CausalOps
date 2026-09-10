@@ -7,7 +7,7 @@
 resource "google_billing_budget" "phase_d_monthly" {
   count           = var.billing_account_id == "" ? 0 : 1
   billing_account = var.billing_account_id
-  display_name    = "CausalOps Phase D monthly ceiling"
+  display_name    = "CausalOps hosted-deployment monthly ceiling"
 
   budget_filter {
     projects = ["projects/${data.google_project.current.number}"]

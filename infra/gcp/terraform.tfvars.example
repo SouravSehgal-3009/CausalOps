@@ -16,9 +16,9 @@ region = "us-central1"
 # "<something-unique-to-you>-causalops-artifacts".
 artifact_bucket_name = "your-unique-bucket-name-causalops-artifacts"
 
-# --- Everything below is optional: Phase D (Cloud Run API deployment) ---
-# Leave these at their defaults (empty/unset) to stop after the Phase
-# A-C base infra (Firestore + GCS + IAM) -- the CLI and a single
+# --- Everything below is optional: Cloud Run API deployment ---
+# Leave these at their defaults (empty/unset) to stop after the base
+# infra (Firestore + GCS + IAM) -- the CLI and a single
 # VM-hosted `causalops-api` process work fully without any of this.
 # See infra/DEPLOYMENT.md's "Optional: Cloud Run" section before filling
 # these in -- api_image in particular can't be set until you've already

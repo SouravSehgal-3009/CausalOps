@@ -20,5 +20,5 @@ output "api_image_repository" {
 
 output "cloud_run_api_url" {
   value       = length(google_cloud_run_v2_service.api) > 0 ? google_cloud_run_v2_service.api[0].uri : null
-  description = "Live URL once var.api_image is set and applied; null while Phase D's Cloud Run service is skipped."
+  description = "Live URL once var.api_image is set and applied; null while the Cloud Run service is skipped."
 }
