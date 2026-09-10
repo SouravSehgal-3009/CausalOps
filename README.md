@@ -371,6 +371,13 @@ methodology, raw run IDs, and honest negative results included — in
   were each tried and ruled out; a direct imperative prompt instruction
   fixed usage (0/12 → 12/12) — but not for free: `FAILED_SAFE` at et=3 rose
   from 0/12 to 2/12 alongside it, reported as measured, not smoothed over.
+- **Usage isn't the same as impact**: with the tool reliably used, real
+  batches showed diagnostic query volume essentially unchanged whether the
+  mandatory runbook call happened or not (2.92 vs 2.79 mean) — guidance was
+  being cited, not acted on. Letting the model pick the search topic
+  *after* gathering evidence instead of blind from the alert was tried and
+  reverted: it cost usage reliability (12/12 → 7/12) for an unconfirmed
+  relevance benefit.
 
 ## Development
 

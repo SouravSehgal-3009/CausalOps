@@ -92,8 +92,32 @@ tried and ruled out, before one fix worked:
 - `Budgets.runbook_searches` (a dedicated pool, separate from
   `executed_tools`) stays in place regardless — the more correct design.
 
+## Once it was used, was it acted on?
+
+Usage isn't the same question as impact. Two more real, live checks:
+
+- **Diagnostic query volume, with vs. without the mandatory runbook call**
+  (subtracting the runbook call itself for a fair comparison): 2.92 mean
+  before the fix existed, 2.79 mean after — essentially unchanged. The
+  model cited 2-3 runbook passages per run but kept making the same number
+  of raw `query_metric`/`query_logs` calls it always did. **Fix tried**:
+  one more `SYSTEM_TEXT` sentence telling the model to let cited guidance
+  shape its *next check*, not just decorate the report, without letting it
+  count as evidence for the verdict. Shipped; not yet independently
+  re-measured against this specific query-volume question.
+- **Does picking the topic *after* some evidence (instead of blind, from
+  the alert alone) help relevance?** Tested for real — reverted. Usage
+  fell from a reliable 12/12 to 7/12: "exactly once, whenever you choose"
+  competed with the model's own judgment about when it was done, and 5 of
+  12 runs reached a stopping point without ever making the call.
+  `correct_and_grounded` was 4/7 when it did search vs 1/5 when it
+  didn't — suggestive, but confounded by small, different populations, not
+  evidence the later-timing theory actually helped. Net: this traded away
+  guaranteed compliance for an unconfirmed benefit — reverted back to
+  "must be first."
+
 ## Cost
 
-~$34 in real Anthropic spend across every batch on this page, application-
+~$38 in real Anthropic spend across every batch on this page, application-
 wide, tracked in `cost_ledger` and reserved/settled before every request
 against `LIVE_EVALUATION_MAX_USD`.
