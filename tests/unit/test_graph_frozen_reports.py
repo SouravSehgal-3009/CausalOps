@@ -404,6 +404,29 @@ unaffected -- only the digest and `prompt_version` moved.
 matches_frozen`'s `Versions(...)` literal moves from `prompt_version="10"`
 to `prompt_version="11"`, with `policy_version="4"`/
 `tool_registry_version="8"` unchanged.
+
+**The runbook-search-need-not-be-first edit moves every `final_context_
+digest` literal below an eleventh time, and moves `assert_report_matches_
+frozen`'s `prompt_version` field, and nothing else.** `SYSTEM_TEXT`
+(`prompts.py`) dropped the "must be your first proposal, before any
+incident-scoped check" constraint from the mandatory `search_runbooks`
+instruction -- still exactly one call required per investigation, but the
+model now chooses the topic once it has gathered some real evidence,
+rather than guessing blind from the initial alert alone. Motivation: a
+live investigation showed the model picking a topic before any evidence
+existed, fetching guidance for the wrong half of a two-signal ambiguity
+(the passage written for exactly that ambiguity was never fetched) --
+plausible evidence that forcing the search first, before any evidence,
+starves the topic choice of the context it needs to be useful. `system_
+text` is identical across every stage in every scenario here, so the
+reworded sentence shifts every digest in this file again. No scenario
+below ever proposes `search_runbooks`, so ids, disposition, receipt
+shapes, evidence kinds, and event vocabulary are all unaffected -- only
+the digest and `prompt_version` moved. `TOOL_REGISTRY_VERSION`/
+`POLICY_VERSION` are untouched. `assert_report_matches_frozen`'s
+`Versions(...)` literal moves from `prompt_version="11"` to
+`prompt_version="12"`, with `policy_version="4"`/`tool_registry_version="8"`
+unchanged.
 """
 
 from pathlib import Path
@@ -749,7 +772,7 @@ def assert_report_matches_frozen(
     # constant-comparison version of this line to catch it.
     assert report.versions == Versions(
         schema_version="1",
-        prompt_version="11",
+        prompt_version="12",
         policy_version="4",
         tool_registry_version="8",
     )
@@ -786,7 +809,7 @@ def test_the_graph_reproduces_the_frozen_report_for_one_replay_incident(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "08a827c20bba7f7fd0bb7f0410d4e5c1e8209a18f68576440cbe57b90c6615da"
+            "1ea2a871ee0f27b652c8a7db6cfa04212bb15428f0ca49121c9f31e61d9ab85f"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -862,7 +885,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_first_turn_denial(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "db1fc829c8effe676175c880c15edec8fef69a1cb7420fc362bfdf7a58f03322"
+            "92741c2f00757dec71c80f4a1d916ff02167aabf05d48361cb9892b4144288ed"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -943,7 +966,7 @@ def test_the_graph_reproduces_the_frozen_report_after_a_repeated_proposal(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "64ad987c7b309eca310575004a0c8f27d263b1768db20039405c9c577c609285"
+            "399dfa0edb0f94bef00e2b8434d372a2e65cf3cd43f6b2bcd467125cfc136fcd"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=(
@@ -1013,7 +1036,7 @@ def test_the_graph_reproduces_the_frozen_report_when_the_second_call_raises(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "3f7d7531156eff2688a3f7afc07291fafcae0878057f21345aa2748e5a30b059"
+            "84c59034cb22421b685468e0b0ac4afe4646fc5bda5a7f9262f85cecec0fb5d6"
         ),
         evidence_ids=(SYMPTOM_EVIDENCE_ID, "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"),
         receipt_ids=("00000000000000000000000000000002",),
@@ -1070,7 +1093,7 @@ def test_the_graph_reproduces_the_frozen_report_for_two_executed_checks(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4d58020b9b3204799513d3e009b92014134cbd671aa10accca5e6b3fa180276c"
+            "4780e99ee7366a45dfed3551b33584b1db439cc4c18a7ac10b38c323730c68d6"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,
@@ -1171,7 +1194,7 @@ def test_a_simulated_slow_machine_still_matches_the_frozen_report(
         repairs_used=0,
         invalid_responses=0,
         final_context_digest=(
-            "4d58020b9b3204799513d3e009b92014134cbd671aa10accca5e6b3fa180276c"
+            "4780e99ee7366a45dfed3551b33584b1db439cc4c18a7ac10b38c323730c68d6"
         ),
         evidence_ids=(
             SYMPTOM_EVIDENCE_ID,

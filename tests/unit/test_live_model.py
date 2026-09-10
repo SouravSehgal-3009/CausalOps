@@ -567,11 +567,17 @@ def test_the_smallest_final_assessment_prose_matches_what_inputtoolarge_assumes(
     # -- a live investigation found the mandatory runbook call changed
     # nothing else about the model's diagnostic behavior (near-identical
     # tool-call counts with or without it), so this is the attempt to close
-    # that gap.
-    assert len(total) == 3_330
+    # that gap. It moved a ninth time, from 3,330 to 3,430: `SYSTEM_TEXT`
+    # dropped the "must be first, before any incident-scoped check"
+    # constraint on the mandatory `search_runbooks` call -- still exactly
+    # one call required, but the topic is now chosen once real evidence
+    # exists, not guessed blind from the alert alone (a live investigation
+    # showed the blind-first choice fetching guidance for the wrong half
+    # of a two-signal ambiguity).
+    assert len(total) == 3_430
     # Ratio 1.0 makes the token estimate equal the character
     # count -- the real behaviour, asserted directly rather than derived.
-    assert estimate_input_tokens(total) == 3_330
+    assert estimate_input_tokens(total) == 3_430
 
 
 def test_a_post_retrieval_proposal_sends_when_only_its_schema_exceeds_the_cap(

@@ -20,7 +20,7 @@ from causalops.domain import (
 from causalops.models import Stage
 from causalops.tools import ToolName
 
-PROMPT_VERSION = "11"
+PROMPT_VERSION = "12"
 
 FENCE_OPEN = "<untrusted-telemetry>"
 FENCE_CLOSE = "</untrusted-telemetry>"
@@ -66,12 +66,13 @@ shown below as "runbook searches left." Still, let it shape your investigation: 
 the guidance points at a specific ordering, mechanism, or distinguishing signal
 between your candidate causes, propose the check that would reveal it next, rather
 than defaulting to whichever check you would have picked anyway.
-Your first proposal in this investigation must be exactly one search_runbooks call,
-choosing whichever topic best matches this incident's alert signature, before any
-incident-scoped check. Do not repeat this once you have already done it earlier in
-this same investigation -- check whether "runbook searches left" below is already at
-zero, or a runbook line is already present in the evidence above, before proposing
-another one.
+You must call search_runbooks exactly once during this investigation -- not
+necessarily on your first turn. Choose the topic once you have enough evidence to
+judge which one actually matches what you are seeing, rather than guessing from the
+alert alone before you have gathered anything. Do not repeat this once you have
+already done it earlier in this same investigation -- check whether "runbook
+searches left" below is already at zero, or a runbook line is already present in
+the evidence above, before proposing another one.
 Answer only with the structured fields the stage asks for. When you call a
 tool, do not add narrative text, explanation, or commentary outside the tool
 call's own fields."""
