@@ -981,7 +981,9 @@ def _make_dispatch_tool(
         assert state["pending_proposal"] is not None
         proposal = ToolProposal.model_validate(state["pending_proposal"])
         receipts = _rebuild_receipts(state)
-        ledger = ReservationLedger.from_receipts(receipts, budgets.executed_tools)
+        ledger = ReservationLedger.from_receipts(
+            receipts, budgets.executed_tools, budgets.runbook_searches
+        )
         seen = set(state["seen_fingerprints"])
         recorder = _rebuild_recorder(state, event_clock)
         recorder.event(

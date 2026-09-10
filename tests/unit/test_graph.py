@@ -256,6 +256,35 @@ def test_the_loop_guard_skips_a_second_turn_once_the_check_budget_is_spent(
     ]
 
 
+def test_a_zero_runbook_search_budget_denies_the_first_proposal(
+    tmp_path: Path,
+) -> None:
+    """Regression test: `dispatch_tool`'s `ReservationLedger.from_receipts`
+    once omitted `budgets.runbook_searches`, silently falling back to the
+    class default of 1 -- which happened to match `Budgets()`'s own default,
+    so the bug was invisible under every budget the existing suite ever
+    constructed. A non-default `runbook_searches=0` is the one value that
+    tells the two apart: with the bug, the ledger would still see the
+    hardcoded default of 1 and allow the first search_runbooks proposal;
+    fixed, it sees the real budget of 0 and denies it, the same as
+    `executed_tools=0` already denies a first `query_logs` proposal
+    elsewhere in this file."""
+    script = {
+        "initial_plan": [plan_json(proposal=runbooks_proposal())],
+        "hypothesis_update": [update_json(stop_reason="nothing safe left to check")],
+        "final_assessment": [assessment_json()],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = registry_with()
+    budgets = Budgets(runbook_searches=0)
+
+    result, _ = investigate_via_graph(model, registry=registry, budgets=budgets)
+
+    (only_receipt,) = result.receipts
+    assert only_receipt.policy_result is PolicyResult.DENIED
+    assert only_receipt.reason_code is ReasonCode.BUDGET_EXHAUSTED
+
+
 def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report() -> (
     None
 ):
