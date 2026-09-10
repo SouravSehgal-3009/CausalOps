@@ -1,0 +1,20 @@
+[Unit]
+Description=CausalOps hosted API + replay worker
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace with the actual user this repo is checked out as.
+User=YOUR_USER
+# Replace with the actual absolute path to this repo's checkout.
+WorkingDirectory=/absolute/path/to/CausalOps
+EnvironmentFile=/absolute/path/to/CausalOps/.env.vm
+# Replace with the real path to `uv` (`which uv` on this machine) --
+# systemd does not source your shell's PATH.
+ExecStart=/absolute/path/to/uv run uvicorn causalops.api_runtime:app --factory --workers 1 --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

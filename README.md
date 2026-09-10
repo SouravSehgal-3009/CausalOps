@@ -307,6 +307,11 @@ See `.env.example` for every environment variable CausalOps reads, including
 `LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling described
 above; defaults to 5.00 if unset).
 
+Everything above is local and free. For the separate **hosted API**
+deployment (a real browser-facing sign-in flow, backed by GCP Firestore,
+optionally Cloud Run) on your own GCP account, see
+[`infra/DEPLOYMENT.md`](infra/DEPLOYMENT.md).
+
 ## Command reference
 
 | Command | What it does |

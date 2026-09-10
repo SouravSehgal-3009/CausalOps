@@ -1,0 +1,37 @@
+# Copy this file to terraform.tfvars (gitignored -- never commit real
+# values) and fill in your own project's details. See
+# infra/DEPLOYMENT.md for the full walkthrough these variables belong to.
+
+# Your GCP project id (not the numeric project number).
+project_id = "your-gcp-project-id"
+
+# Region for the Firestore database, GCS bucket, Artifact Registry repo,
+# and Cloud Run service. Pick one close to you; all of Firestore/Cloud
+# Run/Artifact Registry support most regions (Firestore Native mode
+# requires a real region or multi-region id, not "global").
+region = "us-central1"
+
+# Must be globally unique across ALL of GCS, not just your project --
+# bucket names collide across the entire platform. A common pattern:
+# "<something-unique-to-you>-causalops-artifacts".
+artifact_bucket_name = "your-unique-bucket-name-causalops-artifacts"
+
+# --- Everything below is optional: Phase D (Cloud Run API deployment) ---
+# Leave these at their defaults (empty/unset) to stop after the Phase
+# A-C base infra (Firestore + GCS + IAM) -- the CLI and a single
+# VM-hosted `causalops-api` process work fully without any of this.
+# See infra/DEPLOYMENT.md's "Optional: Cloud Run" section before filling
+# these in -- api_image in particular can't be set until you've already
+# built and pushed an image, which itself needs the base infra applied
+# first (chicken-and-egg by design: apply base, build/push, then set
+# these and apply again).
+
+# api_image             = "us-central1-docker.pkg.dev/your-gcp-project-id/causalops-api/causalops-api:v1"
+# google_client_id      = "123456789-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
+# allowed_owners        = ["you@example.com"]
+
+# Optional monthly billing-alert threshold (see infra/DEPLOYMENT.md --
+# needs billing-account-level IAM most project-scoped identities don't
+# have; skip if terraform apply refuses with a billing-permission error).
+# billing_account_id = "billingAccounts/XXXXXX-XXXXXX-XXXXXX"
+# budget_monthly_usd  = 20
