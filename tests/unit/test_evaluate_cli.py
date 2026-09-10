@@ -355,7 +355,7 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn, lambda: None
+        return model, registry, "claude-sonnet-5", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
@@ -396,7 +396,7 @@ def test_run_evaluation_drives_every_family_as_a_baseline_then_tool_enabled_pair
         assert call["suppress_escalation"] is True
         assert call["no_tool_baseline"] is (index % 2 == 0)
     for record in records:
-        assert record.model_name == "fake-claude-model"
+        assert record.model_name == "claude-sonnet-5"
         assert record.git_sha == "f" * 40
         assert record.git_dirty is False
         assert record.executed_tools == 2
@@ -460,7 +460,7 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn, lambda: None
+        return model, registry, "claude-sonnet-5", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
@@ -494,7 +494,7 @@ def test_records_already_scored_before_a_crash_survive_on_disk(
     incident_ids = {record.run_key.split("/", 1)[0] for record in on_disk}
     assert len(incident_ids) == 1
     for record in on_disk:
-        assert record.model_name == "fake-claude-model"
+        assert record.model_name == "claude-sonnet-5"
 
 
 def _prepare_stubbed_evaluation(
@@ -666,7 +666,7 @@ def test_a_cleanup_failure_after_a_successful_run_still_propagates(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn, lambda: None
+        return model, registry, "claude-sonnet-5", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
@@ -854,7 +854,7 @@ def test_main_writes_a_summary_alongside_records(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn, lambda: None
+        return model, registry, "claude-sonnet-5", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)
@@ -964,7 +964,7 @@ def test_main_reports_a_clean_failure_when_the_summary_write_fails(
             run_metric=RecordingMetricBackend(), run_logs=RecordingLogsBackend()
         )
         ledger_conn = sqlite3.connect(":memory:")
-        return model, registry, "fake-claude-model", ledger_conn, lambda: None
+        return model, registry, "claude-sonnet-5", ledger_conn, lambda: None
 
     monkeypatch.setattr("causalops.evaluate_cli.start_scenario", _fake_start_scenario)
     monkeypatch.setattr("causalops.evaluate_cli.reset_scenario", fake_reset_scenario)

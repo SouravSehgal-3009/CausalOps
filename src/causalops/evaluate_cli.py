@@ -78,6 +78,7 @@ from causalops.evaluation import (
 )
 from causalops.evidence import new_opaque_id
 from causalops.graph import run_graph_investigation
+from causalops.live_model import pricing_for_model_name
 from causalops.live_setup import (
     MAXIMUM_POSSIBLE_RESERVATION_USD,
     ProviderDisabledError,
@@ -85,7 +86,6 @@ from causalops.live_setup import (
     live_evaluation_ceiling_usd,
 )
 from causalops.mcp_client_registry import build_claude_model_and_mcp_registry
-from causalops.pricing import CLAUDE_SONNET_5_PRICING
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import (
     RunEvent,
@@ -393,8 +393,8 @@ def _run_one(
             runbook_corpus_version=runbook_corpus_version,
             fixture_sha256=fixture_sha256,
             model_name=model_name,
-            pricing_source=CLAUDE_SONNET_5_PRICING.source,
-            pricing_verified_on=CLAUDE_SONNET_5_PRICING.verified_on,
+            pricing_source=pricing_for_model_name(model_name).source,
+            pricing_verified_on=pricing_for_model_name(model_name).verified_on,
             configured_ceiling_usd=configured_ceiling_usd,
             reserved_usd=reserved_usd,
             actual_usd=None if incomplete_settlement else actual_usd,

@@ -32,7 +32,7 @@ still rejected locally and use the graph's normal repair path.
 
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -68,6 +68,7 @@ from causalops.models import (
     parse_response,
 )
 from causalops.pricing import (
+    CLAUDE_HAIKU_4_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -87,9 +88,73 @@ from causalops.tools import (
     ToolName,
 )
 
-# claude-sonnet-5 is the model specified for the live adapter, not a free
-# choice this module makes.
+# claude-sonnet-5 is the default model for the live adapter, kept as the
+# module-level constant every existing caller/test already imports. Opus is
+# deliberately not offered here: the two live behavioral experiments this
+# constant's docstring history covers (README's "Pinecone semantic-
+# retrieval experiment" and the dedicated runbook-search budget) both need
+# a *weaker* model to be informative, not a more capable, more expensive
+# one that would only be even more confident from raw evidence alone.
 MODEL_NAME = "claude-sonnet-5"
+
+LIVE_MODEL_VARIABLE = "CAUSALOPS_LIVE_MODEL"
+_LIVE_MODEL_PRICING: dict[str, PricingSnapshot] = {
+    "sonnet": CLAUDE_SONNET_5_PRICING,
+    "haiku": CLAUDE_HAIKU_4_5_PRICING,
+}
+# Keyed by the real provider model id (`PricingSnapshot.model_name`), not
+# the short `CAUSALOPS_LIVE_MODEL` key above -- `pricing_for_model_name`
+# below is how a caller that only has the model name a run actually used
+# (e.g. `evaluate_cli.py`'s `EvaluationRecord.model_name`, already resolved
+# once per run) recovers that same run's pricing provenance
+# (`source`/`verified_on`) without re-reading `CAUSALOPS_LIVE_MODEL` a
+# second time -- a second read could disagree with the first if the
+# environment changed between the two calls, which a single resolved
+# string can never do.
+_PRICING_BY_MODEL_NAME: dict[str, PricingSnapshot] = {
+    pricing.model_name: pricing for pricing in _LIVE_MODEL_PRICING.values()
+}
+
+
+class UnknownLiveModel(ValueError):
+    """`CAUSALOPS_LIVE_MODEL` named a model this adapter does not support."""
+
+
+def pricing_for_model_name(model_name: str) -> PricingSnapshot:
+    """The `PricingSnapshot` whose `model_name` matches exactly -- for
+    recovering pricing provenance from an already-resolved run's model
+    name, never for resolving which model to use in the first place (that
+    is `resolve_live_model_pricing`'s job, from configuration, not a
+    result)."""
+    try:
+        return _PRICING_BY_MODEL_NAME[model_name]
+    except KeyError:
+        raise UnknownLiveModel(
+            f"no known pricing for model_name={model_name!r}"
+        ) from None
+
+
+def resolve_live_model_pricing(environment: Mapping[str, str]) -> PricingSnapshot:
+    """Which live model's `PricingSnapshot` (and, through
+    `PricingSnapshot.model_name`, which real provider model id) this run
+    uses -- absent or blank defaults to Sonnet 5, matching every run before
+    this variable existed. An unrecognized value is refused loudly rather
+    than silently falling back to the default, the same posture
+    `retrieval_experiment.rag_experiment_enabled`'s sibling gates take for
+    every other owner-configured choice in this codebase: a typo'd model
+    name should never silently run (and bill) a different model than the
+    owner asked for.
+    """
+    raw = environment.get(LIVE_MODEL_VARIABLE, "").strip().lower()
+    if not raw:
+        return CLAUDE_SONNET_5_PRICING
+    try:
+        return _LIVE_MODEL_PRICING[raw]
+    except KeyError:
+        raise UnknownLiveModel(
+            f"{LIVE_MODEL_VARIABLE}={raw!r} is not one of {sorted(_LIVE_MODEL_PRICING)}"
+        ) from None
+
 
 # Neither collides with any `ToolName` value (`tools.py`) -- Claude echoes
 # back exactly the tool name it was given, so this module's own

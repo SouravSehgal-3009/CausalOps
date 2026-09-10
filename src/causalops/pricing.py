@@ -109,3 +109,17 @@ CLAUDE_SONNET_5_PRICING = PricingSnapshot(
     source="https://platform.claude.com/docs/en/about-claude/pricing",
     verified_on="2026-08-22",
 )
+
+# Claude Haiku 4.5's standard per-token rate, confirmed via
+# platform.claude.com's own pricing page on the date below. `model_name`
+# is the dated snapshot id, not a short alias -- Sonnet 5's short alias
+# ("claude-sonnet-5") is confirmed to resolve on this project's own live
+# calls, but no equivalent short alias for Haiku 4.5 was confirmed, so the
+# full dated id is used here rather than assumed.
+CLAUDE_HAIKU_4_5_PRICING = PricingSnapshot(
+    model_name="claude-haiku-4-5-20251001",
+    input_usd_per_million_tokens=1.00,
+    output_usd_per_million_tokens=5.00,
+    source="https://platform.claude.com/docs/en/about-claude/pricing",
+    verified_on="2026-09-10",
+)

@@ -44,8 +44,7 @@ from causalops.domain import (
     ToolOutcome,
 )
 from causalops.evidence import failed_check
-from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
-from causalops.live_model import LiveClaudeModel
+from causalops.live_model import LiveClaudeModel, resolve_live_model_pricing
 from causalops.live_setup import (
     ENABLE_CLAUDE_VARIABLE,
     FAMILY_REPLAY_FIXTURES,
@@ -297,9 +296,11 @@ def build_claude_model_and_mcp_registry(
     ledger_conn = sqlite3.connect(str(db_path), check_same_thread=False)
     ensure_cost_ledger_table(ledger_conn)
     credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
+    pricing = resolve_live_model_pricing(process_environment)
     live_model = LiveClaudeModel(
         ledger_conn,
         ceiling_usd=live_evaluation_ceiling_usd(process_environment),
+        pricing=pricing,
         credential_present=credential_present,
     )
-    return live_model, registry, LIVE_MODEL_NAME, ledger_conn, child.close
+    return live_model, registry, pricing.model_name, ledger_conn, child.close

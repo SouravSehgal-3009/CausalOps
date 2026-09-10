@@ -31,6 +31,7 @@ from causalops.doctor import (
     run_doctor,
 )
 from causalops.domain import (
+    REPLAY_MODEL_NAME,
     Budgets,
     Disposition,
     EscalatedInvestigation,
@@ -44,7 +45,6 @@ from causalops.graph import (
     resume_graph_investigation,
     run_graph_investigation,
 )
-from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
 from causalops.live_setup import ProviderDisabledError, build_model_and_registry
 from causalops.report import render_report as render_markdown_report
 from causalops.run_records import RunRecorder, RunRecordError, finalize_investigation
@@ -448,6 +448,14 @@ def _resolve_thread_incident_and_model(
     written before this field existed has no `model_name` key at all and
     defaults to `REPLAY_MODEL_NAME`: it can only ever have been a replay
     run, since no other kind existed yet.
+
+    `model_choice` is `"claude"` for anything other than `REPLAY_MODEL_NAME`,
+    not an exact match against one specific live model's name:
+    `CAUSALOPS_LIVE_MODEL` (`live_model.resolve_live_model_pricing`) can
+    persist more than one live `model_name` now, and an exact-match check
+    would relabel a resumed run on any live model but the default one
+    `"replay"` -- the same bug this docstring already names, for a second
+    live model instead of a missing key.
     """
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     checkpoint = checkpointer.get_tuple(config)
@@ -463,9 +471,18 @@ def _resolve_thread_incident_and_model(
             CheckpointStoreReasonCode.THREAD_NOT_FOUND,
             f"thread {thread_id} has no recorded incident_id",
         )
-    model_name = channel_values.get("model_name")
+    # `REPLAY_MODEL_NAME` default: a checkpoint written before this key
+    # existed has no `model_name` at all -- see this function's own
+    # docstring for why that can only ever have been a replay run.
+    model_name = channel_values.get("model_name", REPLAY_MODEL_NAME)
+    # "not replay", not "equals one specific live model's name": more than
+    # one live model name is possible now (`CAUSALOPS_LIVE_MODEL`), and an
+    # exact-match check against a single constant would relabel a resumed
+    # run on any other live model "replay" -- the same bug this function's
+    # docstring already names, reproduced for a second live model instead
+    # of a missing key.
     model_choice: Literal["replay", "claude"] = (
-        "claude" if model_name == LIVE_MODEL_NAME else "replay"
+        "claude" if model_name != REPLAY_MODEL_NAME else "replay"
     )
     return incident_id, model_choice
 

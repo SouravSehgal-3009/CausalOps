@@ -32,11 +32,11 @@ from causalops.domain import (
     RunbookCheckOutcome,
     StoredIncident,
 )
-from causalops.live_model import MODEL_NAME as LIVE_MODEL_NAME
 from causalops.live_model import (
     LiveClaudeModel,
     maximum_possible_reservation_usd,
     minimum_possible_reservation_usd,
+    resolve_live_model_pricing,
 )
 from causalops.model_profiles import (
     CLAUDE_LEGACY_DISABLED,
@@ -502,9 +502,11 @@ def build_model_and_registry(
     # module neither imports `os` nor names the variable in code), so this
     # `bool` is the only thing that crosses that boundary.
     credential_present = bool(process_environment.get(API_KEY_VARIABLE, "").strip())
+    pricing = resolve_live_model_pricing(process_environment)
     live_model = LiveClaudeModel(
         ledger_conn,
         ceiling_usd=live_evaluation_ceiling_usd(process_environment),
+        pricing=pricing,
         credential_present=credential_present,
     )
-    return live_model, registry, LIVE_MODEL_NAME, ledger_conn
+    return live_model, registry, pricing.model_name, ledger_conn

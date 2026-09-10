@@ -36,8 +36,10 @@ from causalops.domain import (
     utc_now,
 )
 from causalops.graph import run_graph_investigation
+from causalops.live_model import MODEL_NAME
 from causalops.live_setup import ProviderDisabledError
 from causalops.models import ReplayToolCallingModel
+from causalops.pricing import CLAUDE_HAIKU_4_5_PRICING
 from causalops.run_records import RunRecorder
 from causalops.scenario_control import LabError, LabReasonCode
 from causalops.telemetry import RunPaths
@@ -592,7 +594,30 @@ def test_model_name_round_trips_through_a_stored_checkpoint(tmp_path: Path) -> N
     currently protected only by prose -- mutation-proven: hardcoding its second
     return value to `"replay"` still leaves 476 passed without this test."""
     thread_id = "thread-live"
-    _settle_a_replay_investigation(tmp_path, thread_id, model_name=cli.LIVE_MODEL_NAME)
+    _settle_a_replay_investigation(tmp_path, thread_id, model_name=MODEL_NAME)
+
+    with cli._sqlite_checkpointer(tmp_path / "checkpoints.db") as checkpointer:
+        incident_id, model_choice = cli._resolve_thread_incident_and_model(
+            checkpointer, thread_id
+        )
+
+    assert (incident_id, model_choice) == (incident_scope().incident_id, "claude")
+
+
+def test_a_non_default_live_model_still_resolves_to_claude_on_resume(
+    tmp_path: Path,
+) -> None:
+    """`CAUSALOPS_LIVE_MODEL=haiku` persists a different `model_name` than
+    the Sonnet default this module's other checkpoint-round-trip test uses
+    -- classification must key off "is this not a replay run", not an
+    exact match against one specific live model's name, or a resumed Haiku
+    run would be silently relabelled "replay" the same way the test above's
+    own docstring already documents happened once for the single-model
+    case."""
+    thread_id = "thread-live-haiku"
+    _settle_a_replay_investigation(
+        tmp_path, thread_id, model_name=CLAUDE_HAIKU_4_5_PRICING.model_name
+    )
 
     with cli._sqlite_checkpointer(tmp_path / "checkpoints.db") as checkpointer:
         incident_id, model_choice = cli._resolve_thread_incident_and_model(

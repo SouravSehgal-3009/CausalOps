@@ -47,21 +47,27 @@ from causalops.domain import (
     ToolProposal,
 )
 from causalops.live_model import (
+    LIVE_MODEL_VARIABLE,
     RECORD_FINAL_ASSESSMENT_TOOL_NAME,
     RECORD_STOP_TOOL_NAME,
     LiveClaudeModel,
     MissingCredential,
     MissingProviderUsage,
     StopRecord,
+    UnknownLiveModel,
     _build_chat_anthropic,
     _domain_tool_definitions,
     _final_assessment_tool_definition,
     _stop_tool_definition,
     maximum_possible_reservation_usd,
+    pricing_for_model_name,
+    resolve_live_model_pricing,
 )
 from causalops.models import ModelRequest, Stage
 from causalops.policy import authorize
 from causalops.pricing import (
+    CLAUDE_HAIKU_4_5_PRICING,
+    CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     MAX_REQUEST_SECONDS,
@@ -81,6 +87,47 @@ CHEAP_PRICING = PricingSnapshot(
     source="test",
     verified_on="2026-01-01",
 )
+
+
+def test_resolve_live_model_pricing_defaults_to_sonnet_when_absent_or_blank() -> None:
+    assert resolve_live_model_pricing({}) is CLAUDE_SONNET_5_PRICING
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: ""}) is (
+        CLAUDE_SONNET_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "   "}) is (
+        CLAUDE_SONNET_5_PRICING
+    )
+
+
+def test_resolve_live_model_pricing_selects_haiku_case_insensitively() -> None:
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "haiku"}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "HAIKU"}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: " haiku "}) is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+
+
+def test_resolve_live_model_pricing_refuses_an_unrecognized_value() -> None:
+    """A typo'd model name must never silently fall back to the default --
+    that would run (and bill) a different model than the owner asked for."""
+    with pytest.raises(UnknownLiveModel, match="opus"):
+        resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "opus"})
+
+
+def test_pricing_for_model_name_recovers_each_known_snapshot() -> None:
+    assert pricing_for_model_name("claude-sonnet-5") is CLAUDE_SONNET_5_PRICING
+    assert pricing_for_model_name("claude-haiku-4-5-20251001") is (
+        CLAUDE_HAIKU_4_5_PRICING
+    )
+
+
+def test_pricing_for_model_name_refuses_an_unknown_name() -> None:
+    with pytest.raises(UnknownLiveModel, match="not-a-real-model"):
+        pricing_for_model_name("not-a-real-model")
 
 
 class _FakeBoundModel:
