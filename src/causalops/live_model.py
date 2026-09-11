@@ -69,6 +69,7 @@ from causalops.models import (
 )
 from causalops.pricing import (
     CLAUDE_HAIKU_4_5_PRICING,
+    CLAUDE_OPUS_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -89,18 +90,23 @@ from causalops.tools import (
 )
 
 # claude-sonnet-5 is the default model for the live adapter, kept as the
-# module-level constant every existing caller/test already imports. Opus is
-# deliberately not offered here: the two live behavioral experiments this
-# constant's docstring history covers (README's "Pinecone semantic-
-# retrieval experiment" and the dedicated runbook-search budget) both need
-# a *weaker* model to be informative, not a more capable, more expensive
-# one that would only be even more confident from raw evidence alone.
+# module-level constant every existing caller/test already imports. Haiku
+# 4.5 was added for two behavioral experiments (README's "Pinecone
+# semantic-retrieval experiment" and the dedicated runbook-search budget)
+# that both needed a *weaker* model to be informative -- it turned out too
+# weak to use at all (diagnosis collapsed to 0/12, `docs/RESULTS.md`).
+# Opus 5, added later, is the opposite direction: this project's own
+# `FAILED_SAFE` investigation found the remaining failures are structured-
+# output formatting slips (a dropped required field, stray narrative text
+# outside a tool call), not obviously a capability gap Sonnet 5 has --
+# added to test that directly rather than assume a bigger model helps.
 MODEL_NAME = "claude-sonnet-5"
 
 LIVE_MODEL_VARIABLE = "CAUSALOPS_LIVE_MODEL"
 _LIVE_MODEL_PRICING: dict[str, PricingSnapshot] = {
     "sonnet": CLAUDE_SONNET_5_PRICING,
     "haiku": CLAUDE_HAIKU_4_5_PRICING,
+    "opus": CLAUDE_OPUS_5_PRICING,
 }
 # Keyed by the real provider model id (`PricingSnapshot.model_name`), not
 # the short `CAUSALOPS_LIVE_MODEL` key above -- `pricing_for_model_name`

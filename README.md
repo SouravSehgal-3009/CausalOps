@@ -250,8 +250,8 @@ export ANTHROPIC_API_KEY="<your key>"
 
 See `.env.example` for every environment variable CausalOps reads, including
 `LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling; defaults
-to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`, defaults to
-Sonnet 5).
+to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`/`opus`,
+defaults to Sonnet 5).
 
 Everything above is local and free. For the separate **hosted API**
 deployment (a real browser-facing sign-in flow, backed by GCP Firestore,
