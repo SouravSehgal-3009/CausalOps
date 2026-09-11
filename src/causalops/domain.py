@@ -301,10 +301,15 @@ class Budgets(BaseModel):
     # the whole budget. (A run with several `INVESTIGATE` turns could in
     # principle want more than one INVESTIGATE-side repair; `le=2` is this
     # design's intended per-run allocation, not a proof that a third repair
-    # could never help.) Nothing in production constructs `repairs=2` today
-    # (the default stays 1); the bound exists so a future caller cannot pass
-    # a value this design has no stated meaning for.
-    repairs: int = Field(default=1, ge=0, le=2)
+    # could never help.) Default raised from 1 to 2 after a real anomaly
+    # review found this exact gap live: every sampled `REPAIR_EXHAUSTED`
+    # failure in `results/investigations/` spent its one repair on an early
+    # `hypothesis_update` visible-text slip, leaving the unrelated, later
+    # `final_assessment` turn zero margin for its own first mistake. A
+    # repair costs nothing against `model_calls` on a clean run (offset in
+    # `_model_calls_left`, `graph.py`) -- this only spends when it would
+    # otherwise fail safe.
+    repairs: int = Field(default=2, ge=0, le=2)
     log_rows: int = 40
 
 
