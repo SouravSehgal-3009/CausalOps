@@ -5,32 +5,30 @@ projection or simulation. Run IDs are given so any row can be independently
 checked against `results/evaluations/<id>/`. See the root
 [`README.md`](../README.md) for architecture and setup.
 
-## Headline: evidence-budget curve (FTS5, Claude Sonnet 5, current prompt)
+## Headline: evidence-budget curve (FTS5, Claude Sonnet 5, current prompt and budgets)
 
 12-incident corpus, `causalops-evaluate --executed-tools <N>`, one no-tool
-baseline + one tool-enabled run per incident. Current prompt = includes the
-mandatory runbook-first instruction (see below) — these are the real,
-current numbers, not a historical peak from before that instruction
-existed.
+baseline + one tool-enabled run per incident — the real, current numbers
+under what's actually shipped, not a historical peak.
 
 | et | Baseline diagnosis | Tool-enabled diagnosis | Correct & grounded | `FAILED_SAFE` | Run ID |
 |---|---:|---:|---:|---:|---|
 | 2 | — | not yet re-verified under the current prompt | — | — | — |
-| 3 | 3/12 | 8/12, 9/12 (two batches) | 5/12 (both) | 2/12 (both) | `4e2f8ec4...`, `40cb6f69...` |
+| 3 | 3/12 | 9/12 | 5/12 | **0/12** | `e4e38fd8...` |
 | 4 | 3/12 | 7/12 | 3/12 | 5/12 | `20f432b0...` |
 
-- **et=3 is still the recommended operating point** — best diagnosis rate
-  of the two, though `FAILED_SAFE` is no longer zero there (see below).
-- **A real, honest tradeoff from the runbook-first fix**: `FAILED_SAFE`
-  at et=3 went from 0/12 (before that instruction existed) to 2/12 in
-  *both* new batches — plausibly the extra mandatory turn tightens the
-  model-call headroom the same `REPAIR_EXHAUSTED` mechanism below already
-  depends on. Not yet root-caused further; reported as measured, not
-  explained away.
-- et=4's `FAILED_SAFE` runs trace to one mechanism: a single investigation-
-  wide repair credit gets consumed by an early structured-output
-  violation, leaving none for a later one. Safe stops, not wrong
-  diagnoses — still open, not yet fixed.
+- **et=3 is the recommended operating point** — best diagnosis rate, and,
+  as of the repair-budget fix below, zero `FAILED_SAFE`.
+- **History of the et=3 `FAILED_SAFE` number, for the full trail**: 0/12
+  before the runbook-first instruction existed → 2/12 in two batches after
+  it shipped (`4e2f8ec4...`, `40cb6f69...`, both `REPAIR_EXHAUSTED`) → back
+  to 0/12 after root-causing that regression and raising the repair budget
+  (see "The cross-stage repair budget" below for the mechanism). The
+  earlier 8/12-9/12 diagnosis range collapses to a single, current 9/12 now
+  that the fix is in — reported as one number, not averaged away.
+- et=4's `FAILED_SAFE` runs trace to the same mechanism the fix below
+  targets, but haven't been re-measured at et=4 since it landed — still
+  open at that operating point specifically.
 - A real bug was found and fixed via earlier runs, not code review:
   `query_logs`'s `row_limit` schema didn't state the real 40-row policy
   limit, so the model's default guess (50) drew a policy denial in 21 of

@@ -3,18 +3,20 @@
 ## Executive summary
 
 > CausalOps is a policy-governed agentic incident investigator that improved
-> diagnosis correctness from 3/12 without tools to 8-9/12 with three bounded
-> diagnostic checks, holding grounded-citation correctness at 5/12 across
-> repeated real runs.
+> diagnosis correctness from 3/12 without tools to 9/12 with three bounded
+> diagnostic checks, holding grounded-citation correctness at 5/12 with
+> zero failed-safe runs.
 
 That result is measured against a fixed, evaluator-hidden 12-incident
 synthetic corpus — a small sample from a local synthetic lab, not a
-production benchmark, and it's the current, real number under the
-currently-shipped prompt, not a historical best. See
+production benchmark, and it's the current, real number under what's
+actually shipped today, not a historical best. See
 [`docs/RESULTS.md`](docs/RESULTS.md) for the full scorecard, every real
-live-model run this project has made — including where a later fix traded
-some diagnosis reliability for something else, honestly reported — and
-what each number does and doesn't establish.
+live-model run this project has made — including a real regression that
+was found, root-caused, and fixed rather than smoothed over — and what
+each number does and doesn't establish. A second live model, Claude
+Opus 5, was also tested against the same corpus and scored a clean 12/12
+at roughly 2.5x the cost — see "Model selection" in that same file.
 
 ```mermaid
 flowchart TD
@@ -358,9 +360,9 @@ project has run against the real live model, is documented in full —
 methodology, raw run IDs, and honest negative results included — in
 [`docs/RESULTS.md`](docs/RESULTS.md). Highlights:
 
-- **8-9/12 correct diagnoses, 5/12 fully grounded**, at the recommended
-  `executed_tools=3` operating point, across two repeated real batches —
-  the current headline result.
+- **9/12 correct diagnoses, 5/12 fully grounded, 0/12 failed-safe**, at the
+  recommended `executed_tools=3` operating point — the current headline
+  result, after the repair-budget fix below.
 - **A real mechanical bug found and fixed via live evaluation**: 21 policy
   denials across 36 tool-enabled runs, traced to a schema/budget mismatch,
   eliminated to 0/36 after the fix.
