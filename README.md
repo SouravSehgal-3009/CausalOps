@@ -381,6 +381,23 @@ methodology, raw run IDs, and honest negative results included — in
   *after* gathering evidence instead of blind from the alert was tried and
   reverted: it cost usage reliability (12/12 → 7/12) for an unconfirmed
   relevance benefit.
+- **A real fix for cross-stage `FAILED_SAFE`**: the structured-output repair
+  budget was one credit for the whole investigation, not per stage, so an
+  early formatting slip could leave a later, unrelated stage no margin for
+  its own first mistake. Raising it to two (the design already anticipated
+  this exact split) took a confirming Sonnet 5 batch's `REPAIR_EXHAUSTED`
+  count to zero.
+- **Model selection: Claude Opus 5, tested against the same corpus.**
+  Under the fix above, Opus 5 scored a clean 12/12 diagnosis and 0/12
+  `FAILED_SAFE` at both retrieval backends (FTS5 grounded better than
+  Pinecone for Opus — 8/12 vs 6/12), against Sonnet 5's 9/12 diagnosis —
+  at roughly 2.5x Sonnet's per-token rate. Also found a real, repeatable
+  weakness outside that headline: with zero diagnostic evidence available,
+  Opus reached for a tool that isn't valid at that stage far more often
+  than Sonnet does (8-11/12 vs 1/12) — the more capable model was
+  measurably *more* prone to this specific failure, not less. Sonnet 5
+  remains the production default; Opus 5 is a documented, available
+  alternative (`CAUSALOPS_LIVE_MODEL=opus`).
 
 ## Development
 

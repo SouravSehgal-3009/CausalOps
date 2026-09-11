@@ -135,7 +135,7 @@ narrative-text slip twice in one stage), a different mechanism this fix
 was never meant to touch. Lives on `experiment/repairs-budget-2`, not yet
 merged to the production default.
 
-## Claude Opus 5: a second live model, tested against the same corpus
+## Model selection: Claude Opus 5 vs Sonnet 5
 
 `CAUSALOPS_LIVE_MODEL=opus` wires in Claude Opus 5 (`pricing.py`,
 `live_model.py`) — 2.5x Sonnet 5's per-token rate ($5/$25 vs $2/$10 per
@@ -179,6 +179,14 @@ repair budget than Sonnet's own headline number.
 - Not yet the production default — lives on `experiment/try-opus`
   (`src/causalops/live_model.py`, `pricing.py`), pending a decision on
   whether the cost tradeoff is worth it for this project's purposes.
+
+Three models tried, three different outcomes: Haiku 4.5 (cheaper, collapsed
+to 0/12 — see the `search_runbooks` table above), Sonnet 5 (the production
+default, 9/12), Opus 5 (costlier, 12/12 but with the evidence-starved
+weakness above). No single model is a strict improvement on every axis —
+the choice is a real tradeoff between cost, diagnosis reliability, and
+robustness to low-evidence incidents, not a ladder with one obviously
+correct rung.
 
 ## Cost
 
