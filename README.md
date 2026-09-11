@@ -54,7 +54,7 @@ The central trust boundary, unchanged everywhere in this project:
 | Layer | Technology |
 |---|---|
 | Orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph`, `langchain-core` |
-| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 available for experiments), via `langchain-anthropic` |
+| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 and Opus 5 available for experiments), via `langchain-anthropic` |
 | Retrieval | SQLite FTS5 (production) or [Pinecone](https://www.pinecone.io/) serverless with hosted embeddings (evaluated, not selected — see results) |
 | Validation | [Pydantic v2](https://docs.pydantic.dev/) — every tool argument, policy decision, and evaluation record is a typed, schema-validated model |
 | Hosted API | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn, Google OAuth (`google-auth`) with a server-verified per-owner allowlist |
@@ -250,8 +250,8 @@ export ANTHROPIC_API_KEY="<your key>"
 
 See `.env.example` for every environment variable CausalOps reads, including
 `LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling; defaults
-to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`, defaults to
-Sonnet 5).
+to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`/`opus`,
+defaults to Sonnet 5).
 
 Everything above is local and free. For the separate **hosted API**
 deployment (a real browser-facing sign-in flow, backed by GCP Firestore,
@@ -381,6 +381,23 @@ methodology, raw run IDs, and honest negative results included — in
   *after* gathering evidence instead of blind from the alert was tried and
   reverted: it cost usage reliability (12/12 → 7/12) for an unconfirmed
   relevance benefit.
+- **A real fix for cross-stage `FAILED_SAFE`**: the structured-output repair
+  budget was one credit for the whole investigation, not per stage, so an
+  early formatting slip could leave a later, unrelated stage no margin for
+  its own first mistake. Raising it to two (the design already anticipated
+  this exact split) took a confirming Sonnet 5 batch's `REPAIR_EXHAUSTED`
+  count to zero.
+- **Model selection: Claude Opus 5, tested against the same corpus.**
+  Under the fix above, Opus 5 scored a clean 12/12 diagnosis and 0/12
+  `FAILED_SAFE` at both retrieval backends (FTS5 grounded better than
+  Pinecone for Opus — 8/12 vs 6/12), against Sonnet 5's 9/12 diagnosis —
+  at roughly 2.5x Sonnet's per-token rate. Also found a real, repeatable
+  weakness outside that headline: with zero diagnostic evidence available,
+  Opus reached for a tool that isn't valid at that stage far more often
+  than Sonnet does (8-11/12 vs 1/12) — the more capable model was
+  measurably *more* prone to this specific failure, not less. Sonnet 5
+  remains the production default; Opus 5 is a documented, available
+  alternative (`CAUSALOPS_LIVE_MODEL=opus`).
 
 ## Development
 

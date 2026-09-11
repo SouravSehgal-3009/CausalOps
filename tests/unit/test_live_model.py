@@ -67,6 +67,7 @@ from causalops.models import ModelRequest, Stage
 from causalops.policy import authorize
 from causalops.pricing import (
     CLAUDE_HAIKU_4_5_PRICING,
+    CLAUDE_OPUS_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -111,11 +112,23 @@ def test_resolve_live_model_pricing_selects_haiku_case_insensitively() -> None:
     )
 
 
+def test_resolve_live_model_pricing_selects_opus_case_insensitively() -> None:
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "opus"}) is (
+        CLAUDE_OPUS_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "OPUS"}) is (
+        CLAUDE_OPUS_5_PRICING
+    )
+    assert resolve_live_model_pricing({LIVE_MODEL_VARIABLE: " opus "}) is (
+        CLAUDE_OPUS_5_PRICING
+    )
+
+
 def test_resolve_live_model_pricing_refuses_an_unrecognized_value() -> None:
     """A typo'd model name must never silently fall back to the default --
     that would run (and bill) a different model than the owner asked for."""
-    with pytest.raises(UnknownLiveModel, match="opus"):
-        resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "opus"})
+    with pytest.raises(UnknownLiveModel, match="gpt5"):
+        resolve_live_model_pricing({LIVE_MODEL_VARIABLE: "gpt5"})
 
 
 def test_pricing_for_model_name_recovers_each_known_snapshot() -> None:
@@ -123,6 +136,7 @@ def test_pricing_for_model_name_recovers_each_known_snapshot() -> None:
     assert pricing_for_model_name("claude-haiku-4-5-20251001") is (
         CLAUDE_HAIKU_4_5_PRICING
     )
+    assert pricing_for_model_name("claude-opus-5") is CLAUDE_OPUS_5_PRICING
 
 
 def test_pricing_for_model_name_refuses_an_unknown_name() -> None:

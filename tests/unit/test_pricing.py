@@ -9,6 +9,7 @@ import pytest
 from causalops import pricing
 from causalops.pricing import (
     CLAUDE_HAIKU_4_5_PRICING,
+    CLAUDE_OPUS_5_PRICING,
     CLAUDE_SONNET_5_PRICING,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -172,6 +173,32 @@ def test_claude_haiku_4_5_is_strictly_cheaper_than_sonnet_5_per_token() -> None:
     assert (
         CLAUDE_HAIKU_4_5_PRICING.output_usd_per_million_tokens
         < CLAUDE_SONNET_5_PRICING.output_usd_per_million_tokens
+    )
+
+
+def test_claude_opus_5_pricing_names_a_source_and_a_date() -> None:
+    assert CLAUDE_OPUS_5_PRICING.source.startswith("https://")
+    assert CLAUDE_OPUS_5_PRICING.verified_on
+    assert CLAUDE_OPUS_5_PRICING.model_name == "claude-opus-5"
+    # Confirmed by real live batches completing cleanly with adaptive
+    # thinking on, unlike Haiku 4.5's confirmed `400` rejection above --
+    # see `pricing.py`'s own comment on `CLAUDE_OPUS_5_PRICING`.
+    assert CLAUDE_OPUS_5_PRICING.supports_adaptive_thinking is True
+
+
+def test_claude_opus_5_is_strictly_more_expensive_than_sonnet_5_per_token() -> None:
+    """The opposite motivation from Haiku: this project's `FAILED_SAFE`
+    investigation found the remaining failures look like structured-output
+    formatting slips, not an obvious capability gap -- Opus is offered to
+    test that directly, at a real, meaningfully higher per-token cost, not
+    a same-priced alternative that would tell you nothing new."""
+    assert (
+        CLAUDE_OPUS_5_PRICING.input_usd_per_million_tokens
+        > CLAUDE_SONNET_5_PRICING.input_usd_per_million_tokens
+    )
+    assert (
+        CLAUDE_OPUS_5_PRICING.output_usd_per_million_tokens
+        > CLAUDE_SONNET_5_PRICING.output_usd_per_million_tokens
     )
 
 
