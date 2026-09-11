@@ -285,6 +285,42 @@ def test_a_zero_runbook_search_budget_denies_the_first_proposal(
     assert only_receipt.reason_code is ReasonCode.BUDGET_EXHAUSTED
 
 
+def test_the_default_repair_budget_survives_two_different_stages_failing_once_each(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the real fix: `Budgets.repairs` is a shared
+    credit across the whole run, not reset per stage, so under the old
+    default of 1, a repair spent on an early `hypothesis_update` slip left
+    the later `final_assessment` turn zero margin for its own first
+    mistake -- `REPAIR_EXHAUSTED`, not a wrong diagnosis. This scripts
+    exactly that shape (one invalid response at `hypothesis_update`, a
+    second, independent invalid response at `final_assessment`, each
+    followed by a valid repair) and asserts the run completes under the
+    current default (`Budgets()`, `repairs=2`) instead of failing safe --
+    it would have failed safe under the old default of 1, since the second
+    stage's `may_repair` check would have already seen `repairs_used == 1`."""
+    script = {
+        "initial_plan": [plan_json(proposal=logs_proposal())],
+        "hypothesis_update": [
+            {"hypotheses": []},  # invalid: missing schema_version/proposal/stop_reason
+            update_json(proposal=another_logs_proposal()),
+        ],
+        "final_assessment": [
+            {"disposition": "DIAGNOSED"},  # invalid: missing required fields
+            assessment_json(),
+        ],
+    }
+    model = ReplayToolCallingModel(replay_model(tmp_path, script))
+    registry = logs_only_registry(RecordingLogsBackend())
+
+    result, _ = investigate_via_graph(model, registry=registry)
+
+    report = result.report
+    assert report.disposition is Disposition.DIAGNOSED
+    assert report.repairs_used == 2
+    assert report.invalid_responses == 2
+
+
 def test_a_raising_backend_leaves_a_visible_reserved_receipt_in_the_graph_report() -> (
     None
 ):

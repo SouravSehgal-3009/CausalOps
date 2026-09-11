@@ -137,13 +137,12 @@ CLAUDE_HAIKU_4_5_PRICING = PricingSnapshot(
 
 # Claude Opus 5's standard per-token rate, confirmed via
 # platform.claude.com's own pricing page on the date below -- 2.5x Sonnet
-# 5's rate, not 5x as this project first assumed before checking. Untested
-# against the real API as of `verified_on`: `supports_adaptive_thinking`
-# defaults `True` (matching Sonnet 5) since no confirmed rejection exists
-# for this model the way there is for Haiku 4.5 -- re-check this default
-# against the first real live call before trusting it, the same way
-# Haiku 4.5's `False` above was set only after a confirmed `400
-# invalid_request_error` rather than assumed from documentation.
+# 5's rate, not 5x as this project first assumed before checking.
+# `supports_adaptive_thinking` defaults `True` (matching Sonnet 5): several
+# real live batches against this model completed cleanly with adaptive
+# thinking on and no `400` error, unlike Haiku 4.5's confirmed rejection
+# below -- the default is now confirmed by real usage, not just an
+# assumption pending a first call.
 CLAUDE_OPUS_5_PRICING = PricingSnapshot(
     model_name="claude-opus-5",
     input_usd_per_million_tokens=5.00,

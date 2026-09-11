@@ -180,9 +180,9 @@ def test_claude_opus_5_pricing_names_a_source_and_a_date() -> None:
     assert CLAUDE_OPUS_5_PRICING.source.startswith("https://")
     assert CLAUDE_OPUS_5_PRICING.verified_on
     assert CLAUDE_OPUS_5_PRICING.model_name == "claude-opus-5"
-    # Untested against the real API as of `verified_on` -- unlike Haiku
-    # 4.5's confirmed `False` above, this default is unverified. See
-    # `pricing.py`'s own comment on `CLAUDE_OPUS_5_PRICING`.
+    # Confirmed by real live batches completing cleanly with adaptive
+    # thinking on, unlike Haiku 4.5's confirmed `400` rejection above --
+    # see `pricing.py`'s own comment on `CLAUDE_OPUS_5_PRICING`.
     assert CLAUDE_OPUS_5_PRICING.supports_adaptive_thinking is True
 
 
