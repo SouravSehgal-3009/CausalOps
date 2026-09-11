@@ -54,7 +54,7 @@ The central trust boundary, unchanged everywhere in this project:
 | Layer | Technology |
 |---|---|
 | Orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph`, `langchain-core` |
-| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 available for experiments), via `langchain-anthropic` |
+| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 and Opus 5 available for experiments), via `langchain-anthropic` |
 | Retrieval | SQLite FTS5 (production) or [Pinecone](https://www.pinecone.io/) serverless with hosted embeddings (evaluated, not selected — see results) |
 | Validation | [Pydantic v2](https://docs.pydantic.dev/) — every tool argument, policy decision, and evaluation record is a typed, schema-validated model |
 | Hosted API | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn, Google OAuth (`google-auth`) with a server-verified per-owner allowlist |
