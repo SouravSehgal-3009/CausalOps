@@ -5,30 +5,39 @@ projection or simulation. Run IDs are given so any row can be independently
 checked against `results/evaluations/<id>/`. See the root
 [`README.md`](../README.md) for architecture and setup.
 
-## Headline: evidence-budget curve (FTS5, Claude Sonnet 5, current prompt and budgets)
+## Headline: evidence-budget curve (FTS5, Claude Opus 5 recommended, current prompt and budgets)
 
 12-incident corpus, `causalops-evaluate --executed-tools <N>`, one no-tool
 baseline + one tool-enabled run per incident — the real, current numbers
-under what's actually shipped, not a historical peak.
+under what's actually shipped, not a historical peak. `CAUSALOPS_LIVE_MODEL`
+must be set to `opus` explicitly for these numbers — the code's own
+fallback default without that variable set is still Sonnet 5, shown
+alongside for the cost tradeoff.
 
-| et | Baseline diagnosis | Tool-enabled diagnosis | Correct & grounded | `FAILED_SAFE` | Run ID |
-|---|---:|---:|---:|---:|---|
-| 2 | — | not yet re-verified under the current prompt | — | — | — |
-| 3 | 3/12 | 9/12 | 5/12 | **0/12** | `e4e38fd8...` |
-| 4 | 3/12 | 7/12 | 3/12 | 5/12 | `20f432b0...` |
+| Model | et | Baseline diagnosis | Tool-enabled diagnosis | Correct & grounded | `FAILED_SAFE` | Run ID |
+|---|---|---:|---:|---:|---:|---|
+| **Opus 5** | 3 | 0/12 | **12/12** | **8/12** | **0/12** | `81fe82d2...` |
+| Sonnet 5 | 3 | 3/12 | 9/12 | 5/12 | 0/12 | `e4e38fd8...` |
+| Sonnet 5 | 4 | 3/12 | 7/12 | 3/12 | 5/12 | `20f432b0...` |
 
-- **et=3 is the recommended operating point** — best diagnosis rate, and,
-  as of the repair-budget fix below, zero `FAILED_SAFE`.
-- **History of the et=3 `FAILED_SAFE` number, for the full trail**: 0/12
-  before the runbook-first instruction existed → 2/12 in two batches after
-  it shipped (`4e2f8ec4...`, `40cb6f69...`, both `REPAIR_EXHAUSTED`) → back
-  to 0/12 after root-causing that regression and raising the repair budget
-  (see "The cross-stage repair budget" below for the mechanism). The
-  earlier 8/12-9/12 diagnosis range collapses to a single, current 9/12 now
-  that the fix is in — reported as one number, not averaged away.
+- **et=3 is the recommended operating point** for either model — best
+  diagnosis rate, and, as of the repair-budget fix below, zero
+  `FAILED_SAFE` on Sonnet 5 and zero on Opus 5's tool-enabled arm.
+- **History of the et=3 `FAILED_SAFE` number (Sonnet 5), for the full
+  trail**: 0/12 before the runbook-first instruction existed → 2/12 in two
+  batches after it shipped (`4e2f8ec4...`, `40cb6f69...`, both
+  `REPAIR_EXHAUSTED`) → back to 0/12 after root-causing that regression and
+  raising the repair budget (see "The cross-stage repair budget" below for
+  the mechanism). The earlier 8/12-9/12 diagnosis range collapses to a
+  single, current 9/12 now that the fix is in — reported as one number,
+  not averaged away.
 - et=4's `FAILED_SAFE` runs trace to the same mechanism the fix below
   targets, but haven't been re-measured at et=4 since it landed — still
-  open at that operating point specifically.
+  open at that operating point specifically, and not yet run for Opus 5
+  either.
+- Opus 5's `no_tool_baseline` diagnosis (0/12, all but one run
+  `MODEL_OUTPUT_INVALID`) is a real, repeatable weakness, not a typo — see
+  "Model selection" below for the mechanism.
 - A real bug was found and fixed via earlier runs, not code review:
   `query_logs`'s `row_limit` schema didn't state the real 40-row policy
   limit, so the model's default guess (50) drew a policy denial in 21 of
@@ -114,7 +123,7 @@ Usage isn't the same question as impact. Two more real, live checks:
   guaranteed compliance for an unconfirmed benefit — reverted back to
   "must be first."
 
-## The cross-stage repair budget: a real fix, not yet the production default
+## The cross-stage repair budget: a real fix, now shipped
 
 `Budgets.repairs` (the structured-output-retry allowance) defaulted to 1 for
 the whole investigation, cumulative across stages, not reset per stage. A
@@ -130,8 +139,8 @@ at `et=3` under the new default scored 9/12 diagnosis, 5/12 grounded, with
 `REPAIR_EXHAUSTED` at zero — the 2 remaining `FAILED_SAFE` cases were both
 same-stage double-failures (a dropped required field, or the same
 narrative-text slip twice in one stage), a different mechanism this fix
-was never meant to touch. Lives on `experiment/repairs-budget-2`, not yet
-merged to the production default.
+was never meant to touch. Merged and shipped — `Budgets.repairs` defaults
+to 2 for every model, not conditional on which one is selected.
 
 ## Model selection: Claude Opus 5 vs Sonnet 5
 
@@ -174,17 +183,18 @@ repair budget than Sonnet's own headline number.
   real, decisive, counterintuitive finding: the more capable model is
   measurably *more* prone to this specific failure when evidence-starved,
   not less.
-- Not yet the production default — lives on `experiment/try-opus`
-  (`src/causalops/live_model.py`, `pricing.py`), pending a decision on
-  whether the cost tradeoff is worth it for this project's purposes.
+- **Opus 5 is the recommended model** (`CAUSALOPS_LIVE_MODEL=opus`) given
+  this scorecard. The code's own fallback default, when that variable is
+  unset, stays Sonnet 5 — a deliberate cost-safety choice, not an
+  endorsement that Sonnet scores better.
 
 Three models tried, three different outcomes: Haiku 4.5 (cheaper, collapsed
-to 0/12 — see the `search_runbooks` table above), Sonnet 5 (the production
-default, 9/12), Opus 5 (costlier, 12/12 but with the evidence-starved
-weakness above). No single model is a strict improvement on every axis —
-the choice is a real tradeoff between cost, diagnosis reliability, and
-robustness to low-evidence incidents, not a ladder with one obviously
-correct rung.
+to 0/12 — see the `search_runbooks` table above), Sonnet 5 (the code's
+fallback default, 9/12, cheapest of the two viable options), Opus 5
+(recommended, 12/12, costlier, with the evidence-starved weakness above).
+No single model is a strict improvement on every axis — the choice is a
+real tradeoff between cost, diagnosis reliability, and robustness to
+low-evidence incidents, not a ladder with one obviously correct rung.
 
 ## Cost
 

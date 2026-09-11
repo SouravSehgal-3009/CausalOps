@@ -3,20 +3,21 @@
 ## Executive summary
 
 > CausalOps is a policy-governed agentic incident investigator that improved
-> diagnosis correctness from 3/12 without tools to 9/12 with three bounded
-> diagnostic checks, holding grounded-citation correctness at 5/12 with
-> zero failed-safe runs.
+> diagnosis correctness from 3/12 without tools to 12/12 with three bounded
+> diagnostic checks (Claude Opus 5), holding grounded-citation correctness
+> at 8/12 with zero failed-safe runs.
 
 That result is measured against a fixed, evaluator-hidden 12-incident
 synthetic corpus — a small sample from a local synthetic lab, not a
-production benchmark, and it's the current, real number under what's
-actually shipped today, not a historical best. See
-[`docs/RESULTS.md`](docs/RESULTS.md) for the full scorecard, every real
-live-model run this project has made — including a real regression that
-was found, root-caused, and fixed rather than smoothed over — and what
-each number does and doesn't establish. A second live model, Claude
-Opus 5, was also tested against the same corpus and scored a clean 12/12
-at roughly 2.5x the cost — see "Model selection" in that same file.
+production benchmark. See [`docs/RESULTS.md`](docs/RESULTS.md) for the
+full scorecard, every real live-model run this project has made —
+including a real regression that was found, root-caused, and fixed rather
+than smoothed over — and what each number does and doesn't establish.
+Claude Sonnet 5 was the original default and remains available at roughly
+2.5x lower cost (9/12 diagnosis, 5/12 grounded) — see "Model selection" in
+that same file for the full tradeoff. Set `CAUSALOPS_LIVE_MODEL=opus` to
+use Opus 5; the code's own fallback without that variable set is still
+Sonnet 5, for cost-safety by default.
 
 ```mermaid
 flowchart TD
@@ -56,7 +57,7 @@ The central trust boundary, unchanged everywhere in this project:
 | Layer | Technology |
 |---|---|
 | Orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph`, `langchain-core` |
-| Model | Claude (Anthropic API — Sonnet 5 in production; Haiku 4.5 and Opus 5 available for experiments), via `langchain-anthropic` |
+| Model | Claude (Anthropic API — Opus 5 recommended; Sonnet 5 the code's cheaper default fallback; Haiku 4.5 tested and ruled out), via `langchain-anthropic` |
 | Retrieval | SQLite FTS5 (production) or [Pinecone](https://www.pinecone.io/) serverless with hosted embeddings (evaluated, not selected — see results) |
 | Validation | [Pydantic v2](https://docs.pydantic.dev/) — every tool argument, policy decision, and evaluation record is a typed, schema-validated model |
 | Hosted API | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn, Google OAuth (`google-auth`) with a server-verified per-owner allowlist |
@@ -252,8 +253,9 @@ export ANTHROPIC_API_KEY="<your key>"
 
 See `.env.example` for every environment variable CausalOps reads, including
 `LIVE_EVALUATION_MAX_USD` (the application-wide live-spend ceiling; defaults
-to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`/`opus`,
-defaults to Sonnet 5).
+to 5.00 if unset) and `CAUSALOPS_LIVE_MODEL` (`sonnet`/`haiku`/`opus`;
+defaults to Sonnet 5 if unset — set to `opus` for the recommended, better-
+scoring model at roughly 2.5x the cost).
 
 Everything above is local and free. For the separate **hosted API**
 deployment (a real browser-facing sign-in flow, backed by GCP Firestore,
@@ -300,8 +302,10 @@ run is never accidental:
 # Replay mode: no network call, zero cost, deterministic fixture playback.
 uv run causalops investigate <incident-id> --model replay
 
-# Live mode: a real, billed request to Anthropic (claude-sonnet-5),
-# reserved and settled against LIVE_EVALUATION_MAX_USD.
+# Live mode: a real, billed request to Anthropic (claude-sonnet-5 by
+# default; set CAUSALOPS_LIVE_MODEL=opus for the recommended, better-
+# scoring model at roughly 2.5x the cost), reserved and settled against
+# LIVE_EVALUATION_MAX_USD.
 uv run causalops investigate <incident-id> --model claude
 ```
 
@@ -360,9 +364,11 @@ project has run against the real live model, is documented in full —
 methodology, raw run IDs, and honest negative results included — in
 [`docs/RESULTS.md`](docs/RESULTS.md). Highlights:
 
-- **9/12 correct diagnoses, 5/12 fully grounded, 0/12 failed-safe**, at the
-  recommended `executed_tools=3` operating point — the current headline
-  result, after the repair-budget fix below.
+- **12/12 correct diagnoses, 8/12 fully grounded, 0/12 failed-safe**
+  (Claude Opus 5), at the recommended `executed_tools=3` operating point —
+  the current headline result, after the repair-budget fix below. Claude
+  Sonnet 5 scores 9/12 diagnosis, 5/12 grounded at roughly 2.5x lower cost —
+  see "Model selection" below for the full tradeoff.
 - **A real mechanical bug found and fixed via live evaluation**: 21 policy
   denials across 36 tool-enabled runs, traced to a schema/budget mismatch,
   eliminated to 0/36 after the fix.
@@ -389,17 +395,18 @@ methodology, raw run IDs, and honest negative results included — in
   its own first mistake. Raising it to two (the design already anticipated
   this exact split) took a confirming Sonnet 5 batch's `REPAIR_EXHAUSTED`
   count to zero.
-- **Model selection: Claude Opus 5, tested against the same corpus.**
-  Under the fix above, Opus 5 scored a clean 12/12 diagnosis and 0/12
-  `FAILED_SAFE` at both retrieval backends (FTS5 grounded better than
-  Pinecone for Opus — 8/12 vs 6/12), against Sonnet 5's 9/12 diagnosis —
-  at roughly 2.5x Sonnet's per-token rate. Also found a real, repeatable
+- **Model selection: Claude Opus 5 vs Sonnet 5, tested against the same
+  corpus.** Under the fix above, Opus 5 scored a clean 12/12 diagnosis and
+  0/12 `FAILED_SAFE` at both retrieval backends (FTS5 grounded best for
+  Opus — 8/12 vs Pinecone's 6/12), against Sonnet 5's 9/12 diagnosis — at
+  roughly 2.5x Sonnet's per-token rate. Also found a real, repeatable
   weakness outside that headline: with zero diagnostic evidence available,
   Opus reached for a tool that isn't valid at that stage far more often
   than Sonnet does (8-11/12 vs 1/12) — the more capable model was
-  measurably *more* prone to this specific failure, not less. Sonnet 5
-  remains the production default; Opus 5 is a documented, available
-  alternative (`CAUSALOPS_LIVE_MODEL=opus`).
+  measurably *more* prone to this specific failure, not less. Opus 5 is
+  the recommended model (`CAUSALOPS_LIVE_MODEL=opus`); Sonnet 5 stays the
+  code's own fallback default when that variable is unset, for
+  cost-safety by default.
 
 ## Development
 
